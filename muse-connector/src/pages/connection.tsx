@@ -1,6 +1,7 @@
 import { useLanguage, type Translate } from "@/lib/i18n";
 import { useEffect, useRef, useState } from "react";
 import { ExternalLink, RefreshCw, Save } from "lucide-react";
+import { toast } from "sonner";
 import { Card, CardHeader, CardTitle, CardDescription, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -10,6 +11,8 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectGroup, SelectI
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
 import { Notice, type Confirmation } from "@/components/feedback";
+import DeviceNameField from "@/components/device-name-field";
+import type { DeviceNameModel } from "@/lib/use-device-name";
 import { providerLabels, type BridgeModel, type ProviderKind, type ProviderSettings } from "@/lib/use-bridge";
 
 const normalize = (v: ProviderSettings): ProviderSettings => ({ kind: v.kind, tunnel_id: v.kind === "cloudflare_named" ? v.tunnel_id.trim() : "", hostname: v.kind === "cloudflare_named" ? v.hostname.trim() : "" });
@@ -22,8 +25,11 @@ function validate(t: Translate, v: ProviderSettings) {
   if (host.length > 253 || !host.includes(".") || !host.split(".").every(part => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(part))) errors.hostname = t("填写有效域名，不含协议、端口或路径。");
   return errors;
 }
-export default function Connection({ bridge, confirm, guideVisible, guiding, onDirtyChange, onStartGuide }: {
+export default function Connection({ bridge, deviceName, museSetupComplete, museSetupReady, confirm, guideVisible, guiding, onDirtyChange, onStartGuide }: {
   bridge: BridgeModel;
+  deviceName: DeviceNameModel;
+  museSetupComplete: boolean;
+  museSetupReady: boolean;
   confirm: (value: Confirmation) => void;
   guideVisible: boolean;
   guiding: boolean;
@@ -59,6 +65,24 @@ export default function Connection({ bridge, confirm, guideVisible, guiding, onD
   const refreshTunnels = async () => { const result = await command("list"); if (result.ok) { setTunnels(result.data.tunnels ?? []); setAuthorized(true); } };
   return <div className="page-stack">
     {development ? <Notice title={t("开发隔离模式")}>{t("提供方切换只修改开发配置并使用模拟连接。真实登录、隧道创建、DNS 和公网测试已禁用。")}</Notice> : null}
+    {!guiding && (!s.fresh_setup || s.access_configured) ? <Card><CardContent className="flex flex-col gap-4">
+      <DeviceNameField id="connection-device-name" deviceName={deviceName} />
+      {deviceName.pending ? <div className="flex flex-col gap-2">
+        <p role="status" className="text-sm">{t("待在 Muse 中更新")}</p>
+        <p className="text-caption text-muted-foreground">{t(deviceName.copyRename ? "复制说明并粘贴给 Muse，改名确认后会自动清除这条状态。" : "恢复公网连接后可复制改名说明。")}</p>
+        {deviceName.manualCopy ? <textarea aria-label={t("改名说明")} readOnly rows={4}
+          className="w-full rounded-md border bg-muted p-2 text-caption" value={deviceName.manualCopy} onFocus={event => event.currentTarget.select()} /> : null}
+        <div className="flex flex-wrap gap-2">
+          <Button type="button" size="sm" disabled={!deviceName.copyRename} onClick={() => void deviceName.copyRename?.().then(ok => {
+            if (ok) toast.success(t("改名说明已复制，请粘贴给 Muse。"));
+          })}>{t("复制改名说明")}</Button>
+          <Button type="button" size="sm" variant="outline" disabled={!!busy} onClick={() => void deviceName.confirmUpdate()}>{t("我已在 Muse 更新")}</Button>
+        </div>
+      </div> : deviceName.canCopy ? <div className="flex flex-wrap items-center gap-2">
+        <p role="status" className="text-caption text-muted-foreground">{t("已保存 · {0}", deviceName.saved)}</p>
+        {!museSetupComplete ? <Button size="sm" variant="outline" onClick={onStartGuide}>{t(museSetupReady ? "继续接入 Muse" : "继续配置")}</Button> : null}
+      </div> : null}
+    </CardContent></Card> : null}
     <Card>
       <CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-2"><CardTitle>{t("连接方式")}</CardTitle>{dirty ? <Badge variant="outline">{t("未应用更改")}</Badge> : null}</div>{!guideVisible ? <Button size="sm" variant="outline" onClick={onStartGuide}>{s.fresh_setup ? t("开始引导") : t("配置指引")}</Button> : null}</div><CardDescription>{t("当前生效：{0}", t(providerLabels[current.kind]))}{current.kind === "cloudflare_named" ? " · " + current.hostname : ""}</CardDescription></CardHeader>
       <CardContent><form noValidate className="flex flex-col gap-6" onSubmit={event => {

@@ -114,8 +114,23 @@ export function agentTrial(t: Translate, policy: FileAccessPolicy | null, prefer
   };
 }
 
-export function connectorBrief(language: Language, origin: string, trialInstruction: string) {
-  if (language === "en") return `Set up a Custom Connector named “Muse Local Files”. Its HTTPS base URL is ${origin} and its API prefix is /agent/v1.
+export function deviceRenameBrief(language: Language, origin: string, deviceName: string, id: string) {
+  const endpoint = `${origin}/agent/v1/device-name/confirm`;
+  const body = JSON.stringify({ update_id: id });
+  if (language === "en") return `Find my existing Custom Connector for ${origin}. Rename it to “Muse Local Files - ${deviceName}” and use “${deviceName}” as the device name in its instructions. Keep its existing endpoint, tools, and credentials. If you cannot identify or update that connector, stop and tell me.
+After the change succeeds, use this connector's existing dedicated credential to send POST ${endpoint} with Content-Type: application/json and body ${body}. If the confirmation fails, report the HTTP status and error.`;
+  return `请找到 HTTPS 地址为 ${origin} 的现有 Custom Connector，把显示名称更新为「Muse 本机文件 - ${deviceName}」，并把连接器指令中的设备名称更新为「${deviceName}」。沿用原有地址、工具和专用凭证。如果无法确定连接器或无法修改，请停下来告诉我。
+改名成功后，请使用该连接器已有的专用凭证发送 POST ${endpoint}，Content-Type 为 application/json，请求体为 ${body}。回执失败时，请告诉我实际 HTTP 状态码和错误。`;
+}
+
+export function connectorBrief(language: Language, origin: string, trialInstruction: string, deviceName: string) {
+  if (language === "en") {
+    const introduction = deviceName
+      ? `Set up a Custom Connector for the device “${deviceName}”, named “Muse Local Files - ${deviceName}”. Its HTTPS base URL is ${origin} and its API prefix is /agent/v1.
+Confirm the device name with me before creating or renaming the connector. If a connector already uses this URL, update its display name. If the requested name exists for a different URL, ask me to choose a distinct name before proceeding.
+This connector serves only “${deviceName}”. Ask me which device to use if I haven't specified one or the name is ambiguous. If I name this device, use only this connector. If it is unavailable, report that and don't switch to a different device. Use this connector for the setup test below.`
+      : `Set up a Custom Connector named “Muse Local Files”. Its HTTPS base URL is ${origin} and its API prefix is /agent/v1.`;
+    return `${introduction}
 Use a security card to collect the dedicated agent-token. Send Authorization: Bearer <token> on each request. Store it separately and use it only for requests to ${origin}/agent/v1/. Show only the results in the conversation.
 
 The API returns JSON. Send Content-Type: application/json for POST requests and URL-encode GET query parameters. Use the authorized alias as root and the relative path within it as path.
@@ -129,8 +144,14 @@ The API returns JSON. Send Content-Type: application/json for POST requests and 
 - POST /agent/v1/mkdir accepts {"root":"alias","path":"relative folder"}. Create folders only at my explicit request.
 
 Verify the connector once setup is complete. ${trialInstruction} If a request fails, report the endpoint, HTTP status, and actual error.`;
+  }
 
-  return `请配置一个名为「Muse 本机文件」的 Custom Connector。HTTPS 地址为 ${origin}，接口前缀为 /agent/v1。
+  const introduction = deviceName
+    ? `请为设备「${deviceName}」配置名为「Muse 本机文件 - ${deviceName}」的 Custom Connector。HTTPS 地址为 ${origin}，接口前缀为 /agent/v1。
+创建或改名前请向我确认设备名称。若此地址已有连接器，请更新它的显示名称。若同名连接器指向其他地址，请先让我选择一个不同的名称。
+此连接器只对应设备「${deviceName}」。若我没有指定设备，或名称有歧义，请先问我要用哪台。点名这台设备时，只使用此连接器。若设备不可用，请报告情况，不要自动换到其他设备。下方的接入试用请使用此连接器。`
+    : `请配置一个名为「Muse 本机文件」的 Custom Connector。HTTPS 地址为 ${origin}，接口前缀为 /agent/v1。`;
+  return `${introduction}
 请用安全卡片收集此连接专用的 agent-token，每次请求发送 Authorization: Bearer <令牌>。使用独立的凭证项，只在请求 ${origin}/agent/v1/ 下的接口时使用。对话中只显示调用结果。
 
 接口返回 JSON。POST 请求发送 Content-Type: application/json。GET 查询参数需做 URL 编码。各路径使用授权别名 root 与该别名内的相对路径 path。
