@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="README.md">简体中文</a> · <a href="README.en.md">English</a> ·
+  <a href="https://github.com/Aenvo/MuseLink/releases/latest">Download latest</a> ·
   <a href="#quick-start">Quick start</a> · <a href="#build-from-source">Build from source</a>
 </p>
 
@@ -49,9 +50,20 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | Dedicated token | Generate, copy, rotate, or revoke the Muse token in **File Access**. |
 | Desktop controls | Check connection status and access logs, pause or start the connection from the app or tray, and switch between English and Simplified Chinese. |
 
+## Download and install
+
+Choose a Windows x64 build from [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest). Both builds require WebView2.
+
+| Build | Download and launch |
+| --- | --- |
+| Portable | Download `MuseLink-<version>-windows-x64-portable.zip`, extract the entire archive, and run `muse-connector.exe`. |
+| Installer | Download `MuseLink-<version>-windows-x64-setup.exe` and run the installer. |
+
+Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executable and installer are unsigned, so Windows may show an unknown publisher prompt.
+
 ## Quick start
 
-MuseLink is currently available as a source build. Follow [the build steps](#build-from-source) to make a Windows installer, then launch the app. For the default connection method, install [Tailscale for Windows](https://tailscale.com/download/windows) and sign in.
+For the default connection method, install [Tailscale for Windows](https://tailscale.com/download/windows) and sign in.
 
 1. On **Overview**, select **Start setup**.
 2. Choose the folders or drives to authorize. All available local fixed drives are selected by default in drive mode. Open the menu to narrow the selection.

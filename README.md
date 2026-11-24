@@ -10,6 +10,7 @@
 
 <p align="center">
   <a href="README.md">简体中文</a> · <a href="README.en.md">English</a> ·
+  <a href="https://github.com/Aenvo/MuseLink/releases/latest">下载最新版</a> ·
   <a href="#使用指南">使用指南</a> · <a href="#从源码构建">源码构建</a>
 </p>
 
@@ -49,9 +50,20 @@
 | 专用凭证 | 在「文件权限」生成、复制、轮换或撤销 Muse 专用令牌。 |
 | 桌面管理 | 查看连接状态和文件访问日志，从应用或托盘启停连接，切换简体中文或 English。 |
 
+## 下载与安装
+
+在 [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) 选择 Windows x64 版本。两种版本都需要 WebView2。
+
+| 版本 | 下载与启动 |
+| --- | --- |
+| 免安装版 | 下载 `MuseLink-<version>-windows-x64-portable.zip`，完整解压后运行 `muse-connector.exe`。 |
+| 安装版 | 下载 `MuseLink-<version>-windows-x64-setup.exe`，运行安装程序。 |
+
+可用同一 Release 中的 `SHA256SUMS.txt` 校验下载文件。MuseLink 主程序及安装包尚未进行代码签名，Windows 可能提示未知发布者。
+
 ## 使用指南
 
-MuseLink 目前提供源码构建。按[构建步骤](#从源码构建)生成 Windows 安装包后启动应用。默认方式需要安装 [Tailscale for Windows](https://tailscale.com/download/windows) 并登录。
+默认连接方式需要安装 [Tailscale for Windows](https://tailscale.com/download/windows) 并登录。
 
 1. 在「概览」点击「开始引导」。
 2. 选择要授权的文件夹或磁盘。磁盘模式默认选中所有可用的本机固定磁盘，展开下拉框即可调整。

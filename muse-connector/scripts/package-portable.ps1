@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$project = Split-Path -Parent $PSScriptRoot
+$notices = Join-Path (Split-Path -Parent $project) 'THIRD_PARTY_NOTICES.md'
 $connector = Get-Item -LiteralPath $ConnectorExe
 if ($connector.PSIsContainer -or $connector.Extension -ne '.exe') {
     throw 'ConnectorExe must be a built Windows executable.'
@@ -53,7 +55,6 @@ Invoke-WebRequest -Uri 'https://raw.githubusercontent.com/voidtools/ES/main/LICE
 Copy-Item -LiteralPath $connector.FullName -Destination (Join-Path $stage 'muse-connector.exe')
 
 if ($NsisDestination) {
-    $project = Split-Path -Parent $PSScriptRoot
     $tauri = Join-Path $project 'src-tauri'
     $targetRelative = 'target/muse-nsis-' + [Guid]::NewGuid().ToString('N')
     $target = Join-Path $tauri $targetRelative
@@ -63,6 +64,8 @@ if ($NsisDestination) {
     Get-ChildItem -LiteralPath $vendor -File | ForEach-Object {
         $resources["$targetRelative/everything/$($_.Name)"] = "everything/$($_.Name)"
     }
+    Copy-Item -LiteralPath $notices -Destination $target
+    $resources["$targetRelative/THIRD_PARTY_NOTICES.md"] = 'THIRD_PARTY_NOTICES.md'
     $release = Join-Path $target 'release'
     $null = [IO.Directory]::CreateDirectory($release)
     Copy-Item -LiteralPath $connector.FullName -Destination (Join-Path $release 'muse-connector.exe')
@@ -92,4 +95,5 @@ $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $destinationPath))
 $null = [IO.Directory]::CreateDirectory($destinationPath)
 Copy-Item -LiteralPath (Join-Path $stage 'muse-connector.exe') -Destination $destinationPath
 Copy-Item -LiteralPath $vendor -Destination $destinationPath -Recurse
+Copy-Item -LiteralPath $notices -Destination $destinationPath
 Get-Item -LiteralPath $destinationPath
