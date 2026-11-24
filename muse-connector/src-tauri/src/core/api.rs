@@ -1866,45 +1866,77 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn link_fixture(e: &Env) -> PathBuf {
+        let outside = e.root.parent().unwrap().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel.txt"), "outside").unwrap();
+        outside
+    }
+
+    /// 重解析点必须被授权闸门挡住：读取与写入都不得触及根外文件。
+    #[cfg(windows)]
+    async fn assert_link_rejected(e: &Env, kind: &str, outside: &Path) {
+        let uri = format!("/api/read?root=r&path={kind}%2fsentinel.txt");
+        let (code, body, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
+        assert_eq!(code, 400, "{kind} 读取未被拒绝");
+        assert_eq!(body["error"], "path escapes root", "{kind}");
+        let body =
+            json!({"root":"r","path":format!("{kind}/sentinel.txt"),"content":"changed"})
+                .to_string();
+        let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
+        assert_eq!(code, 400, "{kind} 写入未被拒绝");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "outside",
+            "{kind} 改写了根外文件"
+        );
+    }
+
+    /// 目录联接不要求管理员权限，创建失败即真实失败，不能算作通过。
+    #[cfg(windows)]
     #[tokio::test]
     async fn junction_escape() {
         use std::os::windows::process::CommandExt;
         let e = setup(false, default_opts());
-        let outside = e.root.parent().unwrap().join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("sentinel.txt"), "outside").unwrap();
-        for kind in ["junction", "symlink"] {
-            let link = e.root.join(kind);
-            if kind == "junction" {
-                let status = std::process::Command::new("cmd.exe")
-                    .creation_flags(0x08000000)
-                    .args(["/D", "/C", "mklink", "/J"])
-                    .arg(&link)
-                    .arg(&outside)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .unwrap();
-                assert!(status.success(), "目录联接未创建，不能将攻击矩阵判为通过");
-            } else {
-                std::os::windows::fs::symlink_dir(&outside, &link)
-                    .expect("符号链接未创建，该覆盖项未通过");
-            }
-            let uri = format!("/api/read?root=r&path={kind}%2fsentinel.txt");
-            let (code, body, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
-            assert_eq!(code, 400);
-            assert_eq!(body["error"], "path escapes root");
-            let body =
-                json!({"root":"r","path":format!("{kind}/sentinel.txt"),"content":"changed"})
-                    .to_string();
-            let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
-            assert_eq!(code, 400);
-            assert_eq!(
-                std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
-                "outside"
+        let outside = link_fixture(&e);
+        let link = e.root.join("junction");
+        let status = std::process::Command::new("cmd.exe")
+            .creation_flags(0x08000000)
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "目录联接未创建，不能将攻击矩阵判为通过");
+        assert_link_rejected(&e, "junction", &outside).await;
+        std::fs::remove_dir(&link).unwrap();
+    }
+
+    /// 符号链接需要 SeCreateSymbolicLinkPrivilege（管理员或开发者模式）。
+    /// 缺权限时本机标为未覆盖；设置 `MUSE_CONNECTOR_REQUIRE_SYMLINK_TESTS=1` 时改为失败，
+    /// 供 CI 断言该用例确实执行，避免把跳过当成通过。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn symlink_escape() {
+        let e = setup(false, default_opts());
+        let outside = link_fixture(&e);
+        let link = e.root.join("symlink");
+        if let Err(error) = std::os::windows::fs::symlink_dir(&outside, &link) {
+            assert!(
+                matches!(error.raw_os_error(), Some(5 | 1314)),
+                "符号链接创建失败且不是权限原因，不能将攻击矩阵判为通过: {error:?}"
             );
-            std::fs::remove_dir(link).unwrap();
+            assert!(
+                std::env::var_os("MUSE_CONNECTOR_REQUIRE_SYMLINK_TESTS").is_none(),
+                "当前环境缺少创建符号链接的权限，symlink_escape 未覆盖: {error:?}"
+            );
+            eprintln!("symlink_escape 未覆盖：环境不允许创建符号链接（{error:?}）");
+            return;
         }
+        assert_link_rejected(&e, "symlink", &outside).await;
+        std::fs::remove_dir(&link).unwrap();
     }
 
     // ---- 读写功能矩阵 ----
