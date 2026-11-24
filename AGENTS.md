@@ -17,10 +17,10 @@ CI 工作流 `.github/workflows/windows.yml` 使用 runner 预装的 Node 22、p
 | Rust 测试 | `cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked` | 执行 | 执行 | — |
 | TCP 契约 `tcp_contract` | 含在上面的 Rust 测试内 | 执行 | 执行 | — |
 | `junction_escape` | 含在上面的 Rust 测试内 | 执行 | 执行（`mklink /J` 不需提权） | — |
-| `symlink_escape` | 含在上面的 Rust 测试内 | 执行（工作流启用开发者模式并设置 `MUSE_CONNECTOR_REQUIRE_SYMLINK_TESTS=1`） | 缺权限时输出「未覆盖」并跳过 | 执行 |
+| `symlink_escape` | 含在上面的 Rust 测试内 | 执行（工作流启用开发者模式并设置 `MUSE_CONNECTOR_REQUIRE_SYMLINK_TESTS=1`） | 开发者模式开启时执行；否则标记未覆盖 | 执行 |
 | Everything 文件名 IPC `official_named_ipc_…` | `MUSE_CONNECTOR_EVERYTHING_QA=<官方二进制目录> cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked -- --ignored` | 不执行 | 执行（2026-11-24 已通过） | — |
 | Everything NTFS 全卷 `official_ntfs_…` | 同上，另需 `MUSE_CONNECTOR_NTFS_QA_DIRS=<每块固定盘一个可写目录>` 且 Everything Service 运行中 | 不执行 | 不执行 | 执行 |
 | 真实隧道与 Muse 端到端 | 人工验收 | 不执行 | 不执行 | 人工 |
 
-- `symlink_escape` 在缺少 `SeCreateSymbolicLinkPrivilege`（错误码 5 或 1314）时只标记未覆盖。CI 通过环境变量把跳过转为失败，避免把「没跑」当成「通过」。
+- `symlink_escape` 在缺少 `SeCreateSymbolicLinkPrivilege`（错误码 5 或 1314）时只标记未覆盖；开启 Windows 开发者模式后，非管理员账户也能真实执行。CI 通过环境变量把跳过转为失败，避免把「没跑」当成「通过」。
 - 两个 Everything 用例都标记为 `#[ignore]`，需要官方 `Everything.exe` 与 `es.exe`（版本与 SHA256 见 `muse-connector/scripts/package-portable.ps1`）。NTFS 用例还会启动命名实例对每块固定盘做全卷索引，在开发者工作机上 I/O 开销过大，因此只在专用环境执行。
