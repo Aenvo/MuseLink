@@ -4,6 +4,8 @@
 //!   2. 保留设备名 / ADS / 尾部点空格 / 根内 `..` 一律 400（原版为连接重置或静默别名）
 //!   3. 逃逸出根的 `..` 报 "path escapes root"（错误串与原版一致）
 //!   4. 拒绝非字符串 content 与无效 base64；合法 ASCII 空白仍可解码
+//!   5. 写入请求体按 Base64 编码后的长度放行，再以解码后 10 MiB 兜底；
+//!      原版按解码前的接近 10 MiB 截断，使合法的满额二进制写入提前失败
 //!
 //! 与 Python 版的行为对齐说明（经 11-17 攻击矩阵实测比对）：
 //! - 401/403/404/413/429 与各端点成功响应体逐字段一致；
@@ -44,6 +46,8 @@ pub const LIST_MAX_ENTRIES: usize = 5000;
 pub const RATE_LIMIT: u64 = 1000;
 pub const RATE_WINDOW_SECS: u64 = 60;
 const MAX_SEARCH_REQUEST_BYTES: usize = 8 * 1024;
+/// 不携带内容的 POST（建目录、轮换令牌）只放行元数据。
+const MAX_METADATA_REQUEST_BYTES: usize = 32 * 1024;
 
 // ---------- 路径集合 ----------
 
@@ -998,13 +1002,31 @@ async fn post_failure(
     .await
 }
 
-/// POST 公共前置：鉴权（仅失败时计入限流）→ 体积检查 → JSON 解析。
+/// 不携带内容的 POST 前置：鉴权（仅失败时计入限流）→ 元数据体积检查 → JSON 解析。
 async fn post_gate(
     s: &ApiState,
     parts: &axum::http::request::Parts,
     body: Body,
 ) -> Result<Value, Response> {
-    post_gate_limited(s, parts, body, s.options().max_write as usize + 4096).await
+    post_gate_limited(s, parts, body, MAX_METADATA_REQUEST_BYTES).await
+}
+
+/// 写入路由的请求体上限：按解码后的上限反推 Base64 长度，再留出 JSON 元数据余量。
+/// Base64 把 3 字节编码成 4 字节，所以 10 MiB 内容在请求体里约占 13.3 MiB。
+fn encoded_write_limit(max_write: u64) -> usize {
+    let encoded = max_write.saturating_add(2) / 3;
+    usize::try_from(encoded.saturating_mul(4))
+        .unwrap_or(usize::MAX)
+        .saturating_add(MAX_METADATA_REQUEST_BYTES)
+}
+
+/// 写入专用前置：体积检查放行编码后的满额内容，解码后的 10 MiB 上限仍单独校验。
+async fn write_gate(
+    s: &ApiState,
+    parts: &axum::http::request::Parts,
+    body: Body,
+) -> Result<Value, Response> {
+    post_gate_limited(s, parts, body, encoded_write_limit(s.options().max_write)).await
 }
 
 async fn post_gate_limited(
@@ -1226,7 +1248,7 @@ fn resolve_file_request(
 
 async fn write_ep(State(s): State<ApiState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body_json = match post_gate(&s, &parts, body).await {
+    let body_json = match write_gate(&s, &parts, body).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -2197,22 +2219,26 @@ mod tests {
 
     #[tokio::test]
     async fn size_limits() {
-        // content 超限
         let opts = ApiOptions {
             max_write: 1024,
             ..default_opts()
         };
         let e = setup(false, opts);
+        // content 解码后超限；请求体本身仍在编码后上限内
         let big = "x".repeat(2000);
         let body = json!({"root":"r","path":"big.txt","content":big}).to_string();
         let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
         assert_eq!(c, 413);
         assert_eq!(v["error"], "content too large");
-        // 原始 payload 超限（> max + 4096）
-        let huge = json!({"root":"r","path":"big.txt","content":"y".repeat(6000)}).to_string();
+        assert!(!e.root.join("big.txt").exists());
+        // 原始 payload 超出编码后上限（max_write 的 Base64 长度 + 元数据余量）
+        let limit = encoded_write_limit(1024);
+        let huge = json!({"root":"r","path":"big.txt","content":"y".repeat(limit)}).to_string();
+        assert!(huge.len() > limit);
         let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &huge).await;
         assert_eq!(c, 413);
         assert_eq!(v["error"], "payload too large");
+        assert!(!e.root.join("big.txt").exists());
 
         // 读超限
         let opts = ApiOptions {
@@ -2237,6 +2263,144 @@ mod tests {
         .await;
         assert_eq!(c, 413);
         assert_eq!(v["error"], "file too large (3000 bytes)");
+    }
+
+    #[test]
+    fn write_envelope_covers_base64_and_metadata() {
+        // 10 MiB 恰好编码成 13,981,016 字节，再加 32 KiB 元数据余量
+        assert_eq!(
+            B64.encode(vec![0u8; MAX_WRITE_BYTES as usize]).len(),
+            13_981_016
+        );
+        assert_eq!(encoded_write_limit(MAX_WRITE_BYTES), 14_013_784);
+        assert_eq!(encoded_write_limit(0), MAX_METADATA_REQUEST_BYTES);
+        // 3 字节 -> 4 个字符，向上取整
+        assert_eq!(encoded_write_limit(1) - MAX_METADATA_REQUEST_BYTES, 4);
+        assert_eq!(encoded_write_limit(3) - MAX_METADATA_REQUEST_BYTES, 4);
+        assert_eq!(encoded_write_limit(4) - MAX_METADATA_REQUEST_BYTES, 8);
+        // 极端值不溢出，且门限随 max_write 单调增长
+        assert!(encoded_write_limit(u64::MAX) > encoded_write_limit(MAX_WRITE_BYTES));
+    }
+
+    /// 旧 `/api` 与 `/agent/v1` 共用同一写入限制：五个边界都必须一致。
+    async fn assert_write_boundaries(
+        app: &Router,
+        auth: Option<&str>,
+        route: &str,
+        alias: &str,
+        dir: &Path,
+    ) {
+        let payload = |path: &str, content: &str, encoding: &str| {
+            json!({"root": alias, "path": path, "content": content, "encoding": encoding})
+                .to_string()
+        };
+
+        // 文本写入
+        let text = "第一行 hello\nsecond line";
+        let body = payload("text.txt", text, "text");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 200, "{route} text");
+        assert_eq!(v["bytes"], text.len() as u64, "{route} text bytes");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("text.txt")).unwrap(),
+            text,
+            "{route} text content"
+        );
+
+        // 上限以内
+        let inside = vec![0x11u8; 1024 * 1024];
+        let body = payload("inside.bin", &B64.encode(&inside), "base64");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 200, "{route} inside limit");
+        assert_eq!(v["bytes"], inside.len() as u64);
+
+        // 恰好 10 MiB：编码后 13,981,016 字节必须穿过请求体检查
+        let full = vec![0xA5u8; MAX_WRITE_BYTES as usize];
+        let encoded = B64.encode(&full);
+        let body = payload("full.bin", &encoded, "base64");
+        assert!(body.len() < encoded_write_limit(MAX_WRITE_BYTES));
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 200, "{route} exact limit");
+        assert_eq!(v["bytes"], MAX_WRITE_BYTES);
+        let written = std::fs::read(dir.join("full.bin")).unwrap();
+        assert_eq!(written.len() as u64, MAX_WRITE_BYTES, "{route} file length");
+        assert!(
+            written.iter().all(|byte| *byte == 0xA5),
+            "{route} file content"
+        );
+
+        // 超出 1 字节：413，且原文件保持 10 MiB 内容不变
+        let over = vec![0x5Au8; MAX_WRITE_BYTES as usize + 1];
+        let body = payload("full.bin", &B64.encode(&over), "base64");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 413, "{route} one byte over");
+        assert_eq!(v["error"], "content too large");
+        let kept = std::fs::read(dir.join("full.bin")).unwrap();
+        assert_eq!(kept.len() as u64, MAX_WRITE_BYTES, "{route} kept length");
+        assert!(
+            kept.iter().all(|byte| *byte == 0xA5),
+            "{route} kept content"
+        );
+
+        // 非法编码：400，原文件不被改写
+        let body = payload("text.txt", "!!!not-base64!!!", "base64");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 400, "{route} bad base64");
+        assert_eq!(v["error"], "bad content encoding");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("text.txt")).unwrap(),
+            text,
+            "{route} text preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn write_boundaries_accept_base64_up_to_the_decoded_limit() {
+        use super::super::access::{AccessPolicy, GrantScope, ScopeMode};
+        use crate::profile::{ProfileKind, RuntimeProfile};
+
+        let e = setup(false, default_opts());
+        assert_write_boundaries(&e.app, Some(&e.token), "/api/write", "r", &e.root).await;
+
+        // 独立授权与专用令牌覆盖 `/agent/v1/write`
+        let profile = RuntimeProfile {
+            kind: ProfileKind::Development,
+            home: e.root.parent().unwrap().join("agent-write"),
+            onboarding_qa: false,
+        };
+        let fixture = profile.home.join("files");
+        std::fs::create_dir_all(&fixture).unwrap();
+        let (access, error) = AccessRuntime::open(&profile);
+        assert!(error.is_none());
+        e.state.attach_access(access.clone());
+        let policy = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: [("fixture".into(), fixture.clone())].into(),
+            search: GrantScope::Off,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..Default::default()
+        };
+        access.validate(&policy).unwrap();
+        access.save(policy, false).unwrap();
+        access
+            .issue_agent_token(|key| e.state.audit().protect_secret(key))
+            .unwrap();
+        let agent_token = access.agent_token().unwrap();
+        assert_write_boundaries(
+            &e.app,
+            Some(&agent_token),
+            "/agent/v1/write",
+            "fixture",
+            &fixture,
+        )
+        .await;
+
+        // 两个凭证入口不能互换
+        let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", Some(&e.token), "{}").await;
+        assert_eq!(code, 401);
+        let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&agent_token), "{}").await;
+        assert_eq!(code, 401);
     }
 
     #[tokio::test]
