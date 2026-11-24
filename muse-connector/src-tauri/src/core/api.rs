@@ -1050,7 +1050,7 @@ async fn confirm_device_name(State(state): State<ApiState>, request: Request) ->
     let id = id.to_owned();
     blocking_response(state.inner.control_jobs.clone(), move || {
         let _guard = state.access_guard();
-        if let Some(response) = reject_revoked_agent(&state, &parts) {
+        if let Some(response) = reject_changed_credential(&state, &parts) {
             return response;
         }
         let result = state
