@@ -2,6 +2,7 @@ import { useLanguage } from "@/lib/i18n";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, Check, ChevronDown, ChevronUp, Clipboard, Copy, ExternalLink, RefreshCw } from "lucide-react";
 import type { Confirmation } from "@/components/feedback";
+import DeviceNameField from "@/components/device-name-field";
 import { Button } from "@/components/ui/button";
 import { Card, CardAction, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Field, FieldLabel } from "@/components/ui/field";
@@ -10,6 +11,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { providerToolAvailable, publicAddress, readSetupVerification, saveSetupVerification, setupRootTarget, type SetupVerification } from "@/lib/setup-progress";
 import { accessPolicyKey, agentCredentialIssue, agentTrial, connectorBrief, hasFileGrant } from "@/lib/agent-setup";
 import { providerLabels, type BridgeModel, type Snapshot } from "@/lib/use-bridge";
+import type { DeviceNameModel } from "@/lib/use-device-name";
 import { cn } from "@/lib/utils";
 
 const steps = ["选择文件管理方式", "准备公网连接", "接入 Muse", "确认首次试用"] as const;
@@ -17,6 +19,7 @@ const steps = ["选择文件管理方式", "准备公网连接", "接入 Muse", 
 type GuideProps = {
   snapshot: Snapshot;
   bridge: BridgeModel;
+  deviceName: DeviceNameModel;
   storageKey: string;
   page: string;
   expanded: boolean;
@@ -32,7 +35,7 @@ type GuideProps = {
 };
 
 export default function SetupGuide({
-  snapshot, bridge, storageKey, page, expanded, suspended, activation, onExpand, onCollapse,
+  snapshot, bridge, deviceName, storageKey, page, expanded, suspended, activation, onExpand, onCollapse,
   onNavigate, onHeightChange, onProgressChange, confirm, onTestPublicConnection,
 }: GuideProps) {
   const { language, t, diagnostic } = useLanguage();
@@ -65,7 +68,12 @@ export default function SetupGuide({
   const stepLabels = (development ? [steps[0], "启动本机模拟", steps[2], steps[3]] as const : steps).map(label => t(label));
   const localReady = development && agentReady && status.api_up && status.funnel_up;
   const { kind, tunnel_id, hostname } = desktop.provider;
-  const scope = agentReady && policy && tokenVersion ? JSON.stringify([kind, tunnel_id, hostname, tokenVersion, accessPolicyKey(policy), alias]) : null;
+  let scope = null;
+  if (agentReady && policy && tokenVersion) {
+    const scopeValues = [kind, tunnel_id, hostname, tokenVersion, accessPolicyKey(policy), alias];
+    // A rename is confirmed separately from the first file-access test.
+    scope = JSON.stringify(scopeValues);
+  }
   const saved = scope && verification?.scope === scope && (!address || verification.address === address) ? verification : null;
   const readConfirmed = saved?.read === true;
   const handedOff = !!saved && !!address;
@@ -82,7 +90,9 @@ export default function SetupGuide({
   const waiting = status.health === "Starting" || status.health === "Stopping";
   const tailscale = kind === "tailscale";
   const installed = providerToolAvailable(snapshot);
-  const instructions = address ? connectorBrief(language, address, trial.instruction) : null;
+  const instructions = address && deviceName.canCopy ? connectorBrief(language, address, trial.instruction, deviceName.saved) : null;
+
+  useEffect(() => setCopied(null), [deviceName.saved]);
 
   useEffect(() => {
     if (verification && !saved) {
@@ -176,7 +186,7 @@ export default function SetupGuide({
     if (!result.ok) setCredentialErrorScope(scope);
   };
   const next = (read: boolean) => {
-    if (!address || !scope || busy || (read ? !handedOff : !publicReady)) return;
+    if (!address || !scope || busy || (read ? !handedOff : !publicReady || !instructions)) return;
     const value = { scope, alias, address, read };
     saveSetupVerification(verificationKey, value);
     setVerification(value);
@@ -250,7 +260,9 @@ export default function SetupGuide({
     }
   } else if (active === 2) {
     const copyState = copied?.text === instructions && copied.scope === scope ? copied : null;
+    const showCredentialActions = !!instructions && (!!copyState || handedOff);
     content = <>
+      <DeviceNameField id="setup-device-name" deviceName={deviceName} />
       <p>{t("把接入说明发给 Muse。打开 Muse 发来的安全卡片，再复制并粘贴专用令牌。")}</p>
       {aliasPicker}
       {copyState ? copyState.ok
@@ -260,22 +272,23 @@ export default function SetupGuide({
           <textarea ref={copyFallback} aria-label={t("给 Muse 的连接说明")} readOnly rows={3} value={instructions ?? ""}
             className="w-full resize-none rounded-md border bg-muted p-2 text-caption text-foreground" />
         </div> : null}
-      {copyState || handedOff ? <Button className="self-start px-0" size="sm" variant="link" disabled={busy} onClick={() => void copyInstructions()}>{t("重新复制")}</Button> : null}
+      {showCredentialActions ? <Button className="self-start px-0" size="sm" variant="link" disabled={busy} onClick={() => void copyInstructions()}>{t("重新复制")}</Button> : null}
     </>;
     // 复制之后由用户确认安全卡片，必要时仍可重新复制。
-    action = copyState || handedOff ? <>
+    action = showCredentialActions ? <>
       <Button size="sm" variant="outline" disabled={busy} onClick={() => void copyToken()}>
         <Copy data-icon="inline-start" />{t("复制专用令牌")}
       </Button>
       <Button size="sm" disabled={busy || !scope || (!publicReady && !handedOff)} onClick={() => handedOff ? showStep(3) : next(false)}>
         {handedOff ? t("查看试用") : t("已填写，继续")}
       </Button>
-    </> : <Button size="sm" disabled={busy} onClick={() => void copyInstructions()}><Clipboard data-icon="inline-start" />{t("复制 Muse 接入说明")}</Button>;
+    </> : <Button size="sm" disabled={busy || !instructions} onClick={() => void copyInstructions()}><Clipboard data-icon="inline-start" />{t("复制 Muse 接入说明")}</Button>;
   } else if (readConfirmed) {
     content = <p role="status" className="text-foreground">{t("已在 Muse 完成首次试用。")}</p>;
     action = <Button size="sm" onClick={collapse}>{t("收起引导")}</Button>;
   } else {
     content = <>
+      {deviceName.saved ? <p>{t("请在 Muse 中指定设备「{0}」。", deviceName.saved)}</p> : null}
       <p>{trial.prepare} {trial.operation === "search" ? t("让 Muse 搜索该文件名，确认返回的路径。") : trial.operation === "read" ? t("让 Muse 读取文件，核对返回内容。") : t("让 Muse 列出各操作授权的目录。")}</p>
       <details>
         <summary className="cursor-pointer text-foreground">{t("试用遇到问题？")}</summary>

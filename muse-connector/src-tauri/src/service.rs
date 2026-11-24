@@ -8,7 +8,9 @@ use crate::core::{
     search::{SearchRequest, SearchResponse},
     token,
 };
-use crate::profile::{DesktopState, Language, ProviderSettings, RuntimeProfile};
+use crate::profile::{
+    DesktopState, DeviceNameUpdate, Language, ProviderSettings, RuntimeProfile, valid_device_name,
+};
 use crate::tunnel::{Health, TunnelManager, TunnelObservation, TunnelStatus, observe_tailscale};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -54,6 +56,7 @@ pub struct Snapshot {
     pub home: String,
     pub config: BridgeConfig,
     pub desktop: DesktopState,
+    pub suggested_device_name: Option<String>,
     pub status: TunnelStatus,
     pub stats: Value,
     pub dependencies: Value,
@@ -155,7 +158,7 @@ impl ServiceController {
             note: "连接已暂停".into(),
             ..Default::default()
         });
-        Arc::new(Self {
+        let controller = Arc::new(Self {
             profile,
             api,
             logs,
@@ -184,7 +187,9 @@ impl ServiceController {
             exiting: AtomicBool::new(false),
             maintenance: AtomicBool::new(false),
             ntfs_service_observed: AtomicBool::new(false),
-        })
+        });
+        controller.api.attach_device_names(Arc::downgrade(&controller));
+        controller
     }
     pub fn snapshot(&self) -> Snapshot {
         let initialized = self.initialized.load(Ordering::Relaxed);
@@ -222,6 +227,9 @@ impl ServiceController {
             home: self.profile.home.to_string_lossy().into(),
             config: self.api.file_view(),
             desktop: self.desktop_state(),
+            suggested_device_name: std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|name| valid_device_name(name)),
             status: self.status(),
             stats: self.api.stats_snapshot(),
             dependencies: self.tool_status(),
@@ -680,26 +688,38 @@ impl ServiceController {
         );
         result
     }
-    fn persist_desktop(&self, next: DesktopState) -> Result<(), String> {
+    fn update_desktop(
+        &self,
+        update: impl FnOnce(&mut DesktopState) -> Result<bool, String>,
+    ) -> Result<bool, String> {
+        let mut current = self.desktop.write().unwrap();
+        let mut next = current.clone();
+        if !update(&mut next)? {
+            return Ok(false);
+        }
         self.profile.save_desktop(&next)?;
-        *self.desktop.write().unwrap() = next;
-        Ok(())
+        *current = next;
+        Ok(true)
     }
     pub async fn toggle(&self, enable: bool) -> Result<TunnelStatus, String> {
         let mut runtime = self.runtime.lock().await;
         runtime.retries = 0;
-        let mut next = self.desktop.read().unwrap().clone();
-        next.desired_enabled = enable;
         if enable {
             if let Some(error) = self.setup_error.read().unwrap().clone() {
                 return Err(error);
             }
-            self.persist_desktop(next)?;
+            self.update_desktop(|state| {
+                state.desired_enabled = true;
+                Ok(true)
+            })?;
             self.start_locked(&mut runtime).await?;
         } else {
             // 即便磁盘失败也先停止服务，界面明确提示暂停偏好未保存。
-            let save = self.profile.save_desktop(&next);
-            *self.desktop.write().unwrap() = next;
+            let save = {
+                let mut state = self.desktop.write().unwrap();
+                state.desired_enabled = false;
+                self.profile.save_desktop(&state)
+            };
             let stopped = self.stop_locked(&mut runtime).await;
             save?;
             stopped?;
@@ -767,12 +787,13 @@ impl ServiceController {
         if previous.provider == provider {
             return Ok(());
         }
-        let mut next = previous.clone();
-        next.provider = provider;
         if runtime.api_task.is_some() {
             self.stop_locked(&mut runtime).await?;
         }
-        if let Err(e) = self.persist_desktop(next) {
+        if let Err(e) = self.update_desktop(|state| {
+            state.provider = provider;
+            Ok(true)
+        }) {
             if previous.desired_enabled {
                 let _ = self.start_locked(&mut runtime).await;
             }
@@ -782,7 +803,10 @@ impl ServiceController {
             && let Err(e) = self.start_locked(&mut runtime).await
         {
             let _ = self.stop_locked(&mut runtime).await;
-            self.persist_desktop(previous)?;
+            self.update_desktop(|state| {
+                state.provider = previous.provider;
+                Ok(true)
+            })?;
             let restored = self.start_locked(&mut runtime).await;
             return Err(format!(
                 "切换失败：{e}；{}",
@@ -797,15 +821,67 @@ impl ServiceController {
     }
     pub async fn save_window_preferences(&self, start_minimized: bool) -> Result<(), String> {
         let _operation = self.runtime.lock().await;
-        let mut next = self.desktop.read().unwrap().clone();
-        next.start_minimized = start_minimized;
-        self.persist_desktop(next)
+        self.update_desktop(|state| {
+            state.start_minimized = start_minimized;
+            Ok(true)
+        })?;
+        Ok(())
     }
     pub async fn save_language(&self, language: Language) -> Result<(), String> {
         let _operation = self.runtime.lock().await;
-        let mut next = self.desktop_state();
-        next.language = language;
-        self.persist_desktop(next)
+        self.update_desktop(|state| {
+            state.language = language;
+            Ok(true)
+        })?;
+        Ok(())
+    }
+    pub async fn save_device_name(
+        &self,
+        name: String,
+        update_muse: bool,
+    ) -> Result<Option<DeviceNameUpdate>, String> {
+        if !valid_device_name(&name) {
+            return Err("请输入 1–32 个字符，可用文字、0–9、空格、连字符和下划线，首尾不能有空格。".into());
+        }
+        let mut receipt = None;
+        let changed = self.update_desktop(|state| {
+            if state.device_name == name {
+                receipt = state.device_name_update.clone();
+                return Ok(false);
+            }
+            // 保留无法读取的状态文件，等待用户修复。
+            self.profile.load_desktop()?;
+            let pending = state.device_name_update.as_ref().is_some_and(|item| item.pending);
+            receipt = (update_muse || pending).then(|| DeviceNameUpdate {
+                id: token::generate(),
+                pending: true,
+            });
+            state.device_name = name;
+            state.device_name_update = receipt.clone();
+            Ok(true)
+        })?;
+        if changed {
+            self.status.send_modify(|_| {});
+        }
+        Ok(receipt)
+    }
+    pub(crate) fn confirm_device_name(&self, id: &str) -> Result<bool, String> {
+        let mut matched = false;
+        let changed = self.update_desktop(|state| {
+            let Some(receipt) = state.device_name_update.as_mut().filter(|item| {
+                token::constant_time_eq(&item.id, id)
+            }) else {
+                return Ok(false);
+            };
+            matched = true;
+            let pending = receipt.pending;
+            receipt.pending = false;
+            Ok(pending)
+        })?;
+        if changed {
+            self.status.send_modify(|_| {});
+        }
+        Ok(matched)
     }
     pub async fn shutdown(&self) {
         {
@@ -921,6 +997,94 @@ mod tests {
             onboarding_qa: false,
         }
     }
+    #[tokio::test]
+    async fn device_name_preserves_legacy_state_and_rejects_invalid_saves() {
+        let profile = profile();
+        profile.initialize_development().unwrap();
+        std::fs::write(
+            profile.state_path(),
+            r#"{"start_minimized":true,"extra":"keep"}"#,
+        )
+        .unwrap();
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        assert!(controller.snapshot().desktop.device_name.is_empty());
+
+        let name = "测试笔记本 2_A-𠀀";
+        assert!(controller.save_device_name(name.into(), false).await.unwrap().is_none());
+        controller.save_language(Language::English).await.unwrap();
+        let saved = std::fs::read_to_string(profile.state_path()).unwrap();
+        for invalid in [
+            "",
+            " leading",
+            "trailing ",
+            "bad/name",
+            "bad\nname",
+            "bad😃",
+            &"机".repeat(33),
+        ] {
+            assert!(controller.save_device_name(invalid.into(), false).await.is_err());
+        }
+        assert!(valid_device_name(&"𠀀".repeat(32)));
+        assert_eq!(controller.snapshot().desktop.device_name, name);
+        assert_eq!(
+            std::fs::read_to_string(profile.state_path()).unwrap(),
+            saved
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&saved).unwrap()["extra"],
+            "keep"
+        );
+        drop(controller);
+
+        let reopened = ServiceController::open_inner(profile.clone(), Some(0));
+        let state = reopened.snapshot().desktop;
+        assert_eq!(state.device_name, name);
+        assert_eq!(state.language, Language::English);
+        assert!(state.start_minimized);
+        drop(reopened);
+        std::fs::remove_dir_all(profile.home).unwrap();
+    }
+    #[tokio::test]
+    async fn muse_can_confirm_only_the_current_rename_with_its_own_credential() {
+        let profile = profile();
+        profile.initialize_development().unwrap();
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        controller.save_file_access(AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: [("fixture".into(), profile.home.join("files"))].into(),
+            read: GrantScope::Folders,
+            ..AccessPolicy::default()
+        }).await.unwrap();
+        controller.set_agent_access(true).await.unwrap();
+        let previous = controller.save_device_name("笔记本".into(), true).await.unwrap().unwrap();
+        let current = controller.save_device_name("工作笔记本".into(), true).await.unwrap().unwrap();
+        let agent = controller.access.agent_token().unwrap();
+        let legacy = controller.api.token();
+        let port = controller.toggle(true).await.unwrap().api_port;
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let confirm = |id: &str, credential: &str| {
+            client.post(format!("http://127.0.0.1:{port}/agent/v1/device-name/confirm"))
+                .bearer_auth(credential)
+                .header("Content-Type", "application/json")
+                .body(json!({"update_id": id}).to_string())
+                .send()
+        };
+        assert_eq!(confirm(&current.id, &legacy).await.unwrap().status(), 401);
+        assert_eq!(confirm(&previous.id, &agent).await.unwrap().status(), 409);
+        assert!(profile.load_desktop().unwrap().device_name_update.unwrap().pending);
+        assert_eq!(confirm(&current.id, &agent).await.unwrap().status(), 200);
+        assert_eq!(confirm(&current.id, &agent).await.unwrap().status(), 200);
+        let stored = profile.load_desktop().unwrap();
+        assert_eq!(stored.device_name, "工作笔记本");
+        assert!(!stored.device_name_update.unwrap().pending);
+        controller.shutdown().await;
+        drop(controller);
+        let reopened = ServiceController::open_inner(profile.clone(), Some(0));
+        assert!(!reopened.snapshot().desktop.device_name_update.unwrap().pending);
+        drop(reopened);
+        std::fs::remove_dir_all(profile.home).unwrap();
+    }
+
     #[tokio::test]
     async fn fresh_setup_is_distinct_from_repair_and_token_version_survives_restart() {
         let mut profile = profile();

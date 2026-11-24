@@ -68,8 +68,10 @@ For the default connection method, install [Tailscale for Windows](https://tails
 1. On **Overview**, select **Start setup**.
 2. Choose the folders or drives to authorize. All available local fixed drives are selected by default in drive mode. Open the menu to narrow the selection.
 3. Generate a Muse token. Follow the guide to authorize Funnel, start the connection, and verify the public endpoint.
-4. Send the generated connection instructions to Muse, then paste the token into the security card that Muse sends back.
+4. Save a device name for this computer and send the connection instructions to Muse. Confirm that Muse uses the name to create or update the connector, then paste the token into the security card that Muse sends back.
 5. Choose a non-sensitive file within the authorized scope and check the contents Muse returns.
+
+When connecting several computers, give each one a distinct device name, its own connector, and its own token. Ask Muse for the device by name, for example, “Find `hello.txt` on Laptop.” To rename a connected device, save the new name under **Connection**, then copy the rename instructions and paste them into Muse. The pending status clears when Muse sends its confirmation. You can also check the new name in Muse and confirm it manually under **Connection**.
 
 File indexing starts in the background after you first save permissions. Check its status or rebuild the index in **File Access**. Change the interface language in **Settings → Display language**. MuseLink remembers your choice.
 
