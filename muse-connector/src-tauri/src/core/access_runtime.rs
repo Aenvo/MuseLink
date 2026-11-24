@@ -308,11 +308,8 @@ impl AccessRuntime {
 
     pub(crate) fn agent_listing_entry_allowed(&self, path: &Path) -> bool {
         !protected_path(path, &self.protected)
-            && std::fs::canonicalize(path).is_ok_and(|canonical| {
-                protected_path(&canonical, &[path.to_path_buf()])
-                    && protected_path(path, &[canonical.clone()])
-                    && !protected_path(&canonical, &self.protected)
-            })
+            && super::access::canonicalize_direct(path)
+                .is_some_and(|canonical| !protected_path(&canonical, &self.protected))
     }
 
     pub(crate) fn agent_desktop(&self) -> Option<AgentDesktopLocation> {
@@ -615,7 +612,11 @@ impl AccessRuntime {
                     .unwrap_or_default()
                     .into_values()
                     .collect();
-                config.roots.retain(|_, path| protected_path(path, &fixed));
+                config.roots.retain(|_, path| {
+                    protected_path(path, &fixed)
+                        || super::access::canonicalize_direct(path)
+                            .is_some_and(|canonical| protected_path(&canonical, &fixed))
+                });
             }
         }
         config
@@ -687,10 +688,8 @@ impl AccessRuntime {
     fn local_roots(&self) -> BTreeMap<String, PathBuf> {
         if let Some(home) = &self.development_home {
             let fixture = home.join("files");
-            return std::fs::canonicalize(&fixture)
-                .ok()
+            return super::access::canonicalize_direct(&fixture)
                 .into_iter()
-                .filter(|path| protected_path(path, &[fixture.clone()]))
                 .map(|path| ("test-disk".into(), path))
                 .collect();
         }

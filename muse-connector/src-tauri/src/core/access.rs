@@ -274,6 +274,46 @@ pub fn protected_path(candidate: &Path, protected: &[PathBuf]) -> bool {
     protected.iter().any(|path| within(candidate, path))
 }
 
+/// Canonicalize an existing path only if it has the same spelling after expanding DOS aliases.
+pub(crate) fn canonicalize_direct(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let same = |spelling: &Path| within(spelling, &canonical) && within(&canonical, spelling);
+    if same(path) {
+        return Some(canonical);
+    }
+    #[cfg(windows)]
+    if reject_reparse_ancestors(path).is_ok()
+        && long_path_spelling(path).is_some_and(|spelling| same(&spelling))
+    {
+        return Some(canonical);
+    }
+    None
+}
+
+#[cfg(windows)]
+fn long_path_spelling(path: &Path) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    // This expands DOS short names without substituting the target of a junction or symlink.
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut output = vec![0u16; 512];
+    loop {
+        // Both buffers are valid UTF-16 storage, with a NUL terminator on the input.
+        let len =
+            unsafe { GetLongPathNameW(path.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+                as usize;
+        if len == 0 {
+            return None;
+        }
+        if len < output.len() {
+            return Some(OsString::from_wide(&output[..len]).into());
+        }
+        output.resize(len + 1, 0);
+    }
+}
+
 #[cfg(not(windows))]
 fn within(candidate: &Path, root: &Path) -> bool {
     candidate.starts_with(root)
