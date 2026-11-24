@@ -299,8 +299,10 @@ impl ServiceController {
         if self.access.policy().as_ref() == Some(&policy) {
             return Ok(());
         }
+        let initialized = self.initialized.load(Ordering::Relaxed);
+        let legacy_read_only = initialized && self.api.read_only();
         // Bootstrap a narrow v0.3 entry only when the user explicitly selects folders.
-        if !self.initialized.load(Ordering::Relaxed)
+        if !initialized
             && initialization_files_absent(&self.profile)
             && policy.mode == ScopeMode::Folders
             && policy.read == GrantScope::Folders
@@ -313,7 +315,7 @@ impl ServiceController {
             .await?;
         }
         let access = self.access.clone();
-        tokio::task::spawn_blocking(move || access.save(policy))
+        tokio::task::spawn_blocking(move || access.save(policy, legacy_read_only))
             .await
             .map_err(|_| "保存文件授权未完成".to_string())??;
         self.reset_agent_public_result();
@@ -1112,6 +1114,44 @@ mod tests {
         drop(controller);
         std::fs::remove_dir_all(profile.home).unwrap();
     }
+    #[tokio::test]
+    async fn first_muse_grant_preserves_existing_legacy_read_only() {
+        use crate::core::access::Operation;
+
+        let profile = profile();
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        let config = controller.api.config_snapshot();
+        assert!(controller.snapshot().initialized);
+        assert!(config.read_only);
+        assert!(controller.access.policy().is_none());
+
+        let policy = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: config.roots.clone(),
+            search: GrantScope::Folders,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..AccessPolicy::default()
+        };
+        controller.save_file_access(policy.clone()).await.unwrap();
+        controller.shutdown().await;
+        drop(controller);
+
+        let reopened = ServiceController::open_inner(profile.clone(), Some(0));
+        assert_eq!(reopened.api.file_view().roots, config.roots);
+        assert!(reopened.api.file_view().read_only);
+        assert_eq!(reopened.access.policy().as_ref(), Some(&policy));
+        assert!(
+            reopened
+                .access
+                .resolve_agent_target(Operation::Write, "development", "sample.txt")
+                .is_ok()
+        );
+        reopened.shutdown().await;
+        drop(reopened);
+        std::fs::remove_dir_all(profile.home).unwrap();
+    }
+
     #[tokio::test]
     async fn legacy_http_checks_each_folders_write_permission_and_revocation() {
         use crate::core::access::FolderGrant;

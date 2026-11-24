@@ -114,11 +114,8 @@ impl AccessPolicy {
             return Err("全盘访问需要选择管理本机磁盘");
         }
         if let Some(disks) = &self.disks {
-            if self.mode != ScopeMode::Full
-                || grants != [GrantScope::AllLocal; 3]
-                || !self.roots.is_empty()
-            {
-                return Err("选择指定磁盘时，搜索、读取与写入须使用同一磁盘范围");
+            if self.mode != ScopeMode::Full || !grants.contains(&GrantScope::AllLocal) {
+                return Err("选择指定磁盘需要至少一项操作使用磁盘授权");
             }
             if disks.is_empty()
                 || disks.iter().any(|alias| {
@@ -438,7 +435,7 @@ mod tests {
         );
         policy.disks = Some(["drive-e".into()].into());
         assert!(policy.validate(&[], None).is_ok());
-        let policy: AccessPolicy =
+        let mut policy: AccessPolicy =
             serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
         for operation in [Operation::Search, Operation::Read, Operation::Write] {
             let granted = policy.roots_for(operation, &roots).unwrap();
@@ -456,6 +453,13 @@ mod tests {
                 Err(ERR_NOT_AUTHORIZED)
             );
         }
+        policy.write = GrantScope::Off;
+        assert!(policy.validate(&[], None).is_ok());
+        assert!(policy.roots_for(Operation::Write, &roots).is_none());
+        assert_eq!(
+            policy.resolve(Operation::Read, &roots, &[], "drive-c", ""),
+            Err(ERR_NOT_AUTHORIZED)
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 

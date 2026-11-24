@@ -1487,7 +1487,7 @@ mod tests {
             ..AccessPolicy::default()
         };
         access.validate(&policy).unwrap();
-        access.save(policy).unwrap();
+        access.save(policy, false).unwrap();
         let request = SearchRequest {
             limit: Some(1),
             ..SearchRequest::default()

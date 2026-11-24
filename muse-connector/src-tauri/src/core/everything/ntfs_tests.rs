@@ -193,11 +193,14 @@ async fn verify_agent_search(engine: Everything, home: &Path, needle: &str, expe
     std::fs::create_dir(&profile.home).unwrap();
     let access = AccessRuntime::with_test_engine(&profile, engine);
     access
-        .save(AccessPolicy {
-            mode: ScopeMode::Full,
-            search: GrantScope::AllLocal,
-            ..AccessPolicy::default()
-        })
+        .save(
+            AccessPolicy {
+                mode: ScopeMode::Full,
+                search: GrantScope::AllLocal,
+                ..AccessPolicy::default()
+            },
+            false,
+        )
         .unwrap();
     access.issue_agent_token(|_| {}).unwrap();
     let token = access.agent_token().unwrap();

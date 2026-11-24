@@ -1,10 +1,61 @@
-import type { FileAccessPolicy, FolderGrant } from "@/lib/use-bridge";
+import type { FileAccessMode, FileAccessPolicy, FolderGrant } from "@/lib/use-bridge";
 import type { Language, Translate } from "@/lib/i18n";
 
 export const accessOperations = ["search", "read", "write"] as const;
 
 export function folderGrantEnabled(policy: FileAccessPolicy, operation: keyof FolderGrant, alias: string) {
   return policy.folder_grants?.[alias]?.[operation] ?? true;
+}
+
+export function editFileAccessPolicy(
+  saved: FileAccessPolicy | null,
+  mode: FileAccessMode,
+  roots: FileAccessPolicy["roots"],
+  disks: string[] | null,
+): FileAccessPolicy {
+  const scope = mode === "full" ? "all_local" : "folders";
+  const savedAliases = Object.keys(saved?.roots ?? {});
+  const hasRestrictedFolders = (operation: keyof FolderGrant) => !!saved
+    && saved[operation] === "folders"
+    && savedAliases.some(alias => !folderGrantEnabled(saved, operation, alias));
+  const operationScope = (operation: keyof FolderGrant) => {
+    if (!saved) return scope;
+    if (saved.mode === mode || saved[operation] === "off") return saved[operation];
+    return mode === "full" && hasRestrictedFolders(operation) ? "folders" : scope;
+  };
+  const search = operationScope("search");
+  const read = operationScope("read");
+  const write = operationScope("write");
+  const scopes = [search, read, write];
+  const policy: FileAccessPolicy = {
+    mode,
+    roots: mode === "folders" || scopes.includes("folders") ? roots : saved?.mode === mode ? saved.roots : {},
+    disks: scopes.includes("all_local") ? disks ?? undefined : undefined,
+    search,
+    read,
+    write,
+  };
+  if (saved?.folder_grants && (saved.mode === mode || scopes.includes("folders"))) {
+    const pathKey = (path: string) => path.replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+    const aliasByPath = new Map(savedAliases.map(alias => [pathKey(saved.roots[alias]), alias]));
+    const grantsForRoot = (alias: string | undefined, operation: keyof FolderGrant) => {
+      if (alias !== undefined && (saved.mode === mode || saved[operation] === "folders")) {
+        return folderGrantEnabled(saved, operation, alias);
+      }
+      if (saved[operation] !== "folders") return true;
+      // New folders follow the operation's current policy.
+      return savedAliases.some(previous => folderGrantEnabled(saved, operation, previous));
+    };
+    policy.folder_grants = Object.fromEntries(Object.entries(policy.roots).map(([alias, path]) => {
+      const previous = saved.roots[alias] === path ? alias : aliasByPath.get(pathKey(path));
+      return [alias, {
+        search: grantsForRoot(previous, "search"),
+        read: grantsForRoot(previous, "read"),
+        write: grantsForRoot(previous, "write"),
+      }];
+    }));
+  }
+  return policy;
 }
 
 export function hasFileGrant(policy: FileAccessPolicy | null) {
@@ -16,10 +67,10 @@ export function accessPolicyKey(policy: FileAccessPolicy) {
   // Snapshot events and IPC replies can serialize object fields in different orders.
   const roots = Object.keys(policy.roots).sort().map(alias => [alias, policy.roots[alias]]);
   const grants = policy.folder_grants;
-  const folderGrants = grants && Object.keys(grants).sort().map(alias => {
+  const folderGrants = grants ? Object.keys(grants).sort().map(alias => {
     const { search, read, write } = grants[alias];
     return [alias, search, read, write];
-  });
+  }) : null;
   const fields = [policy.mode, policy.search, policy.read, policy.write, roots, folderGrants];
   return JSON.stringify(policy.disks ? [...fields, [...policy.disks].sort()] : fields);
 }

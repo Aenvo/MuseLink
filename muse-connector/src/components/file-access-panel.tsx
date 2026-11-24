@@ -7,7 +7,7 @@ import { Button } from "@/components/ui/button";
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
 import { FieldError, FieldLegend, FieldSet } from "@/components/ui/field";
 import { setupRootTarget } from "@/lib/setup-progress";
-import { accessOperations, accessPolicyKey, folderGrantEnabled } from "@/lib/agent-setup";
+import { accessOperations, accessPolicyKey, editFileAccessPolicy, folderGrantEnabled } from "@/lib/agent-setup";
 import { formatBytes, type BridgeModel, type FileAccessMode, type FileAccessPolicy, type IndexStatus, type Snapshot } from "@/lib/use-bridge";
 
 const modes = [
@@ -125,17 +125,19 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
   const [mode, setMode] = useState<FileAccessMode>(saved?.mode ?? "folders");
   const [roots, setRoots] = useState(initialRoots);
   const [disks, setDisks] = useState<string[] | null>(saved?.disks ?? null);
+  const [enableAllOperations, setEnableAllOperations] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const folders = Object.entries(roots);
-  const scope = mode === "full" ? "all_local" : "folders";
-  const policy: FileAccessPolicy = { mode, roots: mode === "folders" ? roots : {}, disks: mode === "full" ? disks ?? undefined : undefined, search: scope, read: scope, write: scope };
-  const missingFolder = mode === "folders" && !folders.length;
-  const missingDisk = mode === "full" && disks?.length === 0;
-  const savedComplete = saved ? completeScope(saved) : false;
-  const changed = !saved || !savedComplete || accessPolicyKey(policy) !== accessPolicyKey({ ...saved, roots: saved.mode === "folders" ? saved.roots : {}, folder_grants: undefined });
+  const policy = editFileAccessPolicy(enableAllOperations ? null : saved, mode, roots, disks);
+  const showFolders = mode === "folders" || accessOperations.some(operation => policy[operation] === "folders");
+  const showDisks = accessOperations.some(operation => policy[operation] === "all_local");
+  const missingFolder = showFolders && !folders.length;
+  const missingDisk = showDisks && disks?.length === 0;
+  const canEnableAll = saved !== null && !completeScope(saved);
+  const changed = !saved || accessPolicyKey(policy) !== accessPolicyKey(saved);
   const busy = !!bridge.busy;
   const savedSearch = !!saved && saved.search !== "off";
-  const showNtfs = mode === "full" && ntfsSearchService != null;
+  const showNtfs = policy.search === "all_local" && ntfsSearchService != null;
 
   const removeFolder = (name: string) => {
     setRoots(current => Object.fromEntries(Object.entries(current).filter(([key]) => key !== name)));
@@ -176,13 +178,16 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
               setMode(key);
               setError(null);
             }} />
-          <span>{t(label)}</span>
+          <span>{key === "full" && canEnableAll && !enableAllOperations ? t("管理本机磁盘") : t(label)}</span>
         </label>)}
       </div>
-      <p className="text-caption text-muted-foreground">{mode === "full"
-        ? t("Muse 可搜索、读取和写入所选磁盘中当前 Windows 账户可访问的文件。")
-        : t("Muse 可搜索、读取和写入所选文件夹及其子文件夹。")}</p>
-      {mode === "folders" ? <div className="flex min-w-0 flex-col gap-2">
+      <p className="text-caption text-muted-foreground">{canEnableAll && !enableAllOperations
+        ? t("调整范围时会保留当前的搜索、读取和写入权限。")
+        : mode === "full"
+          ? t("Muse 可搜索、读取和写入所选磁盘中当前 Windows 账户可访问的文件。")
+          : t("Muse 可搜索、读取和写入所选文件夹及其子文件夹。")}</p>
+      {showDisks ? <DiskPicker selected={disks} disabled={busy} onChange={selection => { setDisks(selection); setError(null); }} /> : null}
+      {showFolders ? <div className="flex min-w-0 flex-col gap-2">
         <Button id={guided ? undefined : "add-directory"} type="button" variant="outline" size="sm" className="self-start" disabled={busy} onClick={() => void selectFolder()}>
           <FolderOpen data-icon="inline-start" />{t("选择文件夹")}
         </Button>
@@ -191,7 +196,12 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
           <span className="min-w-0 flex-1 break-all text-caption">{path}</span>
           <Button variant="ghost" type="button" size="icon-sm" aria-label={t("移除目录 {0}", name)} disabled={busy} onClick={() => removeFolder(name)}><Trash2 /></Button>
         </div>)}
-      </div> : <DiskPicker selected={disks} disabled={busy} onChange={selection => { setDisks(selection); setError(null); }} />}
+      </div> : null}
+      {canEnableAll ? <label className="flex items-start gap-2 text-sm">
+        <input type="checkbox" className="mt-1 shrink-0 accent-primary focus-visible:outline focus-visible:outline-ring"
+          checked={enableAllOperations} onChange={event => { setEnableAllOperations(event.target.checked); setError(null); }} />
+        {t("对所选范围启用搜索、读取和写入")}
+      </label> : null}
         <div className="flex min-w-0 flex-col gap-2 rounded-md border px-3 py-2">
           <p className="text-sm font-medium text-foreground">{t("本机文件索引")}</p>
           <p aria-live="polite" className="text-caption text-muted-foreground">
@@ -236,7 +246,6 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
         </div>
       {missingFolder ? <p className="text-caption text-muted-foreground">{t("请选择至少一个文件夹。")}</p> : null}
       {missingDisk ? <p className="text-caption text-muted-foreground">{t("请至少选择一个磁盘。")}</p> : null}
-      {saved && !savedComplete ? <p className="text-caption text-muted-foreground">{t("当前使用旧授权。保存后将对所选范围启用搜索和读写。")}</p> : null}
       {error ? <FieldError>{diagnostic(error)}</FieldError> : null}
       <Button type="submit" size="sm" className="self-start" disabled={busy || missingFolder || missingDisk || !changed}>
         {guided ? t("确认并继续") : t("保存授权")}

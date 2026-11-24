@@ -76,6 +76,7 @@ File indexing starts in the background after you first save permissions. Check i
 ## Access and connection boundaries
 
 - Muse's file operations follow the saved access scope and the current Windows account's permissions. The chosen tunnel forwards the public endpoint to the local file service.
+- Muse can search, read, and write within the scope you first authorize. Editing the scope keeps your saved permissions. For restricted configurations, you can explicitly enable all three operations in **File Access**. Existing read-only File Bridge settings still apply to the legacy API.
 - Enter the dedicated token in the Muse security card. To stop access, pause the connection or revoke the token. Update the security card after rotating it.
 - The public health check verifies the endpoint. Have Muse read a non-sensitive file to confirm that the integration works.
 - Cloudflare named tunnels require an available domain in your account. Update the connection in Muse if switching providers changes the public URL.

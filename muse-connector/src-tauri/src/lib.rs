@@ -150,8 +150,11 @@ async fn save_provider(
     state.set_provider(provider).await
 }
 #[tauri::command]
-fn rotate_file_token(state: tauri::State<'_, Services>) -> Result<(), String> {
-    state.api.rotate_token()?;
+async fn rotate_file_token(state: tauri::State<'_, Services>) -> Result<(), String> {
+    let api = state.api.clone();
+    tokio::task::spawn_blocking(move || api.rotate_token())
+        .await
+        .map_err(|_| "文件令牌轮换未完成".to_string())??;
     state
         .logs
         .runtime_entry("info", "文件令牌已轮换，请在本机更新安全卡片");

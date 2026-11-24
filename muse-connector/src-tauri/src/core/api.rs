@@ -165,7 +165,7 @@ struct Inner {
     paths: BridgePaths,
     token: RwLock<String>,
     config: RwLock<BridgeConfig>,
-    token_update: Mutex<()>,
+    token_update: RwLock<()>,
     audit: Audit,
     options: ApiOptions,
     rate: Mutex<HashMap<String, (Instant, u64)>>,
@@ -196,7 +196,7 @@ impl ApiState {
                     paths: BridgePaths::default(),
                     token: RwLock::new(tok),
                     config: RwLock::new(cfg),
-                    token_update: Mutex::new(()),
+                    token_update: RwLock::new(()),
                     audit,
                     options: ApiOptions::default(),
                     rate: Mutex::new(HashMap::new()),
@@ -227,7 +227,7 @@ impl ApiState {
                     paths,
                     token: RwLock::new(tok),
                     config: RwLock::new(cfg),
-                    token_update: Mutex::new(()),
+                    token_update: RwLock::new(()),
                     audit,
                     options,
                     rate: Mutex::new(HashMap::new()),
@@ -246,6 +246,7 @@ impl ApiState {
         self.inner.token.read().unwrap().clone()
     }
     pub(crate) fn set_token(&self, t: String) {
+        let _guard = self.inner.token_update.write().unwrap();
         *self.inner.token.write().unwrap() = t;
     }
     pub fn read_only(&self) -> bool {
@@ -300,6 +301,9 @@ impl ApiState {
             .get()
             .map(|access| access.legacy_requests.read().unwrap())
     }
+    fn legacy_mutation_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
+        (!self.agent).then(|| self.inner.token_update.read().unwrap())
+    }
     fn permits_target(&self, target: &Path, writing: bool) -> bool {
         self.inner
             .access
@@ -343,17 +347,24 @@ impl ApiState {
         Ok(())
     }
     pub fn rotate_token(&self) -> Result<(), String> {
+        self.rotate_token_if(|_| true).map(|_| ())
+    }
+    fn rotate_token_if(&self, authorized: impl FnOnce(&str) -> bool) -> Result<bool, String> {
+        // Complete admitted legacy writes before publishing a new credential.
         let _guard = self
             .inner
             .token_update
-            .lock()
+            .write()
             .map_err(|_| "令牌更新锁不可用".to_string())?;
+        if !authorized(&self.inner.token.read().unwrap()) {
+            return Ok(false);
+        }
         let new_token = token::generate();
         token::save(&self.inner.paths.token, &new_token)
             .map_err(|_| "保存令牌失败，原令牌仍有效".to_string())?;
         self.inner.audit.protect_secret(&new_token);
-        self.set_token(new_token);
-        Ok(())
+        *self.inner.token.write().unwrap() = new_token;
+        Ok(true)
     }
     fn options(&self) -> &ApiOptions {
         &self.inner.options
@@ -1054,7 +1065,7 @@ async fn agent_search(State(state): State<ApiState>, request: Request) -> Respon
         .await;
     blocking_response(state.inner.control_jobs.clone(), move || {
         let _guard = state.access_guard();
-        if let Some(response) = reject_revoked_agent(&state, &parts) {
+        if let Some(response) = reject_changed_credential(&state, &parts) {
             return response;
         }
         if generation.load(Ordering::Acquire) {
@@ -1107,19 +1118,24 @@ async fn agent_search(State(state): State<ApiState>, request: Request) -> Respon
     .await
 }
 
-fn reject_revoked_agent(state: &ApiState, parts: &axum::http::request::Parts) -> Option<Response> {
-    (state.agent && !state.check_auth(auth_header(parts))).then(|| {
-        respond(
-            state,
-            parts,
-            401,
-            json!({"error":"unauthorized"}),
-            false,
-            None,
-            None,
-            None,
-        )
-    })
+fn reject_changed_credential(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+) -> Option<Response> {
+    (!state.check_auth(auth_header(parts))).then(|| unauthorized_response(state, parts))
+}
+
+fn unauthorized_response(state: &ApiState, parts: &axum::http::request::Parts) -> Response {
+    respond(
+        state,
+        parts,
+        401,
+        json!({"error": "unauthorized"}),
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 /// 只读拦截（对齐 Python：在路径解析之前，审计不记 root/path）。
@@ -1222,7 +1238,8 @@ async fn write_ep(State(s): State<ApiState>, req: Request) -> Response {
 
 fn write_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) -> Response {
     let _guard = s.access_guard();
-    if let Some(response) = reject_revoked_agent(&s, &parts) {
+    let _legacy_credential = s.legacy_mutation_guard();
+    if let Some(response) = reject_changed_credential(&s, &parts) {
         return response;
     }
 
@@ -1359,7 +1376,8 @@ async fn mkdir_ep(State(s): State<ApiState>, req: Request) -> Response {
 
 fn mkdir_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) -> Response {
     let _guard = s.access_guard();
-    if let Some(response) = reject_revoked_agent(&s, &parts) {
+    let _legacy_credential = s.legacy_mutation_guard();
+    if let Some(response) = reject_changed_credential(&s, &parts) {
         return response;
     }
 
@@ -1410,8 +1428,11 @@ async fn rotate_token_ep(State(s): State<ApiState>, req: Request) -> Response {
 }
 
 fn rotate_token_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
-    if let Err(e) = s.rotate_token() {
-        return respond(
+    match s.rotate_token_if(|current| token::check_auth_header(auth_header(&parts), current)) {
+        // The new credential stays in the local token file.
+        Ok(true) => respond(&s, &parts, 200, json!({"ok": true}), true, None, None, None),
+        Ok(false) => unauthorized_response(&s, &parts),
+        Err(e) => respond(
             &s,
             &parts,
             500,
@@ -1420,10 +1441,8 @@ fn rotate_token_sync(s: ApiState, parts: axum::http::request::Parts) -> Response
             None,
             None,
             None,
-        );
+        ),
     }
-    // 新令牌绝不回显 —— 只写本机文件
-    respond(&s, &parts, 200, json!({"ok": true}), true, None, None, None)
 }
 
 async fn not_found(State(s): State<ApiState>, req: Request) -> Response {
@@ -1597,7 +1616,7 @@ mod tests {
             ..Default::default()
         };
         access.validate(&policy).unwrap();
-        access.save(policy.clone()).unwrap();
+        access.save(policy.clone(), false).unwrap();
 
         let (code, _, _) = call(&e.app, "GET", "/agent/v1/roots", Some(&e.token), "").await;
         assert_eq!(code, 401);
@@ -1636,7 +1655,7 @@ mod tests {
 
         policy.read = GrantScope::Off;
         policy.write = GrantScope::AllLocal;
-        access.save(policy).unwrap();
+        access.save(policy, false).unwrap();
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, write).await;
         assert_eq!(code, 200);
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, r#"{"root":"test-disk","path":"sample.txt"}"#).await;
@@ -2155,8 +2174,25 @@ mod tests {
         assert_eq!(new_tok.len(), 43);
         assert_ne!(new_tok, e.token);
         assert_eq!(e.state.token(), new_tok);
+        let old_header = format!("Bearer {}", e.token);
+        assert!(
+            !e.state
+                .rotate_token_if(|current| token::check_auth_header(Some(&old_header), current))
+                .unwrap()
+        );
+        assert_eq!(token::load(&e.token_path).unwrap(), new_tok);
         let (c, _, _) = call(&e.app, "GET", "/api/health", Some(&new_tok), "").await;
         assert_eq!(c, 200);
+    }
+
+    #[test]
+    fn legacy_mutations_hold_the_rotation_guard() {
+        let e = setup(false, default_opts());
+        let legacy = e.state.legacy_mutation_guard();
+        assert!(e.state.inner.token_update.try_write().is_err());
+        assert!(e.state.as_agent().legacy_mutation_guard().is_none());
+        drop(legacy);
+        assert!(e.state.inner.token_update.try_write().is_ok());
     }
 
     #[tokio::test]
