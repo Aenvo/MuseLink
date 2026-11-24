@@ -262,12 +262,12 @@ pub fn protected_path(candidate: &Path, protected: &[PathBuf]) -> bool {
 }
 
 #[cfg(not(windows))]
-fn within(candidate: &Path, root: &Path) -> bool {
+pub(crate) fn within(candidate: &Path, root: &Path) -> bool {
     candidate.starts_with(root)
 }
 
 #[cfg(windows)]
-fn within(candidate: &Path, root: &Path) -> bool {
+pub(crate) fn within(candidate: &Path, root: &Path) -> bool {
     use std::ffi::OsStr;
     use std::path::{Component, Prefix};
 

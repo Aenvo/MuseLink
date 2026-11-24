@@ -266,6 +266,16 @@ impl AccessRuntime {
         Ok(())
     }
 
+    /// 单个别名对应的授权根，用于句柄层判断打开的对象是否仍在根内。
+    pub(crate) fn agent_root(&self, op: Operation, alias: &str) -> Option<PathBuf> {
+        let active = self.active.read().unwrap();
+        let policy = active.policy.as_ref()?;
+        policy
+            .roots_for(op, &self.operation_roots(policy, op))?
+            .get(alias)
+            .cloned()
+    }
+
     pub(crate) fn agent_roots(&self, op: Operation) -> Option<BTreeMap<String, PathBuf>> {
         let active = self.active.read().unwrap();
         let policy = active.policy.as_ref()?;

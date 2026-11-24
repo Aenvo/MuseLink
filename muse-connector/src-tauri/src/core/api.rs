@@ -774,15 +774,45 @@ fn list_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
     let root_name = q.get("root").cloned().unwrap_or_default();
     let rel = q.get("path").cloned().unwrap_or_default();
 
-    let target = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
-    let is_dir = std::fs::metadata(&target)
-        .map(|m| m.is_dir())
-        .unwrap_or(false);
-    if !is_dir {
+    let verified = match super::handle::open(&resolved.path, super::handle::Access::Metadata) {
+        Ok(verified) => verified,
+        Err(super::handle::VerifyError::Missing) => {
+            return respond(
+                &s,
+                &parts,
+                404,
+                json!({"error": "not a directory"}),
+                true,
+                Some(&root_name),
+                Some(&rel),
+                None,
+            );
+        }
+        Err(super::handle::VerifyError::Escape) => {
+            return escape_response(&s, &parts, &root_name, &rel);
+        }
+        Err(super::handle::VerifyError::Io(error)) => {
+            return respond(
+                &s,
+                &parts,
+                500,
+                json!({"error": error.to_string()}),
+                true,
+                Some(&root_name),
+                Some(&rel),
+                None,
+            );
+        }
+    };
+    if !super::access::within(verified.final_path(), &resolved.root) {
+        return escape_response(&s, &parts, &root_name, &rel);
+    }
+    if !verified.is_directory() {
         return respond(
             &s,
             &parts,
@@ -796,7 +826,8 @@ fn list_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
     }
 
     let mut entries = Vec::new();
-    let read = match std::fs::read_dir(&target) {
+    let listing = verified.final_path().to_path_buf();
+    let read = match std::fs::read_dir(&listing) {
         Ok(r) => r,
         Err(e) => {
             return respond(
@@ -828,6 +859,11 @@ fn list_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
         let name = entry.file_name().to_string_lossy().into_owned();
         let is_dir = st.is_dir();
         entries.push(((!is_dir, name.to_lowercase(), entries.len()), name, st));
+    }
+    // 枚举期间目录若被替换或改名，结果已不可信：报可重试错误而不是返回别人的内容。
+    match verified.current_final_path() {
+        Ok(current) if current == listing => {}
+        _ => return changed_response(&s, &parts, &root_name, &rel),
     }
     // The enumeration index preserves the previous stable order for equal keys.
     let list_max = s.options().list_max;
@@ -880,14 +916,15 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
     let root_name = q.get("root").cloned().unwrap_or_default();
     let rel = q.get("path").cloned().unwrap_or_default();
 
-    let target = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
-    let md = match std::fs::metadata(&target) {
-        Ok(m) => m,
-        Err(_) => {
+    // 句柄校验后只通过该句柄读取，路径不会再被解析一次。
+    let verified = match super::handle::open(&resolved.path, super::handle::Access::Read) {
+        Ok(verified) => verified,
+        Err(super::handle::VerifyError::Missing) => {
             return respond(
                 &s,
                 &parts,
@@ -899,8 +936,26 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
                 None,
             );
         }
+        Err(super::handle::VerifyError::Escape) => {
+            return escape_response(&s, &parts, &root_name, &rel);
+        }
+        Err(super::handle::VerifyError::Io(error)) => {
+            return respond(
+                &s,
+                &parts,
+                500,
+                json!({"error": error.to_string()}),
+                true,
+                Some(&root_name),
+                Some(&rel),
+                None,
+            );
+        }
     };
-    if !md.is_file() {
+    if !super::access::within(verified.final_path(), &resolved.root) {
+        return escape_response(&s, &parts, &root_name, &rel);
+    }
+    if verified.is_directory() {
         return respond(
             &s,
             &parts,
@@ -912,7 +967,22 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
             None,
         );
     }
-    let size = md.len();
+    let file = verified.into_file();
+    let size = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
+            return respond(
+                &s,
+                &parts,
+                500,
+                json!({"error": error.to_string()}),
+                true,
+                Some(&root_name),
+                Some(&rel),
+                None,
+            );
+        }
+    };
     if size > s.options().max_read {
         let msg = format!("file too large ({size} bytes)");
         return respond(
@@ -926,13 +996,13 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
             None,
         );
     }
-    let data = match std::fs::File::open(&target).and_then(|file| {
+    let data = match (|| -> std::io::Result<Vec<u8>> {
         use std::io::Read;
         let mut data = Vec::new();
         file.take(s.options().max_read.saturating_add(1))
             .read_to_end(&mut data)?;
         Ok(data)
-    }) {
+    })() {
         Ok(d) => d,
         Err(e) => {
             return respond(
@@ -1200,13 +1270,28 @@ fn reject_read_only(
     }
 }
 
+/// 解析结果同时带上授权根的规范路径：句柄层要用它判断打开的对象是否仍在根内。
+struct Resolved {
+    root: PathBuf,
+    path: PathBuf,
+}
+
+fn request_root(state: &ApiState, operation: Operation, alias: &str) -> Option<PathBuf> {
+    let base = if state.agent {
+        state.inner.access.get()?.agent_root(operation, alias)?
+    } else {
+        state.file_view().roots.get(alias)?.clone()
+    };
+    path_guard::canonical_non_strict(&base).ok()
+}
+
 fn resolve_file_request(
     state: &ApiState,
     parts: &axum::http::request::Parts,
     root: &str,
     relative: &str,
     operation: Operation,
-) -> Result<PathBuf, Response> {
+) -> Result<Resolved, Response> {
     let path = if state.agent {
         let result = state
             .inner
@@ -1237,7 +1322,7 @@ fn resolve_file_request(
         }
         result
     };
-    path.map_err(|error| {
+    let path = path.map_err(|error| {
         respond(
             state,
             parts,
@@ -1248,7 +1333,58 @@ fn resolve_file_request(
             None,
             None,
         )
-    })
+    })?;
+    let root = request_root(state, operation, root).ok_or_else(|| {
+        respond(
+            state,
+            parts,
+            400,
+            json!({"error": path_guard::ERR_UNKNOWN_ROOT}),
+            true,
+            None,
+            None,
+            None,
+        )
+    })?;
+    Ok(Resolved { root, path })
+}
+
+/// 打开后的对象落在授权根外：与解析阶段的拒绝保持同一错误串。
+fn escape_response(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+    root: &str,
+    relative: &str,
+) -> Response {
+    respond(
+        state,
+        parts,
+        400,
+        json!({"error": "path escapes root"}),
+        true,
+        Some(root),
+        Some(relative),
+        None,
+    )
+}
+
+/// 对象在操作期间被替换或改名：状态已不可信，调用方可以重试。
+fn changed_response(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+    root: &str,
+    relative: &str,
+) -> Response {
+    respond(
+        state,
+        parts,
+        409,
+        json!({"error": "path changed; retry"}),
+        true,
+        Some(root),
+        Some(relative),
+        None,
+    )
 }
 
 async fn write_ep(State(s): State<ApiState>, req: Request) -> Response {
@@ -1273,8 +1409,8 @@ fn write_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) 
     let root_name = body_json.get("root").and_then(|v| v.as_str()).unwrap_or("");
     let rel = body_json.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-    let target = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
@@ -1346,7 +1482,7 @@ fn write_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) 
             None,
         );
     }
-    if let Ok(md) = std::fs::metadata(&target) {
+    if let Ok(md) = std::fs::metadata(&resolved.path) {
         if md.is_dir() {
             return respond(
                 &s,
@@ -1361,7 +1497,71 @@ fn write_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) 
         }
     }
 
-    match super::storage::atomic_write(&target, &data) {
+    // 父目录沿用既有行为自动创建；随后以目录句柄为基准完成替换。
+    let Some(parent) = resolved.path.parent() else {
+        return respond(
+            &s,
+            &parts,
+            400,
+            json!({"error": path_guard::ERR_INVALID}),
+            true,
+            Some(root_name),
+            Some(rel),
+            None,
+        );
+    };
+    if let Err(error) = std::fs::create_dir_all(parent) {
+        return respond(
+            &s,
+            &parts,
+            500,
+            json!({"error": error.to_string()}),
+            true,
+            Some(root_name),
+            Some(rel),
+            None,
+        );
+    }
+    let directory = match super::handle::open(parent, super::handle::Access::Directory) {
+        Ok(directory) => directory,
+        Err(super::handle::VerifyError::Escape) => {
+            return escape_response(&s, &parts, root_name, rel);
+        }
+        Err(super::handle::VerifyError::Missing) => {
+            return respond(
+                &s,
+                &parts,
+                500,
+                json!({"error": "parent directory is unavailable"}),
+                true,
+                Some(root_name),
+                Some(rel),
+                None,
+            );
+        }
+        Err(super::handle::VerifyError::Io(error)) => {
+            return respond(
+                &s,
+                &parts,
+                500,
+                json!({"error": error.to_string()}),
+                true,
+                Some(root_name),
+                Some(rel),
+                None,
+            );
+        }
+    };
+    if !super::access::within(directory.final_path(), &resolved.root) {
+        return escape_response(&s, &parts, root_name, rel);
+    }
+    let name = resolved
+        .path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("");
+
+    match super::handle::replace(&directory, name, &data) {
         Ok(()) => {
             s.mark_index_dirty();
             let n = data.len() as u64;
@@ -1376,11 +1576,23 @@ fn write_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) 
                 Some(n),
             )
         }
-        Err(e) => respond(
+        Err(super::handle::ReplaceError::InvalidName) => respond(
+            &s,
+            &parts,
+            400,
+            json!({"error": path_guard::ERR_INVALID}),
+            true,
+            Some(root_name),
+            Some(rel),
+            None,
+        ),
+        Err(super::handle::ReplaceError::Escape) => escape_response(&s, &parts, root_name, rel),
+        Err(super::handle::ReplaceError::Busy) => changed_response(&s, &parts, root_name, rel),
+        Err(super::handle::ReplaceError::Io(error)) => respond(
             &s,
             &parts,
             500,
-            json!({"error":e.to_string()}),
+            json!({"error": error.to_string()}),
             true,
             Some(root_name),
             Some(rel),
@@ -1411,36 +1623,82 @@ fn mkdir_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) 
     let root_name = body_json.get("root").and_then(|v| v.as_str()).unwrap_or("");
     let rel = body_json.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-    let target = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
-    match std::fs::create_dir_all(&target) {
-        Ok(_) => {
-            s.mark_index_dirty();
-            respond(
+    // 先确认最近的已存在祖先仍在授权根内，再创建目录；创建后复核，越界即回滚空目录。
+    if let Err(error) = super::handle::verify_existing_ancestor(&resolved.path, &resolved.root) {
+        return match error {
+            super::handle::VerifyError::Escape => escape_response(&s, &parts, root_name, rel),
+            super::handle::VerifyError::Missing => respond(
                 &s,
                 &parts,
-                200,
-                json!({"ok": true}),
+                400,
+                json!({"error": path_guard::ERR_INVALID}),
                 true,
                 Some(root_name),
                 Some(rel),
                 None,
-            )
-        }
-        Err(e) => respond(
+            ),
+            super::handle::VerifyError::Io(error) => respond(
+                &s,
+                &parts,
+                500,
+                json!({"error": error.to_string()}),
+                true,
+                Some(root_name),
+                Some(rel),
+                None,
+            ),
+        };
+    }
+    if let Err(error) = std::fs::create_dir_all(&resolved.path) {
+        return respond(
             &s,
             &parts,
             500,
-            json!({"error": e.to_string()}),
+            json!({"error": error.to_string()}),
             true,
             Some(root_name),
             Some(rel),
             None,
-        ),
+        );
     }
+    let contained = match super::handle::open(&resolved.path, super::handle::Access::Metadata) {
+        Ok(verified) => super::access::within(verified.final_path(), &resolved.root),
+        Err(super::handle::VerifyError::Escape) => false,
+        Err(super::handle::VerifyError::Missing) => false,
+        Err(super::handle::VerifyError::Io(error)) => {
+            return respond(
+                &s,
+                &parts,
+                500,
+                json!({"error": error.to_string()}),
+                true,
+                Some(root_name),
+                Some(rel),
+                None,
+            );
+        }
+    };
+    if !contained {
+        // 只删除本次创建的空目录，已有内容保持原样。
+        let _ = std::fs::remove_dir(&resolved.path);
+        return escape_response(&s, &parts, root_name, rel);
+    }
+    s.mark_index_dirty();
+    respond(
+        &s,
+        &parts,
+        200,
+        json!({"ok": true}),
+        true,
+        Some(root_name),
+        Some(rel),
+        None,
+    )
 }
 
 async fn rotate_token_ep(State(s): State<ApiState>, req: Request) -> Response {
@@ -1958,6 +2216,11 @@ mod tests {
             "outside",
             "{kind} 改写了根外文件"
         );
+        // 建目录同样不得穿过重解析点。
+        let body = json!({"root":"r","path":format!("{kind}/newdir")}).to_string();
+        let (code, _, _) = call(&e.app, "POST", "/api/mkdir", Some(&e.token), &body).await;
+        assert_eq!(code, 400, "{kind} 建目录未被拒绝");
+        assert!(!outside.join("newdir").exists(), "{kind} 在根外建了目录");
     }
 
     /// 目录联接不要求管理员权限，创建失败即真实失败，不能算作通过。
