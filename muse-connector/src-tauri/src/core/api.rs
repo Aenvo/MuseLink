@@ -280,7 +280,10 @@ impl ApiState {
     pub(crate) fn attach_access(&self, access: Arc<AccessRuntime>) {
         let _ = self.inner.access.set(access);
     }
-    pub(crate) fn attach_device_names(&self, controller: std::sync::Weak<crate::service::ServiceController>) {
+    pub(crate) fn attach_device_names(
+        &self,
+        controller: std::sync::Weak<crate::service::ServiceController>,
+    ) {
         let _ = self.inner.device_names.set(controller);
     }
     fn as_agent(&self) -> Self {
@@ -1037,7 +1040,11 @@ async fn confirm_device_name(State(state): State<ApiState>, request: Request) ->
         Ok(body) => body,
         Err(response) => return response,
     };
-    let Some(id) = body.get("update_id").and_then(Value::as_str).filter(|id| id.len() == 43) else {
+    let Some(id) = body
+        .get("update_id")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() == 43)
+    else {
         return post_failure(&state, &parts, 400, "invalid device name update ID", true).await;
     };
     let id = id.to_owned();
@@ -1046,12 +1053,19 @@ async fn confirm_device_name(State(state): State<ApiState>, request: Request) ->
         if let Some(response) = reject_revoked_agent(&state, &parts) {
             return response;
         }
-        let result = state.inner.device_names.get().and_then(|controller| controller.upgrade())
+        let result = state
+            .inner
+            .device_names
+            .get()
+            .and_then(|controller| controller.upgrade())
             .map(|controller| controller.confirm_device_name(&id));
         let (code, body) = match result {
             Some(Ok(true)) => (200, json!({"confirmed": true})),
             Some(Ok(false)) => (409, json!({"error": "device_name_update_not_current"})),
-            Some(Err(_)) | None => (503, json!({"error": "device_name_confirmation_unavailable"})),
+            Some(Err(_)) | None => (
+                503,
+                json!({"error": "device_name_confirmation_unavailable"}),
+            ),
         };
         respond(&state, &parts, code, body, true, None, None, None)
     })

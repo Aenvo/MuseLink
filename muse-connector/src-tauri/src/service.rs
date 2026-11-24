@@ -188,7 +188,9 @@ impl ServiceController {
             maintenance: AtomicBool::new(false),
             ntfs_service_observed: AtomicBool::new(false),
         });
-        controller.api.attach_device_names(Arc::downgrade(&controller));
+        controller
+            .api
+            .attach_device_names(Arc::downgrade(&controller));
         controller
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -843,7 +845,9 @@ impl ServiceController {
         update_muse: bool,
     ) -> Result<Option<DeviceNameUpdate>, String> {
         if !valid_device_name(&name) {
-            return Err("请输入 1–32 个字符，可用文字、0–9、空格、连字符和下划线，首尾不能有空格。".into());
+            return Err(
+                "请输入 1–32 个字符，可用文字、0–9、空格、连字符和下划线，首尾不能有空格。".into(),
+            );
         }
         let mut receipt = None;
         let changed = self.update_desktop(|state| {
@@ -853,7 +857,10 @@ impl ServiceController {
             }
             // 保留无法读取的状态文件，等待用户修复。
             self.profile.load_desktop()?;
-            let pending = state.device_name_update.as_ref().is_some_and(|item| item.pending);
+            let pending = state
+                .device_name_update
+                .as_ref()
+                .is_some_and(|item| item.pending);
             receipt = (update_muse || pending).then(|| DeviceNameUpdate {
                 id: token::generate(),
                 pending: true,
@@ -870,9 +877,11 @@ impl ServiceController {
     pub(crate) fn confirm_device_name(&self, id: &str) -> Result<bool, String> {
         let mut matched = false;
         let changed = self.update_desktop(|state| {
-            let Some(receipt) = state.device_name_update.as_mut().filter(|item| {
-                token::constant_time_eq(&item.id, id)
-            }) else {
+            let Some(receipt) = state
+                .device_name_update
+                .as_mut()
+                .filter(|item| token::constant_time_eq(&item.id, id))
+            else {
                 return Ok(false);
             };
             matched = true;
@@ -1012,7 +1021,13 @@ mod tests {
         assert!(controller.snapshot().desktop.device_name.is_empty());
 
         let name = "测试笔记本 2_A-𠀀";
-        assert!(controller.save_device_name(name.into(), false).await.unwrap().is_none());
+        assert!(
+            controller
+                .save_device_name(name.into(), false)
+                .await
+                .unwrap()
+                .is_none()
+        );
         controller.save_language(Language::English).await.unwrap();
         let saved = std::fs::read_to_string(profile.state_path()).unwrap();
         for invalid in [
@@ -1024,7 +1039,12 @@ mod tests {
             "bad😃",
             &"机".repeat(33),
         ] {
-            assert!(controller.save_device_name(invalid.into(), false).await.is_err());
+            assert!(
+                controller
+                    .save_device_name(invalid.into(), false)
+                    .await
+                    .is_err()
+            );
         }
         assert!(valid_device_name(&"𠀀".repeat(32)));
         assert_eq!(controller.snapshot().desktop.device_name, name);
@@ -1051,21 +1071,35 @@ mod tests {
         let profile = profile();
         profile.initialize_development().unwrap();
         let controller = ServiceController::open_inner(profile.clone(), Some(0));
-        controller.save_file_access(AccessPolicy {
-            mode: ScopeMode::Folders,
-            roots: [("fixture".into(), profile.home.join("files"))].into(),
-            read: GrantScope::Folders,
-            ..AccessPolicy::default()
-        }).await.unwrap();
+        controller
+            .save_file_access(AccessPolicy {
+                mode: ScopeMode::Folders,
+                roots: [("fixture".into(), profile.home.join("files"))].into(),
+                read: GrantScope::Folders,
+                ..AccessPolicy::default()
+            })
+            .await
+            .unwrap();
         controller.set_agent_access(true).await.unwrap();
-        let previous = controller.save_device_name("笔记本".into(), true).await.unwrap().unwrap();
-        let current = controller.save_device_name("工作笔记本".into(), true).await.unwrap().unwrap();
+        let previous = controller
+            .save_device_name("笔记本".into(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = controller
+            .save_device_name("工作笔记本".into(), true)
+            .await
+            .unwrap()
+            .unwrap();
         let agent = controller.access.agent_token().unwrap();
         let legacy = controller.api.token();
         let port = controller.toggle(true).await.unwrap().api_port;
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let confirm = |id: &str, credential: &str| {
-            client.post(format!("http://127.0.0.1:{port}/agent/v1/device-name/confirm"))
+            client
+                .post(format!(
+                    "http://127.0.0.1:{port}/agent/v1/device-name/confirm"
+                ))
                 .bearer_auth(credential)
                 .header("Content-Type", "application/json")
                 .body(json!({"update_id": id}).to_string())
@@ -1073,7 +1107,14 @@ mod tests {
         };
         assert_eq!(confirm(&current.id, &legacy).await.unwrap().status(), 401);
         assert_eq!(confirm(&previous.id, &agent).await.unwrap().status(), 409);
-        assert!(profile.load_desktop().unwrap().device_name_update.unwrap().pending);
+        assert!(
+            profile
+                .load_desktop()
+                .unwrap()
+                .device_name_update
+                .unwrap()
+                .pending
+        );
         assert_eq!(confirm(&current.id, &agent).await.unwrap().status(), 200);
         assert_eq!(confirm(&current.id, &agent).await.unwrap().status(), 200);
         let stored = profile.load_desktop().unwrap();
@@ -1082,7 +1123,14 @@ mod tests {
         controller.shutdown().await;
         drop(controller);
         let reopened = ServiceController::open_inner(profile.clone(), Some(0));
-        assert!(!reopened.snapshot().desktop.device_name_update.unwrap().pending);
+        assert!(
+            !reopened
+                .snapshot()
+                .desktop
+                .device_name_update
+                .unwrap()
+                .pending
+        );
         drop(reopened);
         std::fs::remove_dir_all(profile.home).unwrap();
     }
