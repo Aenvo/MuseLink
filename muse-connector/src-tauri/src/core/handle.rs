@@ -1,371 +1,485 @@
-//! 以句柄为准的文件对象校验。
-//!
-//! 路径校验得到的是字符串，后续按路径操作会重新解析。若校验之后祖先目录被换成
-//! 目录联接或符号链接，同一个字符串就会指向授权范围外的对象。这里把校验与操作
-//! 绑定到同一个内核对象：打开句柄 → 读取该句柄的实际路径与属性 → 确认仍在授权
-//! 根内 → 之后只通过这个句柄读写。
-//!
-//! 替换文件时，重命名以父目录句柄作为 `RootDirectory`，目标名相对已验证的目录
-//! 对象解析，不再经过字符串路径。
+//! 文件系统操作从已验证的授权根句柄开始，后续操作只使用相对句柄或已打开文件。
 
-use std::ffi::OsString;
-use std::fs::File;
+use std::ffi::{OsStr, OsString};
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write};
+use std::mem::{offset_of, size_of, size_of_val};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
-use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-use std::path::{Path, PathBuf};
+use std::os::windows::fs::OpenOptionsExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle};
+use std::path::{Component, Path, PathBuf};
 
-use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
-use windows_sys::Win32::Storage::FileSystem::{
-    BY_HANDLE_FILE_INFORMATION, CREATE_NEW, CreateFileW, DELETE, FILE_ADD_FILE,
-    FILE_ADD_SUBDIRECTORY, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
-    FILE_ATTRIBUTE_REPARSE_POINT, FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES,
-    FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
-    GetFinalPathNameByHandleW, OPEN_EXISTING, VOLUME_NAME_DOS,
+use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+use windows_sys::Wdk::Storage::FileSystem::{
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_DISPOSITION_INFORMATION, FILE_FULL_DIR_INFORMATION,
+    FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION,
+    FILE_SYNCHRONOUS_IO_NONALERT, FileDispositionInformation, FileFullDirectoryInformation,
+    FileRenameInformation, NtCreateFile, NtQueryDirectoryFile, NtSetInformationFile,
 };
+use windows_sys::Win32::Foundation::{
+    GENERIC_READ, GENERIC_WRITE, HANDLE, NTSTATUS, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE,
+    RtlNtStatusToDosError, STATUS_FILE_IS_A_DIRECTORY, STATUS_LOCK_NOT_GRANTED,
+    STATUS_NO_MORE_FILES, STATUS_NO_SUCH_FILE, STATUS_NOT_A_DIRECTORY,
+    STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND,
+    STATUS_REPARSE_POINT_ENCOUNTERED, STATUS_SHARING_VIOLATION, UNICODE_STRING,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
+    FILE_ATTRIBUTE_REPARSE_POINT, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_LIST_DIRECTORY, FILE_NAME_NORMALIZED, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle, GetFinalPathNameByHandleW,
+    SYNCHRONIZE, VOLUME_NAME_DOS,
+};
+use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-use super::access::within;
+use super::path_guard::Resolved;
 
-const ERROR_FILE_NOT_FOUND: i32 = 2;
-const ERROR_PATH_NOT_FOUND: i32 = 3;
-const ERROR_SHARING_VIOLATION: i32 = 32;
-const ERROR_LOCK_VIOLATION: i32 = 33;
-const ERROR_FILE_EXISTS: i32 = 80;
-const TEMP_ATTEMPTS: u32 = 4;
-
-/// 打开句柄时申请的权利。写入走「替换」，所以目录句柄只需要枚举与改名的权利。
-#[derive(Clone, Copy)]
-pub(crate) enum Access {
-    /// 读取文件内容。
-    Read,
-    /// 只取属性与最终路径。
-    Metadata,
-    /// 目录：可枚举、可在其中创建与改名。
-    Directory,
-}
-
-impl Access {
-    fn mask(self) -> u32 {
-        match self {
-            Self::Read => GENERIC_READ | FILE_READ_ATTRIBUTES,
-            Self::Metadata => FILE_READ_ATTRIBUTES,
-            Self::Directory => {
-                FILE_LIST_DIRECTORY
-                    | FILE_ADD_FILE
-                    | FILE_ADD_SUBDIRECTORY
-                    | FILE_DELETE_CHILD
-                    | FILE_READ_ATTRIBUTES
-            }
-        }
-    }
-}
+const SHARE_DIRECTORY: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+const SHARE_FILE: u32 = SHARE_DIRECTORY | FILE_SHARE_DELETE;
+const FILETIME_UNIX_EPOCH: i64 = 116_444_736_000_000_000;
 
 #[derive(Debug)]
-pub(crate) enum VerifyError {
-    /// 对象不存在。
+pub(crate) enum Error {
     Missing,
-    /// 打开的对象在授权根之外，或本身是重解析点。
+    NotDirectory,
+    IsDirectory,
     Escape,
-    /// 其他系统错误。
+    Changed,
+    Exists,
     Io(io::Error),
 }
 
-impl VerifyError {
-    fn last() -> Self {
-        let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(ERROR_FILE_NOT_FOUND | ERROR_PATH_NOT_FOUND) => Self::Missing,
+impl From<io::Error> for Error {
+    fn from(error: io::Error) -> Self {
+        match error.kind() {
+            io::ErrorKind::NotFound => Self::Missing,
+            io::ErrorKind::NotADirectory => Self::NotDirectory,
+            io::ErrorKind::IsADirectory => Self::IsDirectory,
+            io::ErrorKind::AlreadyExists => Self::Exists,
+            _ if matches!(error.raw_os_error(), Some(32 | 33)) => Self::Changed,
             _ => Self::Io(error),
         }
     }
 }
 
-#[derive(Debug)]
-pub(crate) enum ReplaceError {
-    /// 目标名不是单一文件名。
-    InvalidName,
-    /// 目标或临时文件落在授权根之外。
-    Escape,
-    /// 文件正被其他进程占用，可重试。
-    Busy,
-    /// 其他系统错误。
-    Io(io::Error),
-}
-
-impl ReplaceError {
-    fn last() -> Self {
-        let error = io::Error::last_os_error();
-        match error.raw_os_error() {
-            Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION) => Self::Busy,
-            _ => Self::Io(error),
+fn status_result(status: NTSTATUS) -> Result<(), Error> {
+    match status {
+        STATUS_OBJECT_NAME_NOT_FOUND | STATUS_OBJECT_PATH_NOT_FOUND | STATUS_NO_SUCH_FILE => {
+            Err(Error::Missing)
         }
+        STATUS_NOT_A_DIRECTORY => Err(Error::NotDirectory),
+        STATUS_FILE_IS_A_DIRECTORY => Err(Error::IsDirectory),
+        STATUS_OBJECT_NAME_COLLISION => Err(Error::Exists),
+        STATUS_REPARSE_POINT_ENCOUNTERED => Err(Error::Escape),
+        STATUS_SHARING_VIOLATION | STATUS_LOCK_NOT_GRANTED => Err(Error::Changed),
+        status if status >= 0 => Ok(()),
+        status => Err(Error::from(io::Error::from_raw_os_error(unsafe {
+            RtlNtStatusToDosError(status) as i32
+        }))),
     }
 }
 
-/// 目录或文件的对象身份：卷序列号 + 文件索引，与路径字符串无关。
-#[derive(Clone, Copy, PartialEq, Eq)]
-struct Identity {
-    volume: u32,
-    index: u64,
-}
-
-/// 已验证的内核对象。句柄存活期间，对象不会因为路径变化而改变。
-pub(crate) struct Verified {
-    handle: OwnedHandle,
-    final_path: PathBuf,
-    attributes: u32,
-    identity: Identity,
-}
-
-impl Verified {
-    /// 句柄当前指向的实际路径。
-    pub(crate) fn final_path(&self) -> &Path {
-        &self.final_path
-    }
-
-    pub(crate) fn is_directory(&self) -> bool {
-        self.attributes & FILE_ATTRIBUTE_DIRECTORY != 0
-    }
-
-    fn raw(&self) -> HANDLE {
-        self.handle.as_raw_handle() as HANDLE
-    }
-
-    /// 重新读取最终路径，用于确认枚举期间目录未被替换。
-    pub(crate) fn current_final_path(&self) -> Result<PathBuf, VerifyError> {
-        query_path(self.raw())
-    }
-
-    /// 把句柄交给 `File`，后续读写不再解析路径。
-    pub(crate) fn into_file(self) -> File {
-        let handle = std::mem::ManuallyDrop::new(self.handle);
-        unsafe { File::from_raw_handle(handle.as_raw_handle()) }
-    }
-}
-
-/// 打开对象并读取它的实际身份，不跟随最终组件上的重解析点。
-pub(crate) fn open(path: &Path, access: Access) -> Result<Verified, VerifyError> {
-    let wide = wide(path);
-    let raw = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            access.mask(),
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            OPEN_EXISTING,
-            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
-            std::ptr::null_mut(),
-        )
-    };
-    if raw == INVALID_HANDLE_VALUE {
-        return Err(VerifyError::last());
-    }
-    // SAFETY: CreateFileW returned a live handle that this scope now owns.
-    let handle = unsafe { OwnedHandle::from_raw_handle(raw as _) };
-    let information = information(handle.as_raw_handle() as HANDLE)?;
-    if information.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(VerifyError::Escape);
-    }
-    Ok(Verified {
-        final_path: query_path(handle.as_raw_handle() as HANDLE)?,
-        attributes: information.dwFileAttributes,
-        identity: identity(&information),
-        handle,
+fn relative(target: &Resolved) -> Result<&Path, Error> {
+    let canonical = target
+        .path
+        .strip_prefix(&target.root)
+        .map_err(|_| Error::Escape)?;
+    Ok(if target.reject_reparse {
+        &target.requested_relative
+    } else {
+        canonical
     })
 }
 
-/// 打开 `target` 最近的已存在祖先，确认它仍在 `root` 内。
-pub(crate) fn verify_existing_ancestor(target: &Path, root: &Path) -> Result<PathBuf, VerifyError> {
-    let mut current = target;
-    loop {
-        if !within(current, root) {
-            return Err(VerifyError::Escape);
-        }
-        match open(current, Access::Metadata) {
-            Ok(verified) => {
-                if !within(verified.final_path(), root) {
-                    return Err(VerifyError::Escape);
-                }
-                return Ok(verified.final_path().to_path_buf());
-            }
-            Err(VerifyError::Missing) => {
-                current = current.parent().ok_or(VerifyError::Missing)?;
-            }
-            Err(error) => return Err(error),
-        }
-    }
+fn open_absolute(path: &Path, access: u32, share: u32) -> Result<File, Error> {
+    Ok(OpenOptions::new()
+        .access_mode(access)
+        .share_mode(share)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(path)?)
 }
 
-/// 在已验证的目录里原子替换 `name`：临时文件、写入、以目录句柄相对重命名。
-pub(crate) fn replace(dir: &Verified, name: &str, bytes: &[u8]) -> Result<(), ReplaceError> {
-    leaf_name(name)?;
-    let mut attempt = 0;
-    loop {
-        let temp = dir
-            .final_path()
-            .join(format!(".muse-{}.tmp", super::token::generate()));
-        match create_temp(&temp) {
-            Ok(file) => {
-                let target = dir.final_path().join(name);
-                let result = commit(file, dir, &target, &temp, bytes);
-                if result.is_err() {
-                    // 失败时不能把临时文件留在授权目录里。
-                    let _ = std::fs::remove_file(&temp);
-                }
-                return result;
-            }
-            // 随机名冲突时换一个，其余错误直接返回。
-            Err(ReplaceError::Busy) if attempt < TEMP_ATTEMPTS => attempt += 1,
-            Err(error) => return Err(error),
+fn open_root(target: &Resolved, access: u32) -> Result<File, Error> {
+    let access = access | FILE_READ_ATTRIBUTES;
+    let file = if target.reject_reparse {
+        let volume: PathBuf = target.requested_root.components().take(2).collect();
+        if !volume.is_absolute() {
+            return Err(Error::Escape);
         }
-    }
-}
-
-fn create_temp(path: &Path) -> Result<File, ReplaceError> {
-    let wide = wide(path);
-    let raw = unsafe {
-        CreateFileW(
-            wide.as_ptr(),
-            GENERIC_WRITE | DELETE | FILE_READ_ATTRIBUTES,
-            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-            std::ptr::null(),
-            CREATE_NEW,
-            FILE_ATTRIBUTE_NORMAL,
-            std::ptr::null_mut(),
-        )
+        let relative: PathBuf = target
+            .requested_root
+            .strip_prefix(&volume)
+            .map_err(|_| Error::Escape)?
+            .components()
+            .collect();
+        if relative.as_os_str().is_empty() {
+            open_absolute(&volume, access, SHARE_DIRECTORY)?
+        } else {
+            let device = open_absolute(&volume, 0, SHARE_FILE)?;
+            open_relative(
+                &device,
+                relative.as_os_str(),
+                access,
+                FILE_OPEN,
+                FILE_DIRECTORY_FILE,
+                SHARE_DIRECTORY,
+            )?
+        }
+    } else {
+        open_absolute(&target.root, access, SHARE_DIRECTORY)?
     };
-    if raw == INVALID_HANDLE_VALUE {
-        return Err(match io::Error::last_os_error().raw_os_error() {
-            Some(ERROR_FILE_EXISTS) => ReplaceError::Busy,
-            _ => ReplaceError::last(),
-        });
+    if attributes(&file)? & FILE_ATTRIBUTE_DIRECTORY == 0 {
+        return Err(Error::NotDirectory);
     }
-    // SAFETY: CreateFileW returned a live handle that File now owns.
-    Ok(unsafe { File::from_raw_handle(raw as _) })
-}
-
-fn commit(
-    mut file: File,
-    dir: &Verified,
-    target: &Path,
-    temp: &Path,
-    bytes: &[u8],
-) -> Result<(), ReplaceError> {
-    // 临时文件也必须落在已验证的目录里：路径本身可能在创建前被替换。
-    let created = query_path(file.as_raw_handle() as HANDLE).map_err(|error| match error {
-        VerifyError::Escape => ReplaceError::Escape,
-        VerifyError::Missing => {
-            ReplaceError::Io(io::Error::from_raw_os_error(ERROR_FILE_NOT_FOUND))
-        }
-        VerifyError::Io(error) => ReplaceError::Io(error),
-    })?;
-    if created.parent() != Some(dir.final_path()) {
-        return Err(ReplaceError::Escape);
-    }
-    if let Err(error) = file.write_all(bytes).and_then(|()| file.sync_all()) {
-        eprintln!("debug step write: {error:?}");
-        return Err(ReplaceError::Io(error));
-    }
-    // 重命名前再确认目录还是同一个对象，路径在这期间被换成联接就会不一致。
-    same_directory(dir)?;
-    // Win32 没有可用的「以目录句柄为根」的重命名：SetFileInformationByHandle 传
-    // RootDirectory 在本机实测稳定返回 ACCESS_DENIED，因此按已验证目录的实际路径
-    // 重命名，并在之后复核落点。进程内不会再有用户提供的路径参与这一步。
-    std::fs::rename(temp, target).map_err(|error| match error.raw_os_error() {
-        Some(ERROR_SHARING_VIOLATION | ERROR_LOCK_VIOLATION) => ReplaceError::Busy,
-        _ => ReplaceError::Io(error),
-    })?;
-    drop(file);
-    // 重命名按完整路径完成，落点身份再核对一次；不一致时如实报错而不是假装成功。
-    match open(target, Access::Metadata) {
-        Ok(verified) if verified.final_path().parent() == Some(dir.final_path()) => Ok(()),
-        Ok(_) => Err(ReplaceError::Busy),
-        Err(VerifyError::Escape) => Err(ReplaceError::Escape),
-        Err(VerifyError::Missing) => Err(ReplaceError::Busy),
-        Err(VerifyError::Io(error)) => Err(ReplaceError::Io(error)),
-    }
-}
-
-/// 目录仍是打开时那个对象（卷序列号 + 文件索引）。
-fn same_directory(dir: &Verified) -> Result<(), ReplaceError> {
-    match open(dir.final_path(), Access::Metadata) {
-        Ok(current) if current.identity == dir.identity => Ok(()),
-        Ok(_) => Err(ReplaceError::Busy),
-        Err(VerifyError::Escape) => Err(ReplaceError::Escape),
-        Err(VerifyError::Missing) => Err(ReplaceError::Busy),
-        Err(VerifyError::Io(error)) => Err(ReplaceError::Io(error)),
-    }
-}
-
-fn leaf_name(name: &str) -> Result<Vec<u16>, ReplaceError> {
-    if name.is_empty()
-        || name == "."
-        || name == ".."
-        || name.contains(['\\', '/', ':', '\0'])
-        || name.ends_with(['.', ' '])
-    {
-        return Err(ReplaceError::InvalidName);
-    }
-    Ok(name.encode_utf16().collect())
-}
-
-fn information(handle: HANDLE) -> Result<BY_HANDLE_FILE_INFORMATION, VerifyError> {
-    let mut information = unsafe { std::mem::zeroed::<BY_HANDLE_FILE_INFORMATION>() };
-    if unsafe { GetFileInformationByHandle(handle, &mut information) } == 0 {
-        return Err(VerifyError::Io(io::Error::last_os_error()));
-    }
-    Ok(information)
-}
-
-fn identity(information: &BY_HANDLE_FILE_INFORMATION) -> Identity {
-    Identity {
-        volume: information.dwVolumeSerialNumber,
-        index: (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow),
-    }
-}
-
-fn query_path(handle: HANDLE) -> Result<PathBuf, VerifyError> {
-    let mut buffer = vec![0u16; 512];
+    // Keep the exact canonical root from authorization, including the extended path prefix.
+    let mut name = vec![0u16; 512];
     loop {
         let length = unsafe {
             GetFinalPathNameByHandleW(
-                handle,
-                buffer.as_mut_ptr(),
-                buffer.len() as u32,
+                raw(&file),
+                name.as_mut_ptr(),
+                name.len() as u32,
                 FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
             )
-        };
+        } as usize;
         if length == 0 {
-            return Err(VerifyError::Io(io::Error::last_os_error()));
+            return Err(io::Error::last_os_error().into());
         }
-        let length = length as usize;
-        if length < buffer.len() {
-            buffer.truncate(length);
-            break;
+        if length < name.len() {
+            let actual = OsString::from_wide(&name[..length]);
+            return if Path::new(&actual) == target.root {
+                Ok(file)
+            } else {
+                Err(Error::Changed)
+            };
         }
-        buffer.resize(length + 1, 0);
+        name.resize(length + 1, 0);
     }
-    Ok(normalize(OsString::from_wide(&buffer)))
 }
 
-/// `GetFinalPathNameByHandleW` 返回 `\\?\C:\…` 或 `\\?\UNC\server\share\…`，
-/// 统一成与授权根相同的形态；无法转换时保留原样，`within` 仍能比较卷前缀。
-fn normalize(raw: OsString) -> PathBuf {
-    let Some(text) = raw.to_str() else {
-        return PathBuf::from(raw);
+fn raw(file: &File) -> HANDLE {
+    file.as_raw_handle().cast()
+}
+
+fn attributes(file: &File) -> Result<u32, Error> {
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    if unsafe { GetFileInformationByHandle(raw(file), &mut info) } == 0 {
+        return Err(io::Error::last_os_error().into());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(Error::Escape);
+    }
+    Ok(info.dwFileAttributes)
+}
+
+fn open_relative(
+    parent: &File,
+    name: &OsStr,
+    access: u32,
+    disposition: u32,
+    kind: u32,
+    share: u32,
+) -> Result<File, Error> {
+    let mut wide: Vec<u16> = name.encode_wide().collect();
+    let length = u16::try_from(size_of_val(wide.as_slice())).map_err(|_| Error::Escape)?;
+    let mut name = UNICODE_STRING {
+        Length: length,
+        MaximumLength: length,
+        Buffer: wide.as_mut_ptr(),
     };
-    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{rest}"));
+    let object = OBJECT_ATTRIBUTES {
+        Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
+        RootDirectory: raw(parent),
+        ObjectName: &mut name,
+        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        ..Default::default()
+    };
+    let mut result = std::ptr::null_mut();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    // All buffers and the parent handle are live for this synchronous call.
+    let status = unsafe {
+        NtCreateFile(
+            &mut result,
+            access | SYNCHRONIZE,
+            &object,
+            &mut io_status,
+            std::ptr::null(),
+            FILE_ATTRIBUTE_NORMAL,
+            share,
+            disposition,
+            kind | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
+            std::ptr::null(),
+            0,
+        )
+    };
+    status_result(status)?;
+    // A successful NtCreateFile gives ownership of the new handle to the caller.
+    let file = unsafe { File::from_raw_handle(result.cast()) };
+    if disposition != FILE_CREATE {
+        attributes(&file)?;
     }
-    if let Some(rest) = text.strip_prefix(r"\\?\") {
-        return PathBuf::from(rest);
-    }
-    PathBuf::from(raw)
+    Ok(file)
 }
 
-fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain([0]).collect()
+pub(crate) fn read(target: &Resolved) -> Result<File, Error> {
+    let path = relative(target)?;
+    if path.as_os_str().is_empty() {
+        return Err(Error::IsDirectory);
+    }
+    let root = open_root(target, 0)?;
+    open_relative(
+        &root,
+        path.as_os_str(),
+        GENERIC_READ,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+        SHARE_FILE,
+    )
+}
+
+pub(crate) struct Entry {
+    pub(crate) name: OsString,
+    pub(crate) size: u64,
+    pub(crate) mtime: f64,
+    pub(crate) is_directory: bool,
+    pub(crate) is_reparse: bool,
+}
+
+pub(crate) fn list(target: &Resolved, mut visit: impl FnMut(Entry)) -> Result<(), Error> {
+    let path = relative(target)?;
+    let is_root = path.as_os_str().is_empty();
+    let root = open_root(target, if is_root { FILE_LIST_DIRECTORY } else { 0 })?;
+    let child;
+    let directory = if is_root {
+        &root
+    } else {
+        child = open_relative(
+            &root,
+            path.as_os_str(),
+            FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
+            SHARE_DIRECTORY,
+        )?;
+        &child
+    };
+
+    // The kernel packs records with UTF-16 names into this eight-byte aligned buffer.
+    let mut buffer = vec![0u64; 4096];
+    loop {
+        let mut io_status = IO_STATUS_BLOCK::default();
+        // The call is synchronous, with no event or completion callback.
+        let status = unsafe {
+            NtQueryDirectoryFile(
+                raw(directory),
+                std::ptr::null_mut(),
+                None,
+                std::ptr::null(),
+                &mut io_status,
+                buffer.as_mut_ptr().cast(),
+                size_of_val(buffer.as_slice()) as u32,
+                FileFullDirectoryInformation,
+                false,
+                std::ptr::null(),
+                false,
+            )
+        };
+        if matches!(status, STATUS_NO_MORE_FILES | STATUS_NO_SUCH_FILE) {
+            return Ok(());
+        }
+        status_result(status)?;
+        if io_status.Information == 0 {
+            return Ok(());
+        }
+        visit_entries(&buffer, io_status.Information, &mut visit)?;
+    }
+}
+
+fn visit_entries(buffer: &[u64], used: usize, visit: &mut impl FnMut(Entry)) -> Result<(), Error> {
+    // The backing buffer is initialized, and the byte slice cannot outlive it.
+    let bytes =
+        unsafe { std::slice::from_raw_parts(buffer.as_ptr().cast::<u8>(), size_of_val(buffer)) };
+    let invalid = || io::Error::new(io::ErrorKind::InvalidData, "invalid directory information");
+    let mut entries = bytes.get(..used).ok_or_else(invalid)?;
+    let name_offset = offset_of!(FILE_FULL_DIR_INFORMATION, FileName);
+    loop {
+        if entries.len() < name_offset {
+            return Err(invalid().into());
+        }
+        // Only copy the fixed header. The trailing FileName field is variable length.
+        let mut record = FILE_FULL_DIR_INFORMATION::default();
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                entries.as_ptr(),
+                std::ptr::from_mut(&mut record).cast(),
+                name_offset,
+            )
+        };
+        let next = record.NextEntryOffset as usize;
+        let end = if next == 0 { entries.len() } else { next };
+        let name_end = name_offset
+            .checked_add(record.FileNameLength as usize)
+            .ok_or_else(invalid)?;
+        if name_end > end || end > entries.len() || !record.FileNameLength.is_multiple_of(2) {
+            return Err(invalid().into());
+        }
+        let (units, _) = entries[name_offset..name_end].as_chunks::<2>();
+        let wide: Vec<u16> = units
+            .iter()
+            .map(|&chunk| u16::from_le_bytes(chunk))
+            .collect();
+        let name = OsString::from_wide(&wide);
+        if name != "." && name != ".." {
+            visit(Entry {
+                name,
+                size: record.EndOfFile.max(0) as u64,
+                mtime: record
+                    .LastWriteTime
+                    .saturating_sub(FILETIME_UNIX_EPOCH)
+                    .max(0) as f64
+                    / 10_000_000.0,
+                is_directory: record.FileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0,
+                is_reparse: record.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0,
+            });
+        }
+        if next == 0 {
+            return Ok(());
+        }
+        entries = &entries[next..];
+    }
+}
+
+fn open_or_create_directory(parent: &File, name: &OsStr) -> Result<File, Error> {
+    let open = || {
+        open_relative(
+            parent,
+            name,
+            FILE_READ_ATTRIBUTES,
+            FILE_OPEN,
+            FILE_DIRECTORY_FILE,
+            SHARE_DIRECTORY,
+        )
+    };
+    match open() {
+        Err(Error::Missing) => match open_relative(
+            parent,
+            name,
+            FILE_READ_ATTRIBUTES,
+            FILE_CREATE,
+            FILE_DIRECTORY_FILE,
+            SHARE_DIRECTORY,
+        ) {
+            Err(Error::Exists) => open(),
+            result => result,
+        },
+        result => result,
+    }
+}
+
+fn ensure_directory(target: &Resolved, path: &Path) -> Result<Vec<File>, Error> {
+    let mut handles = vec![open_root(target, 0)?];
+    for component in path.components() {
+        let Component::Normal(name) = component else {
+            return Err(Error::Escape);
+        };
+        let directory = open_or_create_directory(handles.last().unwrap(), name)?;
+        handles.push(directory);
+    }
+    Ok(handles)
+}
+
+pub(crate) fn mkdir(target: &Resolved) -> Result<(), Error> {
+    ensure_directory(target, relative(target)?)?;
+    Ok(())
+}
+
+pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
+    let path = relative(target)?;
+    let name = path.file_name().ok_or(Error::IsDirectory)?;
+    let directories = ensure_directory(target, path.parent().ok_or(Error::Escape)?)?;
+    let directory = directories.last().unwrap();
+    match open_relative(
+        directory,
+        name,
+        FILE_READ_ATTRIBUTES,
+        FILE_OPEN,
+        FILE_NON_DIRECTORY_FILE,
+        SHARE_FILE,
+    ) {
+        Ok(_) | Err(Error::Missing) => (),
+        Err(error) => return Err(error),
+    }
+
+    let temp = (0..4)
+        .find_map(|_| {
+            let name = format!(".muse-{}.tmp", super::token::generate());
+            match open_relative(
+                directory,
+                OsStr::new(&name),
+                GENERIC_WRITE | DELETE,
+                FILE_CREATE,
+                FILE_NON_DIRECTORY_FILE,
+                0,
+            ) {
+                Err(Error::Exists) => None,
+                result => Some(result),
+            }
+        })
+        .ok_or(Error::Changed)??;
+    let mut temp = temp;
+    let result = (|| {
+        temp.write_all(bytes)?;
+        temp.sync_all()?;
+        rename(&temp, directory, name)
+    })();
+    if result.is_err() {
+        delete_on_close(&temp)?;
+    }
+    result
+}
+
+fn rename(file: &File, directory: &File, name: &OsStr) -> Result<(), Error> {
+    let wide: Vec<u16> = name.encode_wide().collect();
+    let name_size = size_of_val(wide.as_slice());
+    let size = (offset_of!(FILE_RENAME_INFORMATION, FileName) + name_size)
+        .max(size_of::<FILE_RENAME_INFORMATION>());
+    let mut buffer = vec![0usize; size.div_ceil(size_of::<usize>())];
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    let mut io_status = IO_STATUS_BLOCK::default();
+    // The storage is aligned and large enough for both the fixed header and the complete name.
+    let status = unsafe {
+        (*info).Anonymous.ReplaceIfExists = true;
+        (*info).RootDirectory = raw(directory);
+        (*info).FileNameLength = name_size as u32;
+        let name_buffer = info
+            .cast::<u8>()
+            .add(offset_of!(FILE_RENAME_INFORMATION, FileName))
+            .cast::<u16>();
+        std::ptr::copy_nonoverlapping(wide.as_ptr(), name_buffer, wide.len());
+        NtSetInformationFile(
+            raw(file),
+            &mut io_status,
+            info.cast(),
+            size as u32,
+            FileRenameInformation,
+        )
+    };
+    status_result(status)
+}
+
+fn delete_on_close(file: &File) -> Result<(), Error> {
+    let mut io_status = IO_STATUS_BLOCK::default();
+    let info = FILE_DISPOSITION_INFORMATION { DeleteFile: true };
+    let status = unsafe {
+        NtSetInformationFile(
+            raw(file),
+            &mut io_status,
+            std::ptr::from_ref(&info).cast(),
+            size_of::<FILE_DISPOSITION_INFORMATION>() as u32,
+            FileDispositionInformation,
+        )
+    };
+    status_result(status)
 }
 
 #[cfg(test)]
@@ -377,16 +491,17 @@ mod tests {
 
     impl Fixture {
         fn new() -> Self {
-            let path = std::env::temp_dir()
+            let root = std::env::temp_dir()
                 .join(format!("muse-handle-{}", super::super::token::generate()));
-            std::fs::create_dir_all(&path).unwrap();
-            Self(path)
+            std::fs::create_dir(&root).unwrap();
+            Self(root)
         }
 
-        fn root(&self) -> PathBuf {
-            let root = self.0.join("root");
-            std::fs::create_dir_all(&root).unwrap();
-            root
+        fn target(&self, path: &str) -> Resolved {
+            let roots = [("root".to_owned(), self.0.clone())].into();
+            let mut target = super::super::path_guard::resolve(&roots, "root", path).unwrap();
+            target.reject_reparse = true;
+            target
         }
     }
 
@@ -397,118 +512,63 @@ mod tests {
     }
 
     #[test]
-    fn handle_keeps_the_object_when_the_path_changes() {
+    fn reading_keeps_the_open_file_when_its_name_changes() {
         let fixture = Fixture::new();
-        let root = fixture.root();
-        let file = root.join("note.txt");
-        std::fs::write(&file, b"original").unwrap();
-        let verified = open(&file, Access::Read).unwrap();
-        assert!(within(verified.final_path(), &root));
-        assert_eq!(verified.final_path().file_name().unwrap(), "note.txt");
-        // 路径被换成新的同名文件，已打开的句柄仍绑定原来的对象。
-        std::fs::rename(&file, root.join("moved.txt")).unwrap();
-        std::fs::write(&file, b"replacement").unwrap();
-        let mut content = Vec::new();
-        verified.into_file().read_to_end(&mut content).unwrap();
-        assert_eq!(content, b"original");
+        let target = fixture.target("note.txt");
+        std::fs::write(&target.path, b"original").unwrap();
+        let mut file = read(&target).unwrap();
+        std::fs::rename(&target.path, fixture.0.join("moved.txt")).unwrap();
+        std::fs::write(&target.path, b"replacement").unwrap();
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"original");
     }
 
     #[test]
-    fn directory_junction_is_rejected_before_any_io() {
-        use std::os::windows::process::CommandExt;
+    fn failed_replacement_keeps_the_previous_file_and_removes_the_temp_file() {
         let fixture = Fixture::new();
-        let root = fixture.root();
-        let outside = fixture.0.join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        let link = root.join("junction");
-        let status = std::process::Command::new("cmd.exe")
-            .creation_flags(0x08000000)
-            .args(["/D", "/C", "mklink", "/J"])
-            .arg(&link)
-            .arg(&outside)
-            .status()
+        let target = fixture.target("note.txt");
+        write(&target, b"original").unwrap();
+        let locked = OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&target.path)
             .unwrap();
-        assert!(status.success(), "目录联接未创建");
+        assert!(write(&target, b"replacement").is_err());
+        assert_eq!(std::fs::read(&target.path).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
+        drop(locked);
+        write(&target, b"replacement").unwrap();
+        assert_eq!(std::fs::read(&target.path).unwrap(), b"replacement");
+        assert_eq!(std::fs::read_dir(&fixture.0).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn verified_directories_stay_in_place_until_the_operation_releases_them() {
+        let fixture = Fixture::new();
+        let target = fixture.target("parent/child");
+        let handles = ensure_directory(&target, relative(&target).unwrap()).unwrap();
+        let parent = fixture.0.join("parent");
+        let renamed = fixture.0.join("renamed");
+        assert!(std::fs::rename(&parent, &renamed).is_err());
+        drop(handles);
+        std::fs::rename(parent, &renamed).unwrap();
+        assert!(renamed.join("child").is_dir());
+    }
+
+    #[test]
+    fn write_keeps_existing_directories_intact() {
+        let fixture = Fixture::new();
+        let target = fixture.target("folder");
+        mkdir(&target).unwrap();
+        std::fs::write(target.path.join("note.txt"), b"original").unwrap();
         assert!(matches!(
-            open(&link, Access::Metadata),
-            Err(VerifyError::Escape)
+            write(&target, b"replacement"),
+            Err(Error::IsDirectory)
         ));
-        assert!(matches!(
-            verify_existing_ancestor(&link.join("x.txt"), &root),
-            Err(VerifyError::Escape)
-        ));
-    }
-
-    #[test]
-    fn replace_rejects_names_that_are_not_a_leaf() {
-        let fixture = Fixture::new();
-        let root = fixture.root();
-        let dir = open(&root, Access::Directory).unwrap();
-        for name in [
-            "../escape.txt",
-            "sub/escape.txt",
-            "sub\\escape.txt",
-            "",
-            ".",
-            "..",
-        ] {
-            assert!(
-                matches!(replace(&dir, name, b"x"), Err(ReplaceError::InvalidName)),
-                "{name}"
-            );
-        }
-        assert!(!fixture.0.join("escape.txt").exists());
-    }
-
-    #[test]
-    fn replace_keeps_the_previous_file_when_the_target_is_a_directory() {
-        let fixture = Fixture::new();
-        let root = fixture.root();
-        std::fs::create_dir(root.join("target")).unwrap();
-        std::fs::write(root.join("target").join("inner.txt"), b"inner").unwrap();
-        let dir = open(&root, Access::Directory).unwrap();
-        assert!(replace(&dir, "target", b"data").is_err());
         assert_eq!(
-            std::fs::read_to_string(root.join("target").join("inner.txt")).unwrap(),
-            "inner"
+            std::fs::read(target.path.join("note.txt")).unwrap(),
+            b"original"
         );
-        // 失败的替换不能留下临时文件。
-        let leftovers = std::fs::read_dir(&root)
-            .unwrap()
-            .flatten()
-            .filter(|entry| entry.file_name().to_string_lossy().starts_with(".muse-"))
-            .count();
-        assert_eq!(leftovers, 0);
-    }
-
-    #[test]
-    fn replace_creates_a_new_file() {
-        let fixture = Fixture::new();
-        let root = fixture.root();
-        let dir = open(&root, Access::Directory).unwrap();
-        replace(&dir, "brand-new.txt", b"fresh").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(root.join("brand-new.txt")).unwrap(),
-            "fresh"
-        );
-    }
-
-    #[test]
-    fn replace_writes_new_content_and_drops_the_temp_file() {
-        let fixture = Fixture::new();
-        let root = fixture.root();
-        std::fs::write(root.join("note.txt"), b"old").unwrap();
-        let dir = open(&root, Access::Directory).unwrap();
-        replace(&dir, "note.txt", b"new content").unwrap();
-        assert_eq!(
-            std::fs::read_to_string(root.join("note.txt")).unwrap(),
-            "new content"
-        );
-        let names: Vec<_> = std::fs::read_dir(&root)
-            .unwrap()
-            .flatten()
-            .map(|entry| entry.file_name().to_string_lossy().into_owned())
-            .collect();
-        assert_eq!(names, vec!["note.txt".to_string()]);
     }
 }

@@ -222,6 +222,18 @@ impl AccessPolicy {
         alias: &str,
         relative: &str,
     ) -> Result<PathBuf, &'static str> {
+        self.resolve_file(operation, local_roots, protected, alias, relative)
+            .map(|resolved| resolved.path)
+    }
+
+    pub(crate) fn resolve_file(
+        &self,
+        operation: Operation,
+        local_roots: &BTreeMap<String, PathBuf>,
+        protected: &[PathBuf],
+        alias: &str,
+        relative: &str,
+    ) -> Result<path_guard::Resolved, &'static str> {
         let roots = self
             .scope_roots(operation, local_roots)
             .ok_or(ERR_NOT_AUTHORIZED)?;
@@ -239,8 +251,8 @@ fn check_target(
     protected: &[PathBuf],
     alias: &str,
     relative: &str,
-) -> Result<PathBuf, &'static str> {
-    let resolved = path_guard::resolve(roots, alias, relative)?;
+) -> Result<path_guard::Resolved, &'static str> {
+    let mut resolved = path_guard::resolve(roots, alias, relative)?;
     let lexical = relative
         .split(['/', '\\'])
         .filter(|component| !component.is_empty() && *component != ".")
@@ -248,10 +260,11 @@ fn check_target(
             path.push(component);
             path
         });
-    if protected_path(&lexical, protected) || protected_path(&resolved, protected) {
+    if protected_path(&lexical, protected) || protected_path(&resolved.path, protected) {
         return Err(ERR_PROTECTED);
     }
     reject_reparse_ancestors(&lexical)?;
+    resolved.reject_reparse = true;
     Ok(resolved)
 }
 
@@ -262,12 +275,12 @@ pub fn protected_path(candidate: &Path, protected: &[PathBuf]) -> bool {
 }
 
 #[cfg(not(windows))]
-pub(crate) fn within(candidate: &Path, root: &Path) -> bool {
+fn within(candidate: &Path, root: &Path) -> bool {
     candidate.starts_with(root)
 }
 
 #[cfg(windows)]
-pub(crate) fn within(candidate: &Path, root: &Path) -> bool {
+fn within(candidate: &Path, root: &Path) -> bool {
     use std::ffi::OsStr;
     use std::path::{Component, Prefix};
 

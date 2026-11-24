@@ -266,16 +266,6 @@ impl AccessRuntime {
         Ok(())
     }
 
-    /// 单个别名对应的授权根，用于句柄层判断打开的对象是否仍在根内。
-    pub(crate) fn agent_root(&self, op: Operation, alias: &str) -> Option<PathBuf> {
-        let active = self.active.read().unwrap();
-        let policy = active.policy.as_ref()?;
-        policy
-            .roots_for(op, &self.operation_roots(policy, op))?
-            .get(alias)
-            .cloned()
-    }
-
     pub(crate) fn agent_roots(&self, op: Operation) -> Option<BTreeMap<String, PathBuf>> {
         let active = self.active.read().unwrap();
         let policy = active.policy.as_ref()?;
@@ -291,15 +281,29 @@ impl AccessRuntime {
         alias: &str,
         relative: &str,
     ) -> Result<PathBuf, &'static str> {
+        self.resolve_agent_file(op, alias, relative)
+            .map(|resolved| resolved.path)
+    }
+
+    pub(crate) fn resolve_agent_file(
+        &self,
+        op: Operation,
+        alias: &str,
+        relative: &str,
+    ) -> Result<super::path_guard::Resolved, &'static str> {
         let active = self.active.read().unwrap();
         let policy = active.policy.as_ref().ok_or(ERR_NOT_AUTHORIZED)?;
-        policy.resolve(
+        policy.resolve_file(
             op,
             &self.operation_roots(policy, op),
             &self.protected,
             alias,
             relative,
         )
+    }
+
+    pub(crate) fn is_protected_path(&self, path: &Path) -> bool {
+        protected_path(path, &self.protected)
     }
 
     pub(crate) fn agent_listing_entry_allowed(&self, path: &Path) -> bool {
@@ -671,12 +675,13 @@ impl AccessRuntime {
         &self,
         root: &Path,
         relative: &str,
-    ) -> Result<(), &'static str> {
-        if self.active.read().unwrap().policy.is_some() {
-            let lexical = root.join(relative.replace('\\', "/"));
-            super::access::reject_reparse_ancestors(&lexical)?;
+    ) -> Result<bool, &'static str> {
+        if self.active.read().unwrap().policy.is_none() {
+            return Ok(false);
         }
-        Ok(())
+        let lexical = root.join(relative.replace('\\', "/"));
+        super::access::reject_reparse_ancestors(&lexical)?;
+        Ok(true)
     }
 
     fn local_roots(&self) -> BTreeMap<String, PathBuf> {
