@@ -30,6 +30,7 @@ export interface TunnelStatus {
   api_up: boolean; funnel_up: boolean; url: string | null; enabled: boolean;
   last_check: string; note: string; api_port: number; public_verified: boolean | null; agent_public_verified: boolean | null;
 }
+export type DeviceNameUpdate = { id: string; pending: boolean };
 export interface Snapshot {
   run_id: string; profile: "development" | "production"; initialized: boolean; fresh_setup: boolean; setup_error: string | null;
   file_token_version: string | null;
@@ -42,7 +43,8 @@ export interface Snapshot {
   agent_ready: boolean;
   agent_token_version?: string | null;
   home: string; config: BridgeConfig;
-  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; permission_mode: string; language: Language };
+  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; permission_mode: string; language: Language; device_name: string; device_name_update?: DeviceNameUpdate | null };
+  suggested_device_name: string | null;
   status: TunnelStatus;
   stats: ActivityStats & { file_activity: ActivityStats };
   dependencies: { tailscale: boolean; cloudflared: boolean; simulated: boolean };

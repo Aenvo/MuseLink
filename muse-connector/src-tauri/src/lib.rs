@@ -165,6 +165,22 @@ async fn save_preferences(
     state.save_window_preferences(start_minimized).await
 }
 #[tauri::command]
+async fn save_device_name(
+    name: String,
+    update_muse: bool,
+    state: tauri::State<'_, Services>,
+) -> Result<Option<profile::DeviceNameUpdate>, String> {
+    state.save_device_name(name, update_muse).await
+}
+#[tauri::command]
+fn confirm_device_name(id: String, state: tauri::State<'_, Services>) -> Result<(), String> {
+    if state.confirm_device_name(&id)? {
+        Ok(())
+    } else {
+        Err("这次改名已被更新，请查看当前设备名称。".into())
+    }
+}
+#[tauri::command]
 async fn set_language(
     language: Language,
     app: tauri::AppHandle,
@@ -724,6 +740,8 @@ pub fn run() {
             save_provider,
             rotate_file_token,
             save_preferences,
+            save_device_name,
+            confirm_device_name,
             set_language,
             set_autostart,
             pick_directory,

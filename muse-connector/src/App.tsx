@@ -1,6 +1,7 @@
 import { useLanguage } from "@/lib/i18n";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Play, Pause, X } from "lucide-react";
+import { toast } from "sonner";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -14,8 +15,9 @@ import { ConfirmAction, Notice, type Confirmation } from "@/components/feedback"
 import { useBridge, type BridgeModel } from "@/lib/use-bridge";
 import { LanguageProvider } from "@/lib/i18n";
 import { connectionPresentation } from "@/lib/connection-presentation";
-import { providerToolAvailable, setupStorageKey } from "@/lib/setup-progress";
+import { providerToolAvailable, publicAddress, readSetupVerification, setupStorageKey } from "@/lib/setup-progress";
 import { hasFileGrant } from "@/lib/agent-setup";
+import { useDeviceName } from "@/lib/use-device-name";
 import Overview from "@/pages/overview";
 
 const Connection = lazy(() => import("@/pages/connection"));
@@ -75,6 +77,28 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
       // 浏览器存储不可用时仍保留本次会话的进度。
     }
   }, [storageKey, useLegacyGuide]);
+  const verified = !!storageKey && readSetupVerification(storageKey + ":agent")?.read === true;
+  const deviceName = useDeviceName(bridge, verified || (!guiding && page === "connection" && !!s?.agent_ready && !!s.desktop.device_name), (name, copy, pending) => {
+    if (!pending) { toast.success(t("设备名称已保存")); return; }
+    toast(t("本机已改名为「{0}」", name), {
+      id: "device-name-update",
+      position: guiding ? "top-left" : "bottom-right",
+      description: t("请在 Muse 中更新这台设备的名称。"),
+      action: {
+        label: t(copy ? "复制改名说明" : "查看改名状态"),
+        onClick: () => {
+          if (copy) void copy().then(ok => {
+            if (ok) toast.success(t("改名说明已复制，请粘贴给 Muse。"));
+            else navigate("connection", "connection-device-name");
+          });
+          else navigate("connection", "connection-device-name");
+        },
+      },
+    });
+  });
+  useEffect(() => {
+    if (!deviceName.pending) toast.dismiss("device-name-update");
+  }, [deviceName.pending]);
   useEffect(() => { scroll.current?.querySelector('[data-slot="scroll-area-viewport"]')?.scrollTo(0, 0); }, [page]);
   useEffect(() => {
     if (!guideVisible) return;
@@ -163,8 +187,8 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
           {s?.log_errors?.length ? <Notice title={t("日志未能完整保存")} error>{s.log_errors.map(diagnostic).join(" · ")}</Notice> : null}
           {s ? <>
             <TabsContent value="overview"><Overview bridge={bridge} confirm={confirm} guideVisible={guideVisible} guiding={guiding} onStartGuide={expandGuide} onOpenFileAccess={() => navigate("roots")} onTestPublicConnection={() => testPublicConnection()} /></TabsContent>
-            {visited.has("connection") ? <TabsContent value="connection" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Connection bridge={bridge} confirm={confirm} guideVisible={guideVisible} guiding={guiding} onDirtyChange={setConnectionDirty} onStartGuide={expandGuide} /></Suspense></TabsContent> : null}
-            <TabsContent value="roots">{page === "roots" ? <Suspense fallback={loadingPage}><Roots bridge={bridge} guided={guideVisible && !hasFileGrant(s.file_access)} guiding={guiding} onAccessSaved={expandGuide} confirm={confirm} /></Suspense> : null}</TabsContent>
+            {visited.has("connection") ? <TabsContent value="connection" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Connection bridge={bridge} deviceName={deviceName} museSetupComplete={verified || s.desktop.device_name_update?.pending === false} museSetupReady={!!publicAddress(s) && s.agent_ready && s.status.agent_public_verified === true} confirm={confirm} guideVisible={guideVisible} guiding={guiding} onDirtyChange={setConnectionDirty} onStartGuide={expandGuide} /></Suspense></TabsContent> : null}
+            <TabsContent value="roots">{page === "roots" ? <Suspense fallback={loadingPage}><Roots bridge={bridge} deviceName={deviceName} onEditDeviceName={() => navigate("connection", "connection-device-name")} guided={guideVisible && !hasFileGrant(s.file_access)} guiding={guiding} onAccessSaved={expandGuide} confirm={confirm} /></Suspense> : null}</TabsContent>
             {visited.has("logs") ? <TabsContent value="logs" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Logs key={s.run_id} bridge={bridge} selected={page === "logs"} /></Suspense></TabsContent> : null}
             {visited.has("settings") ? <TabsContent value="settings" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Settings bridge={bridge} /></Suspense></TabsContent> : null}
             <TabsContent value="about">{page === "about" ? <Suspense fallback={loadingPage}><About version={s.version} onError={bridge.setError} /></Suspense> : null}</TabsContent>
@@ -173,7 +197,7 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
       </ScrollArea>
     </Tabs>
     {s && guideVisible ? <Suspense fallback={null}>
-      <SetupGuide key={storageKey} snapshot={s} bridge={bridge} storageKey={storageKey} page={page} expanded={guiding} suspended={guideSuspended} activation={guideActivation}
+      <SetupGuide key={storageKey} snapshot={s} bridge={bridge} deviceName={deviceName} storageKey={storageKey} page={page} expanded={guiding} suspended={guideSuspended} activation={guideActivation}
         onExpand={expandGuide} onCollapse={() => setGuideMode("collapsed")} onNavigate={navigate}
         onHeightChange={setGuideSpace} onProgressChange={rememberGuide} confirm={confirm} onTestPublicConnection={() => testPublicConnection(true)} />
     </Suspense> : null}

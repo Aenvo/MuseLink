@@ -1,11 +1,12 @@
 import { useLanguage, type Translate } from "@/lib/i18n";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Clipboard, Copy, FileKey } from "lucide-react";
 import type { Confirmation } from "@/components/feedback";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { providerToolAvailable, publicAddress } from "@/lib/setup-progress";
 import { agentCredentialIssue, agentTrial, connectorBrief, hasFileGrant } from "@/lib/agent-setup";
+import type { DeviceNameModel } from "@/lib/use-device-name";
 import type { BridgeModel, Snapshot } from "@/lib/use-bridge";
 
 const credentialActions = (t: Translate) => ({
@@ -26,9 +27,11 @@ const credentialActions = (t: Translate) => ({
   },
 });
 
-export default function AgentConnection({ bridge, snapshot, confirm }: {
+export default function AgentConnection({ bridge, snapshot, deviceName, onEditDeviceName, confirm }: {
   bridge: BridgeModel;
   snapshot: Snapshot;
+  deviceName: DeviceNameModel;
+  onEditDeviceName: () => void;
   confirm: (value: Confirmation) => void;
 }) {
   const { language, t } = useLanguage();
@@ -38,12 +41,14 @@ export default function AgentConnection({ bridge, snapshot, confirm }: {
   const hasPermission = hasFileGrant(policy);
   const canIssue = hasPermission && !snapshot.setup_error;
   const origin = publicAddress(snapshot);
-  const instructions = ready && origin ? connectorBrief(language, origin, agentTrial(t, policy).instruction) : null;
+  const instructions = ready && origin && deviceName.canCopy ? connectorBrief(language, origin, agentTrial(t, policy).instruction, deviceName.saved) : null;
   const version = tokenVersion ?? null;
   const copyResult = instructions && clipboard?.instructions === instructions && clipboard.version === version ? clipboard : null;
   const busy = !!bridge.busy;
   const development = snapshot.profile === "development";
   const providerAvailable = providerToolAvailable(snapshot);
+
+  useEffect(() => setClipboard(null), [deviceName.saved]);
 
   const changeCredential = (operation: keyof ReturnType<typeof credentialActions>) => {
     const details = credentialActions(t)[operation];
@@ -79,9 +84,10 @@ export default function AgentConnection({ bridge, snapshot, confirm }: {
       <p className="text-caption text-muted-foreground">{!policy ? t("保存上方的文件授权后，即可生成 Muse 专用令牌。") : !hasPermission ? t("保存至少一项访问权限后，即可生成 Muse 专用令牌。") : t("授权已保存。生成专用令牌后，可把上方权限接入 Muse。")}</p>
       <Button size="sm" className="self-start" disabled={busy || !canIssue} onClick={() => changeCredential("issue")}>{t("生成 Muse 专用令牌")}</Button>
     </> : <>
-      <p className="text-caption text-muted-foreground">{!ready ? t("请检查上方已保存的文件授权。") : development ? t("此环境使用独立的测试令牌与模拟连接。") : !origin ? (providerAvailable ? t("在右上角开启连接。连接就绪后即可复制接入说明。") : t("请先在「连接」页安装并登录所选公网转发工具。")) : t("把接入说明发给 Muse。打开 Muse 的安全卡片后，复制专用令牌并粘贴到卡片中。")}</p>
+      <p className="text-caption text-muted-foreground">{!ready ? t("请检查上方已保存的文件授权。") : development ? t("此环境使用独立的测试令牌与模拟连接。") : !origin ? (providerAvailable ? t("在右上角开启连接。连接就绪后即可复制接入说明。") : t("请先在「连接」页安装并登录所选公网转发工具。")) : deviceName.canCopy ? t("把接入说明发给 Muse。打开 Muse 的安全卡片后，复制专用令牌并粘贴到卡片中。") : t(deviceName.dirty ? "请先保存或取消设备名称的更改。" : "请先保存设备名称，再复制接入说明。")}</p>
       <div className="flex flex-wrap gap-2">
         <Button size="sm" disabled={busy || !instructions} onClick={() => void copy()}><Clipboard data-icon="inline-start" />{t("复制 Muse 接入说明")}</Button>
+        {ready && origin && !deviceName.canCopy ? <Button size="sm" variant="outline" onClick={onEditDeviceName}>{t("设置设备名称")}</Button> : null}
         <Button size="sm" variant="outline" disabled={busy} onClick={() => void copyToken()}><Copy data-icon="inline-start" />{t("复制专用令牌")}</Button>
         <Button size="sm" variant="ghost" disabled={busy} onClick={() => void bridge.run(t("正在定位令牌文件"), "open_agent_token", undefined, undefined, false)}><FileKey data-icon="inline-start" />{t("定位令牌文件")}</Button>
         <Button size="sm" variant="ghost" disabled={busy || !canIssue} onClick={() => changeCredential("rotate")}>{t("轮换令牌")}</Button>

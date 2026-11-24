@@ -57,6 +57,12 @@ impl Language {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceNameUpdate {
+    pub id: String,
+    pub pending: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopState {
     pub schema_version: u32,
@@ -64,6 +70,8 @@ pub struct DesktopState {
     pub provider: ProviderSettings,
     pub start_minimized: bool,
     pub language: Language,
+    pub device_name: String,
+    pub device_name_update: Option<DeviceNameUpdate>,
     pub permission_mode: String,
     pub capabilities: Vec<String>,
     pub agent_token_ref: Option<String>,
@@ -76,11 +84,22 @@ impl Default for DesktopState {
             provider: ProviderSettings::default(),
             start_minimized: false,
             language: Language::default(),
+            device_name: String::new(),
+            device_name_update: None,
             permission_mode: "request_approval".into(),
             capabilities: vec![],
             agent_token_ref: None,
         }
     }
+}
+
+pub(crate) fn valid_device_name(name: &str) -> bool {
+    (1..=32).contains(&name.chars().count())
+        && !name.starts_with(' ')
+        && !name.ends_with(' ')
+        && name
+            .chars()
+            .all(|c| c.is_alphabetic() || c.is_ascii_digit() || matches!(c, ' ' | '-' | '_'))
 }
 impl RuntimeProfile {
     pub fn discover() -> Result<Self, String> {
