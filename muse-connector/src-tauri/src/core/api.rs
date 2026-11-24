@@ -1104,8 +1104,13 @@ async fn agent_search(State(state): State<ApiState>, request: Request) -> Respon
         }
         let (code, message, authed) = match result {
             Ok(body) => {
-                let search = Some((body.backend, started.elapsed().as_millis().min(u64::MAX as u128) as u64));
-                return respond_with_search(&state, &parts, 200, body, true, None, None, None, search);
+                let search = Some((
+                    body.backend,
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                ));
+                return respond_with_search(
+                    &state, &parts, 200, body, true, None, None, None, search,
+                );
             }
             Err(AgentSearchError::Unauthorized) => (401, "unauthorized", false),
             Err(AgentSearchError::Forbidden) => (403, "file access denied", true),
@@ -1642,7 +1647,9 @@ mod tests {
 
         let (code, _, _) = call(&e.app, "GET", "/agent/v1/roots", Some(&e.token), "").await;
         assert_eq!(code, 401);
-        access.issue_agent_token(|key| e.state.audit().protect_secret(key)).unwrap();
+        access
+            .issue_agent_token(|key| e.state.audit().protect_secret(key))
+            .unwrap();
         let agent_token = access.agent_token().unwrap();
         let auth = Some(agent_token.as_str());
 
@@ -1650,26 +1657,64 @@ mod tests {
         assert_eq!(code, 401);
         let (code, roots, _) = call(&e.app, "GET", "/agent/v1/roots", auth, "").await;
         assert_eq!(code, 200);
-        assert_eq!(roots["roots"], json!({"search":["test-disk"],"read":["fixture"],"write":[]}));
+        assert_eq!(
+            roots["roots"],
+            json!({"search":["test-disk"],"read":["fixture"],"write":[]})
+        );
         let (code, desktop, _) = call(&e.app, "GET", "/agent/v1/locations/desktop", auth, "").await;
         assert_eq!(code, 200);
         assert_eq!(desktop["root"], "fixture");
         assert_eq!(desktop["path"], "");
         assert_eq!(desktop["absolute_path"], fixture.to_str().unwrap());
-        let (code, search, _) = call(&e.app, "POST", "/agent/v1/search", auth, r#"{"name":"sample.txt"}"#).await;
+        let (code, search, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/search",
+            auth,
+            r#"{"name":"sample.txt"}"#,
+        )
+        .await;
         assert_eq!(code, 200);
         assert_eq!(search["hits"][0]["root"], "test-disk");
         assert_eq!(search["hits"][0]["path"], "sample.txt");
         access.clear_index().unwrap();
-        let (code, search, _) = call(&e.app, "POST", "/agent/v1/search", auth, r#"{"name":"sample.txt"}"#).await;
+        let (code, search, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/search",
+            auth,
+            r#"{"name":"sample.txt"}"#,
+        )
+        .await;
         assert_eq!(code, 409);
         assert_eq!(search["error"], "search_index_cleared");
-        let (code, _, _) = call(&e.app, "GET", "/agent/v1/read?root=test-disk&path=sample.txt", auth, "").await;
+        let (code, _, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=test-disk&path=sample.txt",
+            auth,
+            "",
+        )
+        .await;
         assert_eq!(code, 403);
-        let (code, file, _) = call(&e.app, "GET", "/agent/v1/read?root=fixture&path=sample.txt", auth, "").await;
+        let (code, file, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=sample.txt",
+            auth,
+            "",
+        )
+        .await;
         assert_eq!(code, 200);
         assert_eq!(file["content"], "example");
-        let (code, _, _) = call(&e.app, "GET", "/agent/v1/read?root=fixture&path=../agent-token", auth, "").await;
+        let (code, _, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=../agent-token",
+            auth,
+            "",
+        )
+        .await;
         assert_eq!(code, 400);
         let write = r#"{"root":"test-disk","path":"sample.txt","content":"updated"}"#;
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, write).await;
@@ -1680,17 +1725,41 @@ mod tests {
         access.save(policy, false).unwrap();
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, write).await;
         assert_eq!(code, 200);
-        let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, r#"{"root":"test-disk","path":"sample.txt"}"#).await;
+        let (code, _, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/write",
+            auth,
+            r#"{"root":"test-disk","path":"sample.txt"}"#,
+        )
+        .await;
         assert_eq!(code, 400);
-        assert_eq!(std::fs::read_to_string(fixture.join("sample.txt")).unwrap(), "updated");
+        assert_eq!(
+            std::fs::read_to_string(fixture.join("sample.txt")).unwrap(),
+            "updated"
+        );
         let (code, _, _) = call(&e.app, "GET", "/agent/v1/list?root=test-disk", auth, "").await;
         assert_eq!(code, 403);
-        let (code, _, _) = call(&e.app, "POST", "/agent/v1/mkdir", auth, r#"{"root":"test-disk","path":"new-dir"}"#).await;
+        let (code, _, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/mkdir",
+            auth,
+            r#"{"root":"test-disk","path":"new-dir"}"#,
+        )
+        .await;
         assert_eq!(code, 200);
         assert!(fixture.join("new-dir").is_dir());
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/rotate-token", auth, "{}").await;
         assert_eq!(code, 404);
-        let (code, _, _) = call(&e.app, "POST", "/agent/v1/rotate-token", Some(&e.token), "{}").await;
+        let (code, _, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/rotate-token",
+            Some(&e.token),
+            "{}",
+        )
+        .await;
         assert_eq!(code, 401);
 
         access.revoke_agent_token().unwrap();
@@ -1880,9 +1949,8 @@ mod tests {
         let (code, body, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
         assert_eq!(code, 400, "{kind} 读取未被拒绝");
         assert_eq!(body["error"], "path escapes root", "{kind}");
-        let body =
-            json!({"root":"r","path":format!("{kind}/sentinel.txt"),"content":"changed"})
-                .to_string();
+        let body = json!({"root":"r","path":format!("{kind}/sentinel.txt"),"content":"changed"})
+            .to_string();
         let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
         assert_eq!(code, 400, "{kind} 写入未被拒绝");
         assert_eq!(
@@ -1944,8 +2012,8 @@ mod tests {
     #[tokio::test]
     async fn write_read_roundtrip_text() {
         let e = setup(false, default_opts());
-        let body =
-            json!({"root":"r","path":"notes/todo.txt","content":"你好，MuseLink\nline 2"}).to_string();
+        let body = json!({"root":"r","path":"notes/todo.txt","content":"你好，MuseLink\nline 2"})
+            .to_string();
         let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
         assert_eq!(c, 200);
         assert_eq!(v["ok"], true);

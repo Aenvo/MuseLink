@@ -23,7 +23,9 @@ pub fn file_tools_boundary(enabled: bool) -> CapabilityBoundary {
         CapabilityBoundary {
             protocol: "agent-file-v1",
             enabled: true,
-            tools: vec!["roots", "desktop", "search", "list", "read", "write", "mkdir"],
+            tools: vec![
+                "roots", "desktop", "search", "list", "read", "write", "mkdir",
+            ],
         }
     } else {
         boundary()
