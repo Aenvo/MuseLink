@@ -1814,8 +1814,9 @@ mod tests {
                     "switch" => {
                         controller
                             .set_provider(ProviderSettings {
-                                kind: ProviderKind::CloudflareQuick,
-                                ..Default::default()
+                                kind: ProviderKind::CloudflareNamed,
+                                tunnel_id: "test-tunnel".into(),
+                                hostname: "muse.example.com".into(),
                             })
                             .await
                             .unwrap();

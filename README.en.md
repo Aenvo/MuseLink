@@ -49,7 +49,7 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | File permissions | Authorize selected folders and their subfolders, or choose from local fixed drives, with built-in protection for credentials and sensitive system paths. |
 | Local file tools | Let Muse search by file name, list folders, read files, and write or create folders when needed. |
 | Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. |
-| Public connection | Use Tailscale Funnel by default, or choose a Cloudflare quick or named tunnel. |
+| Public connection | Use Tailscale Funnel by default, or choose a Cloudflare named tunnel with your own domain. |
 | Dedicated token | Generate, copy, rotate, or revoke the Muse token in **File Access**, with automatic token redaction in logs. |
 | Desktop controls | Filter and export (JSONL/CSV) audit logs by **Files**, **Command execution**, or runtime events and open the log folder directly; wake and elevate approval prompts from the tray; cleanly terminate managed child processes on exit; switch between English and Simplified Chinese. |
 

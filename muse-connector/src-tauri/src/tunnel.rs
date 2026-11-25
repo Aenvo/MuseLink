@@ -5,9 +5,7 @@ use serde_json::Value;
 #[cfg(test)]
 use serde_json::json;
 use std::path::PathBuf;
-use std::sync::{Arc, RwLock};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -150,8 +148,6 @@ struct Owner {
 pub struct TunnelManager {
     profile: RuntimeProfile,
     child: Option<Child>,
-    child_output: Arc<RwLock<Option<String>>>,
-    output_task: Option<tokio::task::JoinHandle<()>>,
     #[cfg(windows)]
     child_job: Option<crate::core::job::ChildJob>,
     owned: bool,
@@ -163,8 +159,6 @@ impl TunnelManager {
         Self {
             profile,
             child: None,
-            child_output: Arc::new(RwLock::new(None)),
-            output_task: None,
             #[cfg(windows)]
             child_job: None,
             owned: false,
@@ -212,25 +206,20 @@ impl TunnelManager {
                 self.owned = true;
                 run_cli(&exe, &["funnel", "--bg", "--https=443", &port.to_string()]).await?;
             }
-            ProviderKind::CloudflareQuick | ProviderKind::CloudflareNamed => {
+            ProviderKind::CloudflareNamed => {
                 let exe = discover_executable("cloudflared.exe")
                     .ok_or("未检测到 cloudflared，请先安装")?;
                 validate_provider(settings)?;
                 let mut cmd = command(&exe);
-                cmd.arg("tunnel").arg("--no-autoupdate");
-                if settings.kind == ProviderKind::CloudflareNamed {
-                    cmd.args([
-                        "--url",
-                        &format!("http://127.0.0.1:{port}"),
-                        "run",
-                        &settings.tunnel_id,
-                    ]);
-                } else {
-                    cmd.args(["--url", &format!("http://127.0.0.1:{port}")]);
-                }
+                cmd.arg("tunnel").arg("--no-autoupdate").args([
+                    "--url",
+                    &format!("http://127.0.0.1:{port}"),
+                    "run",
+                    &settings.tunnel_id,
+                ]);
                 cmd.stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::piped());
-                let mut child = cmd
+                    .stderr(std::process::Stdio::null());
+                let child = cmd
                     .spawn()
                     .map_err(|e| format!("cloudflared 启动失败：{}", e.kind()))?;
                 #[cfg(windows)]
@@ -240,17 +229,6 @@ impl TunnelManager {
                             .map_err(|_| "无法建立隧道子进程退出保护，已取消启动")?,
                     );
                 }
-                let reader = child.stderr.take().ok_or("无法读取隧道输出")?;
-                let url = self.child_output.clone();
-                *url.write().unwrap() = None;
-                self.output_task = Some(tokio::spawn(async move {
-                    let mut lines = BufReader::new(reader).lines();
-                    while let Ok(Some(line)) = lines.next_line().await {
-                        if let Some(value) = extract_quick_url(&line) {
-                            *url.write().unwrap() = Some(value);
-                        }
-                    }
-                }));
                 self.child = Some(child);
                 self.current = settings.clone();
                 self.port = port;
@@ -273,9 +251,6 @@ impl TunnelManager {
                 self.child = Some(child);
                 return Err("隧道子进程停止超时，文件服务将单独停止".into());
             }
-        }
-        if let Some(task) = self.output_task.take() {
-            task.abort();
         }
         #[cfg(windows)]
         {
@@ -306,7 +281,7 @@ impl TunnelManager {
         }
         match self.current.kind {
             ProviderKind::Tailscale => observe_tailscale(self.port).await,
-            ProviderKind::CloudflareQuick | ProviderKind::CloudflareNamed => {
+            ProviderKind::CloudflareNamed => {
                 let running = match self.child.as_mut() {
                     Some(child) => child
                         .try_wait()
@@ -314,13 +289,9 @@ impl TunnelManager {
                         .is_none(),
                     None => false,
                 };
-                let url = if self.current.kind == ProviderKind::CloudflareNamed {
-                    Some(format!("https://{}", self.current.hostname))
-                } else {
-                    self.child_output.read().unwrap().clone()
-                };
+                let url = Some(format!("https://{}", self.current.hostname));
                 Ok(TunnelObservation {
-                    configured: running && url.is_some(),
+                    configured: running,
                     online: running,
                     url,
                     note: if running {
@@ -455,14 +426,6 @@ pub(crate) fn ensure_exclusive_mapping(cfg: &Value, port: u16) -> Result<(), Str
     }
     Ok(())
 }
-fn extract_quick_url(raw: &str) -> Option<String> {
-    for part in raw.split(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '|' | '\\')) {
-        if part.starts_with("https://") && part.ends_with(".trycloudflare.com") {
-            return Some(part.into());
-        }
-    }
-    None
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -477,10 +440,6 @@ mod tests {
         assert!(ensure_exclusive_mapping(&cfg, 18795).is_err());
         let foreign = json!({"Web":{"example.ts.net:443":{"Handlers":{"/other":{"Proxy":"http://127.0.0.1:1234"}}}}});
         assert!(ensure_exclusive_mapping(&foreign, 18790).is_err());
-        assert_eq!(
-            extract_quick_url("| https://some-name.trycloudflare.com |"),
-            Some("https://some-name.trycloudflare.com".into())
-        );
     }
     #[cfg(windows)]
     #[tokio::test]

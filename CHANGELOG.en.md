@@ -7,6 +7,7 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ## [v0.2.1] - 2026-11-25
 
 ### Improvements & Added
+- **Removed Cloudflare quick tunnel**: Removed the `trycloudflare.com` quick tunnel option from both UI and Rust backend after confirming it is unreliable with Muse; MuseLink now focuses on Tailscale Funnel and Cloudflare named tunnels (with automatic fallback to Tailscale Funnel when loading legacy `cloudflare_quick` configs).
 - **Real-time long-polling for command approvals and execution status**: `GET /agent/v1/exec/{job_id}` now supports an optional `?wait_ms=` query parameter (defaults to `0` for full compatibility, capped at `25000` ms, recommended `20000` ms). Waiting runs asynchronously without holding request slots or access locks, waking immediately when you click **Allow** or **Deny**, when approval expires, or when the job finishes—no need to reply in chat after approving on Windows.
 - **Updated Muse connection instructions (Prompt)**: Updated both English and Chinese connector instructions so Muse keeps polling `GET /agent/v1/exec/<job_id>?wait_ms=20000` continuously until a terminal state instead of stopping for a manual reply, with clear handling for `expired` / `denied` and bounded polling caps (existing users can re-copy and send the updated instructions to Muse).
 - **Prevent stale clicks at approval expiry**: Disables approval dialog buttons once the countdown reaches 0 seconds.
