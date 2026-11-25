@@ -31,6 +31,30 @@ export interface TunnelStatus {
   last_check: string; note: string; api_port: number; public_verified: boolean | null; agent_public_verified: boolean | null;
 }
 export type DeviceNameUpdate = { id: string; pending: boolean };
+export type ExecMode = "direct" | "powershell" | "cmd";
+export type RiskTier = "auto" | "session" | "always";
+export type ApprovalDecision = "allow_once" | "allow_session" | "deny";
+export interface ApprovalView {
+  id: string;
+  job_id: string;
+  kind: string;
+  tier: RiskTier;
+  allow_session: boolean;
+  root: string;
+  cwd: string;
+  workspace_path: string;
+  mode: ExecMode;
+  command: string;
+  sandboxed: boolean;
+  risk_tags: string[];
+  reason: string | null;
+  created_at: string;
+  expires_at_ms: number;
+}
+export interface SessionGrantView {
+  workspace_path: string;
+  expires_at_ms: number;
+}
 export interface Snapshot {
   run_id: string; profile: "development" | "production"; initialized: boolean; fresh_setup: boolean; setup_error: string | null;
   file_token_version: string | null;
@@ -42,8 +66,11 @@ export interface Snapshot {
   agent_enabled: boolean;
   agent_ready: boolean;
   agent_token_version?: string | null;
+  exec_enabled: boolean;
+  pending_approvals: ApprovalView[];
+  exec_sessions: SessionGrantView[];
   home: string; config: BridgeConfig;
-  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; permission_mode: string; language: Language; device_name: string; device_name_update?: DeviceNameUpdate | null };
+  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; permission_mode: string; language: Language; device_name: string; device_name_update?: DeviceNameUpdate | null; exec_enabled?: boolean };
   suggested_device_name: string | null;
   status: TunnelStatus;
   stats: ActivityStats & { file_activity: ActivityStats };
@@ -126,14 +153,15 @@ export function useBridge() {
     }) : Promise.resolve([]);
     return () => { disposed = true; void subscriptions.then(stops => stops.forEach(stop => stop())); };
   }, []);
-  const indexPending = snapshot?.index_status?.state === "indexing"
-    || Boolean(snapshot?.file_access && snapshot.file_access.search !== "off" && snapshot.index_status?.state === "waiting");
+  const fastPoll = snapshot?.index_status?.state === "indexing"
+    || Boolean(snapshot?.file_access && snapshot.file_access.search !== "off" && snapshot.index_status?.state === "waiting")
+    || Boolean(snapshot?.pending_approvals?.length);
   useEffect(() => {
     if (!windowVisible) return;
     void refresh();
-    const timer = setInterval(refresh, indexPending ? 1500 : 15000);
+    const timer = setInterval(refresh, fastPoll ? 1500 : 15000);
     return () => clearInterval(timer);
-  }, [refresh, windowVisible, indexPending]);
+  }, [refresh, windowVisible, fastPoll]);
   const run = useCallback(async <T,>(label: string, command: string, args?: Record<string, unknown>, success?: string, reportError = true): Promise<{ ok: true; data: T } | { ok: false; error: string }> => {
     const id = ++operationId.current;
     operations.current.set(id, label); setBusy(label); setError(null);

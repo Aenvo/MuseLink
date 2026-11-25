@@ -200,6 +200,9 @@ impl Audit {
     pub fn error(&self) -> Option<String> {
         self.state.lock().unwrap().error.clone()
     }
+    pub(crate) fn redact_text(&self, value: &str) -> String {
+        self.redact(value)
+    }
     fn redact(&self, value: &str) -> String {
         let mut result = value.to_string();
         for secret in self.secrets.read().unwrap().iter() {

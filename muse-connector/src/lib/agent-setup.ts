@@ -123,13 +123,15 @@ After the change succeeds, use this connector's existing dedicated credential to
 改名成功后，请使用该连接器已有的专用凭证发送 POST ${endpoint}，Content-Type 为 application/json，请求体为 ${body}。回执失败时，请告诉我实际 HTTP 状态码和错误。`;
 }
 
-export function connectorBrief(language: Language, origin: string, trialInstruction: string, deviceName: string) {
+export function connectorBrief(language: Language, origin: string, trialInstruction: string, deviceName: string, execEnabled = false) {
   if (language === "en") {
     const introduction = deviceName
       ? `Set up a Custom Connector for the device “${deviceName}”, named “Muse Local Files - ${deviceName}”. Its HTTPS base URL is ${origin} and its API prefix is /agent/v1.
 Confirm the device name with me before creating or renaming the connector. If a connector already uses this URL, update its display name. If the requested name exists for a different URL, ask me to choose a distinct name before proceeding.
 This connector serves only “${deviceName}”. Ask me which device to use if I haven't specified one or the name is ambiguous. If I name this device, use only this connector. If it is unavailable, report that and don't switch to a different device. Use this connector for the setup test below.`
       : `Set up a Custom Connector named “Muse Local Files”. Its HTTPS base URL is ${origin} and its API prefix is /agent/v1.`;
+    const execSection = execEnabled ? `
+- POST /agent/v1/exec runs a command inside an authorized project subfolder (never a bare drive root). Prefer {"root":"alias","cwd":"relative project folder","mode":"direct","program":"git","args":["status"],"reason":"brief intent"}. For shell pipelines or scripts, set mode to "powershell" or "cmd" and pass "command" instead of program/args. Commands run inside a Windows write-restricted sandbox by default. Fast auto-allowed commands return HTTP 200 directly; long-running or approval-required jobs return HTTP 202 with job_id, status ("running" or "awaiting_approval"), and retry_after_ms. If status is "awaiting_approval", tell me to review the MuseLink approval dialog on Windows and poll GET /agent/v1/exec/<job_id>. To stop a job, send POST /agent/v1/exec/<job_id>/cancel.` : "";
     return `${introduction}
 Use a security card to collect the dedicated agent-token. Send Authorization: Bearer <token> on each request. Store it separately and use it only for requests to ${origin}/agent/v1/. Show only the results in the conversation.
 
@@ -141,7 +143,7 @@ The API returns JSON. Send Content-Type: application/json for POST requests and 
 - GET /agent/v1/list?root=<alias>&path=<relative-folder> lists a folder. Use an empty path to list the root.
 - GET /agent/v1/read?root=<alias>&path=<relative-file> returns encoding and content. The encoding is text or base64.
 - POST /agent/v1/write accepts {"root":"alias","path":"relative file","content":"file content","encoding":"text"}. Encoding may also be base64. Write files only at my explicit request.
-- POST /agent/v1/mkdir accepts {"root":"alias","path":"relative folder"}. Create folders only at my explicit request.
+- POST /agent/v1/mkdir accepts {"root":"alias","path":"relative folder"}. Create folders only at my explicit request.${execSection}
 
 Verify the connector once setup is complete. ${trialInstruction} If a request fails, report the endpoint, HTTP status, and actual error.`;
   }
@@ -151,6 +153,8 @@ Verify the connector once setup is complete. ${trialInstruction} If a request fa
 创建或改名前请向我确认设备名称。若此地址已有连接器，请更新它的显示名称。若同名连接器指向其他地址，请先让我选择一个不同的名称。
 此连接器只对应设备「${deviceName}」。若我没有指定设备，或名称有歧义，请先问我要用哪台。点名这台设备时，只使用此连接器。若设备不可用，请报告情况，不要自动换到其他设备。下方的接入试用请使用此连接器。`
     : `请配置一个名为「Muse 本机文件」的 Custom Connector。HTTPS 地址为 ${origin}，接口前缀为 /agent/v1。`;
+  const execSection = execEnabled ? `
+- POST /agent/v1/exec 在已授权的具体项目子目录内执行命令（不可直接传盘符根目录）。优先使用直调模式：{"root":"目录别名","cwd":"项目相对路径","mode":"direct","program":"git","args":["status"],"reason":"简要意图"}；需要管道或脚本时把 mode 设为 "powershell" 或 "cmd" 并传 "command"。命令默认运行在 Windows 写受限沙箱中。快速且免审批的命令会直接返回 HTTP 200 与完整输出；耗时或需人工审批的任务返回 HTTP 202（含 job_id、status 为 "running" 或 "awaiting_approval"、retry_after_ms）。若状态为 "awaiting_approval"，请提醒我查看电脑上的 Muse连接器 审批弹窗并轮询 GET /agent/v1/exec/<job_id>；如需中止，发送 POST /agent/v1/exec/<job_id>/cancel。` : "";
   return `${introduction}
 请用安全卡片收集此连接专用的 agent-token，每次请求发送 Authorization: Bearer <令牌>。使用独立的凭证项，只在请求 ${origin}/agent/v1/ 下的接口时使用。对话中只显示调用结果。
 
@@ -162,7 +166,7 @@ Verify the connector once setup is complete. ${trialInstruction} If a request fa
 - GET /agent/v1/list?root=<目录别名>&path=<相对目录> 列出目录。列根目录时 path 填空字符串。
 - GET /agent/v1/read?root=<目录别名>&path=<相对文件> 返回 encoding 和 content，encoding 为 text 或 base64。
 - POST /agent/v1/write 接收 {"root":"目录别名","path":"相对文件","content":"文件内容","encoding":"text"}，encoding 也可以为 base64。写入仅按我的明确请求执行。
-- POST /agent/v1/mkdir 接收 {"root":"目录别名","path":"相对目录"}，仅按我的明确请求建目录。
+- POST /agent/v1/mkdir 接收 {"root":"目录别名","path":"相对目录"}，仅按我的明确请求建目录。${execSection}
 
 接入后请验证一次。${trialInstruction} 若调用失败，请报告实际接口、HTTP 状态码和错误。`;
 }

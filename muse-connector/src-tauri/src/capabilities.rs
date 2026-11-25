@@ -18,14 +18,18 @@ pub fn boundary() -> CapabilityBoundary {
         tools: vec![],
     }
 }
-pub fn file_tools_boundary(enabled: bool) -> CapabilityBoundary {
+pub fn file_tools_boundary(enabled: bool, exec_enabled: bool) -> CapabilityBoundary {
     if enabled {
+        let mut tools = vec![
+            "roots", "desktop", "search", "list", "read", "write", "mkdir",
+        ];
+        if exec_enabled {
+            tools.push("exec");
+        }
         CapabilityBoundary {
             protocol: "agent-file-v1",
             enabled: true,
-            tools: vec![
-                "roots", "desktop", "search", "list", "read", "write", "mkdir",
-            ],
+            tools,
         }
     } else {
         boundary()

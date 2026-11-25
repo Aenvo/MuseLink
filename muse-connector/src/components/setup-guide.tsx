@@ -90,7 +90,7 @@ export default function SetupGuide({
   const waiting = status.health === "Starting" || status.health === "Stopping";
   const tailscale = kind === "tailscale";
   const installed = providerToolAvailable(snapshot);
-  const instructions = address && deviceName.canCopy ? connectorBrief(language, address, trial.instruction, deviceName.saved) : null;
+  const instructions = address && deviceName.canCopy ? connectorBrief(language, address, trial.instruction, deviceName.saved, snapshot.exec_enabled) : null;
 
   useEffect(() => setCopied(null), [deviceName.saved]);
 

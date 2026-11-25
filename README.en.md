@@ -46,6 +46,7 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | --- | --- |
 | File permissions | Authorize selected folders and their subfolders, or choose from local fixed drives. |
 | Local file tools | Let Muse search by file name, list folders, read files, and write when needed. |
+| Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project folders (Windows write-restricted sandbox + local approval dialog). |
 | Public connection | Use Tailscale Funnel by default, or choose a Cloudflare quick or named tunnel. |
 | Dedicated token | Generate, copy, rotate, or revoke the Muse token in **File Access**. |
 | Desktop controls | Check connection status and access logs, pause or start the connection from the app or tray, and switch between English and Simplified Chinese. |
@@ -77,7 +78,8 @@ File indexing starts in the background after you first save permissions. Check i
 
 ## Access and connection boundaries
 
-- Muse's file operations follow the saved access scope and the current Windows account's permissions. The chosen tunnel forwards the public endpoint to the local file service.
+- Muse's file operations follow the saved access scope and the current Windows account's permissions. The chosen tunnel forwards the public endpoint to the local file service. Credential directories (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg`) are protected by default, and system folders, Startup folders, shell profiles, and the app directory are write-protected by default.
+- Local command execution is off by default and can be toggled under **File Access → Muse file tools**. When enabled, commands run inside a Windows write-restricted sandbox (Restricted Token + JobObject) scoped to the requested project subfolder and an isolated temp folder (bare drive roots are rejected). Common read-only and build/test commands run automatically; first-time shell use in a project, dependency changes, or remote pushes prompt for local approval (with an optional per-project session grant), while sensitive paths or unsandboxed requests always require a single confirmation. Turning off the toggle immediately stops running commands.
 - Muse can search, read, and write within the scope you first authorize. When switching to selected folders, each folder keeps the operations covered by your previous grant. If there are no permissions to carry over, select authorized folders or confirm that all operations are enabled. Switching from folders to drives requires confirmation to enable all operations on the selected drives. Existing read-only File Bridge settings still apply to the legacy API.
 - Enter the dedicated token in the Muse security card. To stop access, pause the connection or revoke the token. Update the security card after rotating it.
 - The public health check verifies the endpoint. Have Muse read a non-sensitive file to confirm that the integration works.

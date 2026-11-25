@@ -16,7 +16,7 @@ import { Tooltip, TooltipTrigger, TooltipContent } from "@/components/ui/tooltip
 import { Notice } from "@/components/feedback";
 import { formatTime, type BridgeModel, type LogRecord, type LogBatch } from "@/lib/use-bridge";
 type LogKind = "audit" | "runtime";
-type LogScope = "files" | "audit" | "runtime";
+type LogScope = "files" | "exec" | "audit" | "runtime";
 const fileEndpoints = new Set([
   "/api/list",
   "/api/read",
@@ -178,19 +178,20 @@ function LogView({ bridge, feed }: { bridge: BridgeModel; feed: ReturnType<typeo
   const source = frozen ?? feed.records[kind];
   const rows = useMemo(() => source.filter(row => {
     if (scope === "files" && !fileEndpoints.has(String(row.object?.endpoint))) return false;
+    if (scope === "exec" && !String(row.object?.endpoint ?? "").startsWith("/agent/v1/exec")) return false;
     if (search && !row.searchText.includes(search)) return false;
     if (windowMinutes !== "all" && (!row.time || row.timeMs < Date.now() - Number(windowMinutes) * 60000)) return false;
     const failure = Number(row.code) >= 400 || row.code === "error" || row.code === "warning";
     return resultFilter === "all" || (resultFilter === "errors" ? failure : !failure);
   }).reverse(), [source, scope, search, windowMinutes, resultFilter]);
-  const newCount = frozen ? feed.records[kind].filter(entry => entry.record.seq > (frozen[frozen.length - 1]?.record.seq ?? 0) && (scope !== "files" || fileEndpoints.has(String(entry.object?.endpoint)))).length : 0;
+  const newCount = frozen ? feed.records[kind].filter(entry => entry.record.seq > (frozen[frozen.length - 1]?.record.seq ?? 0) && (scope === "files" ? fileEndpoints.has(String(entry.object?.endpoint)) : scope === "exec" ? String(entry.object?.endpoint ?? "").startsWith("/agent/v1/exec") : true)).length : 0;
   const show = useCallback((entry: ParsedLog, trigger: HTMLButtonElement) => { detailTrigger.current = trigger; setDetail(entry); }, []);
   return <div className="page-stack">
     {feed.error ? <Notice title={t("日志存储需要检查")} error>{feed.error}</Notice> : null}
     <Card><CardHeader><div className="flex flex-wrap items-center justify-between gap-2"><div className="flex flex-wrap items-center gap-3"><CardTitle>{t("日志")}</CardTitle><span className="text-caption text-muted-foreground" role="status">{frozen ? t("已暂停更新") : t("实时更新")} {t("· 匹配 {0} 条", rows.length)}</span></div><Button variant="outline" size="sm" onClick={() => setFrozen(value => value ? null : [...feed.records[kind]])}>{frozen ? t("继续更新") + (newCount > 0 ? ` (${newCount})` : "") : t("暂停实时更新")}</Button></div></CardHeader><CardContent className="flex flex-col gap-5">
       <FieldGroup className="grid grid-cols-2 gap-4 min-[600px]:grid-cols-[1.5fr_1fr_1fr]">
         <Field className="col-span-2 min-[600px]:col-span-1"><FieldLabel className="sr-only min-[600px]:not-sr-only" htmlFor="log-query">{t("检索")}</FieldLabel><Input ref={searchInput} id="log-query" name="log_query" autoComplete="off" spellCheck={false} value={query} onChange={e => setQuery(e.target.value)} placeholder={t("检索端点、目录、路径或消息")} /></Field>
-        <Field><FieldLabel className="sr-only min-[600px]:not-sr-only" htmlFor="log-kind">{t("显示内容")}</FieldLabel><Select value={scope} onValueChange={value => { setScope(value as LogScope); setFrozen(null); setLimit(200); }}><SelectTrigger id="log-kind" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="files">{t("文件操作")}</SelectItem><SelectItem value="audit">{t("全部访问（含健康探测）")}</SelectItem><SelectItem value="runtime">{t("连接器运行日志")}</SelectItem></SelectGroup></SelectContent></Select></Field>
+        <Field><FieldLabel className="sr-only min-[600px]:not-sr-only" htmlFor="log-kind">{t("显示内容")}</FieldLabel><Select value={scope} onValueChange={value => { setScope(value as LogScope); setFrozen(null); setLimit(200); }}><SelectTrigger id="log-kind" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="files">{t("文件操作")}</SelectItem><SelectItem value="exec">{t("命令执行")}</SelectItem><SelectItem value="audit">{t("全部访问（含健康探测）")}</SelectItem><SelectItem value="runtime">{t("连接器运行日志")}</SelectItem></SelectGroup></SelectContent></Select></Field>
         <Field><FieldLabel className="sr-only min-[600px]:not-sr-only" htmlFor="log-result">{t("结果")}</FieldLabel><Select value={resultFilter} onValueChange={setResultFilter}><SelectTrigger id="log-result" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">{t("所有结果")}</SelectItem><SelectItem value="errors">{t("错误与警告")}</SelectItem><SelectItem value="success">{t("正常记录")}</SelectItem></SelectGroup></SelectContent></Select></Field>
       </FieldGroup>
       <details><summary className="cursor-pointer text-caption text-muted-foreground">{t("更多筛选与保留说明")}{windowMinutes !== "all" ? t(" · 最近 {0} 分钟", windowMinutes) : ""}</summary><FieldGroup className="mt-3"><Field><FieldLabel htmlFor="log-time">{t("时间范围")}</FieldLabel><Select value={windowMinutes} onValueChange={setWindowMinutes}><SelectTrigger id="log-time" className="w-full"><SelectValue /></SelectTrigger><SelectContent><SelectGroup><SelectItem value="all">{t("全部缓存")}</SelectItem><SelectItem value="5">{t("最近 5 分钟")}</SelectItem><SelectItem value="15">{t("最近 15 分钟")}</SelectItem><SelectItem value="60">{t("最近 1 小时")}</SelectItem></SelectGroup></SelectContent></Select></Field></FieldGroup><p className="mt-3 text-caption text-muted-foreground">{t("每类最多缓存 1000 条；日志文件按 10 MiB 轮转，保留 3 份历史。健康探测保留在“全部访问”中。")}</p></details>

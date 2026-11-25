@@ -313,6 +313,10 @@ impl AccessRuntime {
         protected_path(path, &self.protected)
     }
 
+    pub(crate) fn is_write_protected_path(&self, path: &Path) -> bool {
+        protected_path(path, &self.write_protected)
+    }
+
     pub(crate) fn agent_listing_entry_allowed(&self, path: &Path) -> bool {
         !protected_path(path, &self.protected)
             && super::access::canonicalize_direct(path)
