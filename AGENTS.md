@@ -6,6 +6,7 @@
 - 文件操作经 `muse-connector/src-tauri/src/core/handle.rs`：打开句柄后核对对象实际路径与属性，读取只通过该句柄完成，写入以已验证目录中的临时文件替换并在重命名前后复核。校验后对象发生变化时返回 409 `path changed; retry`，不要退回只按路径字符串操作。
 - 本地开发使用 `pnpm -C muse-connector tauri dev` 的隔离配置。界面变更运行 `pnpm -C muse-connector build`。Rust 变更运行 `cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked`。原生窗口、隧道或文件操作的验收需要在对应入口验证。
 - 更改用户流程、安装或构建命令时，同步更新 `README.md` 和 `README.en.md`。文档使用仓库相对路径，提交前排除本机配置、凭证、日志、内部笔记和构建产物。
+- 每次功能更新、问题修复或推送发布时，必须同步更新仓库根目录的 `CHANGELOG.md` 和 `CHANGELOG.en.md`（按版本与日期记录用户可见的新增、优化、修复与安全变更），确保 GitHub 首页的「更新日志」入口与程序内「关于 → 更新日志」按钮指向的内容始终与推送保持同步。
 
 ## 验证与覆盖
 

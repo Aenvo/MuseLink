@@ -503,4 +503,6 @@ export const english = {
   "文件服务无法监听：{0}": "The file service couldn't listen: {0}",
   "文件服务已停止，隧道清理失败：{0}": "The file service stopped, but tunnel cleanup failed: {0}",
   "端口 {0} 被其他进程占用；本应用未取得服务归属": "Another process is using port {0}. MuseLink could not start the file service.",
+  "更新日志": "Changelog",
+  "无法打开更新日志，请稍后重试。": "Could not open the changelog. Try again shortly.",
 } as const;

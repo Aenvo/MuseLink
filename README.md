@@ -11,7 +11,8 @@
 <p align="center">
   <a href="README.md">简体中文</a> · <a href="README.en.md">English</a> ·
   <a href="https://github.com/Aenvo/MuseLink/releases/latest">下载最新版</a> ·
-  <a href="#使用指南">使用指南</a> · <a href="#从源码构建">源码构建</a>
+  <a href="#使用指南">使用指南</a> · <a href="#从源码构建">源码构建</a> ·
+  <a href="CHANGELOG.md">更新日志</a>
 </p>
 
 <p align="center">
