@@ -60,10 +60,13 @@ struct IndexLifecycle {
 struct AccessSettings {
     version: u32,
     policy: AccessPolicy,
+    #[serde(default)]
+    preserve_legacy_read_only: bool,
 }
 
 struct ActiveAccess {
     policy: Option<AccessPolicy>,
+    preserve_legacy_read_only: bool,
     agent_token: Option<String>,
     blocked: bool,
     cancel: Arc<AtomicBool>,
@@ -144,13 +147,20 @@ impl AccessRuntime {
             .into_iter()
             .map(|path| super::path_guard::canonical_non_strict(&path).unwrap_or(path))
             .collect::<Vec<_>>();
-        let (policy, error) = match Self::load_policy(&settings_path) {
-            Ok(policy) => match policy.validate(&protected, development_home.as_deref()) {
-                Ok(()) => (Some(policy), None),
-                Err(error) => (None, Some(format!("文件授权配置需要修复：{error}"))),
+        let (policy, preserve_legacy_read_only, error) = match Self::load_settings(&settings_path) {
+            Ok(settings) => match settings
+                .policy
+                .validate(&protected, development_home.as_deref())
+            {
+                Ok(()) => (
+                    Some(settings.policy),
+                    settings.preserve_legacy_read_only,
+                    None,
+                ),
+                Err(error) => (None, false, Some(format!("文件授权配置需要修复：{error}"))),
             },
-            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, None),
-            Err(_) => (None, Some("无法读取本机文件授权配置".into())),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => (None, false, None),
+            Err(_) => (None, false, Some("无法读取本机文件授权配置".into())),
         };
         (
             Arc::new(Self {
@@ -160,6 +170,7 @@ impl AccessRuntime {
                 development_home,
                 active: RwLock::new(ActiveAccess {
                     policy,
+                    preserve_legacy_read_only,
                     agent_token,
                     blocked: error.is_some(),
                     cancel: Arc::new(AtomicBool::new(false)),
@@ -186,14 +197,14 @@ impl AccessRuntime {
         )
     }
 
-    fn load_policy(path: &Path) -> io::Result<AccessPolicy> {
+    fn load_settings(path: &Path) -> io::Result<AccessSettings> {
         let raw = std::fs::read_to_string(path)?;
         let settings: AccessSettings =
             serde_json::from_str(raw.trim_start_matches('\u{feff}')).map_err(io::Error::other)?;
         if settings.version != VERSION {
             return Err(io::Error::other("不支持此文件授权配置版本"));
         }
-        Ok(settings.policy)
+        Ok(settings)
     }
 
     pub(crate) fn policy(&self) -> Option<AccessPolicy> {
@@ -270,9 +281,19 @@ impl AccessRuntime {
         alias: &str,
         relative: &str,
     ) -> Result<PathBuf, &'static str> {
+        self.resolve_agent_file(op, alias, relative)
+            .map(|resolved| resolved.path)
+    }
+
+    pub(crate) fn resolve_agent_file(
+        &self,
+        op: Operation,
+        alias: &str,
+        relative: &str,
+    ) -> Result<super::path_guard::Resolved, &'static str> {
         let active = self.active.read().unwrap();
         let policy = active.policy.as_ref().ok_or(ERR_NOT_AUTHORIZED)?;
-        policy.resolve(
+        policy.resolve_file(
             op,
             &self.operation_roots(policy, op),
             &self.protected,
@@ -281,13 +302,14 @@ impl AccessRuntime {
         )
     }
 
+    pub(crate) fn is_protected_path(&self, path: &Path) -> bool {
+        protected_path(path, &self.protected)
+    }
+
     pub(crate) fn agent_listing_entry_allowed(&self, path: &Path) -> bool {
         !protected_path(path, &self.protected)
-            && std::fs::canonicalize(path).is_ok_and(|canonical| {
-                protected_path(&canonical, &[path.to_path_buf()])
-                    && protected_path(path, &[canonical.clone()])
-                    && !protected_path(&canonical, &self.protected)
-            })
+            && super::access::canonicalize_direct(path)
+                .is_some_and(|canonical| !protected_path(&canonical, &self.protected))
     }
 
     pub(crate) fn agent_desktop(&self) -> Option<AgentDesktopLocation> {
@@ -346,17 +368,20 @@ impl AccessRuntime {
         Ok(())
     }
 
-    pub(crate) fn save(&self, policy: AccessPolicy) -> Result<(), String> {
+    pub(crate) fn save(&self, policy: AccessPolicy, legacy_read_only: bool) -> Result<(), String> {
+        let lifecycle = self.index_lifecycle.lock().unwrap();
+        let _requests = self.legacy_requests.write().unwrap();
+        let mut access = self.active.write().unwrap();
+        let preserve_legacy_read_only =
+            access.preserve_legacy_read_only || access.policy.is_none() && legacy_read_only;
         let bytes = serde_json::to_vec_pretty(&AccessSettings {
             version: VERSION,
             policy: policy.clone(),
+            preserve_legacy_read_only,
         })
         .map_err(|_| "无法编码文件授权配置".to_string())?;
-        let lifecycle = self.index_lifecycle.lock().unwrap();
-        let _requests = self.legacy_requests.write().unwrap();
         super::storage::atomic_write(&self.settings_path, &bytes)
             .map_err(|_| "保存文件授权失败，原授权仍有效".to_string())?;
-        let mut access = self.active.write().unwrap();
         let search_changed = access.policy.as_ref().is_none_or(|previous| {
             let local = self.local_roots();
             previous.roots_for(Operation::Search, &local)
@@ -364,6 +389,7 @@ impl AccessRuntime {
         });
         self.invalidate_search(&mut access);
         access.policy = Some(policy);
+        access.preserve_legacy_read_only = preserve_legacy_read_only;
         access.blocked = false;
         drop(access);
         drop(_requests);
@@ -586,20 +612,25 @@ impl AccessRuntime {
                     .unwrap_or_default()
                     .into_values()
                     .collect();
-                config.roots.retain(|_, path| protected_path(path, &fixed));
+                config.roots.retain(|_, path| {
+                    protected_path(path, &fixed)
+                        || super::access::canonicalize_direct(path)
+                            .is_some_and(|canonical| protected_path(&canonical, &fixed))
+                });
             }
         }
         config
             .roots
             .retain(|_, path| !protected_path(path, &self.protected));
-        config.read_only = match policy.write {
-            GrantScope::Off => true,
-            GrantScope::Folders if policy.mode == ScopeMode::Folders => !config
-                .roots
-                .keys()
-                .any(|alias| policy.permits_folder(alias, Operation::Write)),
-            GrantScope::Folders | GrantScope::AllLocal => config.read_only,
-        };
+        config.read_only = (active.preserve_legacy_read_only && config.read_only)
+            || match policy.write {
+                GrantScope::Off => true,
+                GrantScope::Folders if policy.mode == ScopeMode::Folders => !config
+                    .roots
+                    .keys()
+                    .any(|alias| policy.permits_folder(alias, Operation::Write)),
+                GrantScope::Folders | GrantScope::AllLocal => config.read_only,
+            };
         config
     }
 
@@ -645,21 +676,20 @@ impl AccessRuntime {
         &self,
         root: &Path,
         relative: &str,
-    ) -> Result<(), &'static str> {
-        if self.active.read().unwrap().policy.is_some() {
-            let lexical = root.join(relative.replace('\\', "/"));
-            super::access::reject_reparse_ancestors(&lexical)?;
+    ) -> Result<bool, &'static str> {
+        if self.active.read().unwrap().policy.is_none() {
+            return Ok(false);
         }
-        Ok(())
+        let lexical = root.join(relative.replace('\\', "/"));
+        super::access::reject_reparse_ancestors(&lexical)?;
+        Ok(true)
     }
 
     fn local_roots(&self) -> BTreeMap<String, PathBuf> {
         if let Some(home) = &self.development_home {
             let fixture = home.join("files");
-            return std::fs::canonicalize(&fixture)
-                .ok()
+            return super::access::canonicalize_direct(&fixture)
                 .into_iter()
-                .filter(|path| protected_path(path, &[fixture.clone()]))
                 .map(|path| ("test-disk".into(), path))
                 .collect();
         }
@@ -680,6 +710,57 @@ impl AccessRuntime {
         } else {
             BTreeMap::new()
         }
+    }
+
+    pub(crate) fn preserve_folder_access(
+        &self,
+        saved: &AccessPolicy,
+        mut policy: AccessPolicy,
+    ) -> Result<AccessPolicy, String> {
+        use super::access::{FolderGrant, canonicalize_direct};
+
+        let operations = [Operation::Search, Operation::Read, Operation::Write];
+        let local_roots = self.local_roots();
+        let authorized = operations.map(|operation| {
+            saved
+                .roots_for(operation, &local_roots)
+                .into_iter()
+                .flatten()
+                .filter_map(|(_, root)| canonicalize_direct(&root))
+                .collect::<Vec<_>>()
+        });
+        let grants = policy
+            .roots
+            .iter()
+            .map(|(alias, path)| {
+                let path = canonicalize_direct(path).ok_or("无法访问目录")?;
+                let [search, read, write] = std::array::from_fn(|index| {
+                    let operation = operations[index];
+                    policy.grant(operation) == GrantScope::Folders
+                        && policy.permits_folder(alias, operation)
+                        && protected_path(&path, &authorized[index])
+                        && (saved.grant(operation) != GrantScope::Folders
+                            || !saved.roots.iter().any(|(alias, root)| {
+                                !saved.permits_folder(alias, operation) && same_path(&path, root)
+                            }))
+                });
+                Ok((
+                    alias.clone(),
+                    FolderGrant {
+                        search,
+                        read,
+                        write,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, &str>>()?;
+        policy.folder_grants = Some(grants);
+        if !has_agent_grant(&policy) {
+            return Err(
+                "所选文件夹没有可保留的权限。请选择已授权的文件夹，或确认启用全部操作。".into(),
+            );
+        }
+        Ok(policy)
     }
 
     pub(crate) async fn search_local(
@@ -935,7 +1016,7 @@ mod tests {
         {
             Arc::get_mut(&mut access).unwrap().everything = None;
         }
-        access.save(Fixture::full_search()).unwrap();
+        access.save(Fixture::full_search(), false).unwrap();
         access.issue_agent_token(|_| {}).unwrap();
         let author = format!("Bearer {}", access.agent_token().unwrap());
         let path = fixture.0.home.join("file-name-index.json");
@@ -960,7 +1041,7 @@ mod tests {
             Arc::get_mut(&mut access).unwrap().everything = None;
         }
         assert_eq!(access.index_status().state, IndexPhase::Cleared);
-        access.save(Fixture::full_search()).unwrap();
+        access.save(Fixture::full_search(), false).unwrap();
         access.prewarm_search();
         let request = SearchRequest {
             name: "hello.txt".into(),
@@ -984,7 +1065,7 @@ mod tests {
         let fixture = Fixture::new();
         let runtime = fixture.open();
         assert!(runtime.issue_agent_token(|_| panic!("no grant")).is_err());
-        runtime.save(Fixture::full_search()).unwrap();
+        runtime.save(Fixture::full_search(), false).unwrap();
         assert!(!runtime.agent_ready());
         assert!(!fixture.open().agent_enabled());
         let mut redaction = String::new();
@@ -1012,7 +1093,7 @@ mod tests {
     async fn search_cannot_grant_content_access_and_revoke_invalidates_it() {
         let fixture = Fixture::new();
         let runtime = fixture.open();
-        runtime.save(Fixture::full_search()).unwrap();
+        runtime.save(Fixture::full_search(), false).unwrap();
         runtime.issue_agent_token(|_| {}).unwrap();
         let header = format!("Bearer {}", runtime.agent_token().unwrap());
         assert!(runtime.agent_roots(Operation::Read).is_none());
@@ -1039,7 +1120,7 @@ mod tests {
             .unwrap();
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].path, "hello.txt");
-        runtime.save(AccessPolicy::default()).unwrap();
+        runtime.save(AccessPolicy::default(), false).unwrap();
         assert!(runtime.agent_enabled());
         assert!(!runtime.agent_ready());
         assert!(runtime.agent_desktop().is_none());
@@ -1063,11 +1144,14 @@ mod tests {
         std::fs::write(other.join("hello.txt"), "other scope").unwrap();
         let runtime = fixture.open();
         runtime
-            .save(AccessPolicy {
-                roots: BTreeMap::from([("work".into(), work), ("other".into(), other)]),
-                search: GrantScope::Folders,
-                ..Default::default()
-            })
+            .save(
+                AccessPolicy {
+                    roots: BTreeMap::from([("work".into(), work), ("other".into(), other)]),
+                    search: GrantScope::Folders,
+                    ..Default::default()
+                },
+                false,
+            )
             .unwrap();
         let response = runtime
             .clone()
@@ -1097,7 +1181,7 @@ mod tests {
             ..AccessPolicy::default()
         };
         runtime.validate(&policy).unwrap();
-        runtime.save(policy).unwrap();
+        runtime.save(policy, false).unwrap();
         runtime.issue_agent_token(|_| {}).unwrap();
         assert!(!runtime.agent_listing_entry_allowed(runtime.agent_token_path()));
         for operation in [Operation::Read, Operation::Write] {

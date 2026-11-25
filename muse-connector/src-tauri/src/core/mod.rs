@@ -5,6 +5,7 @@ pub mod audit;
 pub mod config;
 #[cfg(windows)]
 mod everything;
+mod handle;
 mod index_storage;
 pub mod path_guard;
 pub mod search;

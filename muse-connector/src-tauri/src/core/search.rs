@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
-use super::access::{is_reparse, protected_path, reject_reparse_ancestors};
+use super::access::{canonicalize_direct, is_reparse, protected_path, reject_reparse_ancestors};
 
 const INDEX_VERSION: u32 = 1;
 const DEFAULT_RESULTS: usize = 30;
@@ -114,10 +114,7 @@ impl Scope {
             .map(|(alias, path)| {
                 (
                     alias.clone(),
-                    fs::canonicalize(path)
-                        .ok()
-                        .filter(|resolved| same_path(path, resolved))
-                        .unwrap_or_else(|| path.clone()),
+                    canonicalize_direct(path).unwrap_or_else(|| path.clone()),
                 )
             })
             .collect();
@@ -138,10 +135,6 @@ impl Scope {
     fn allowed(&self, path: &Path) -> bool {
         !protected_path(path, &self.excluded)
     }
-}
-
-fn same_path(first: &Path, second: &Path) -> bool {
-    protected_path(first, &[second.to_path_buf()]) && protected_path(second, &[first.to_path_buf()])
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -302,10 +295,9 @@ impl Scan {
         // Check the resolved directory again before traversing it. Cached candidates receive
         // a separate check against the live filesystem before their metadata is returned.
         let directory = (self.pending.len() < MAX_SCAN_DEPTH)
-            .then(|| fs::canonicalize(path).ok())
+            .then(|| canonicalize_direct(path))
             .flatten()
-            .filter(|canonical| same_path(canonical, path))
-            .and_then(|_| fs::read_dir(path).ok());
+            .and_then(|canonical| fs::read_dir(canonical).ok());
         if let Some(directory) = directory {
             self.pending.push(directory);
         } else {
@@ -1030,8 +1022,8 @@ fn live_hit(
         return None;
     }
     let path = base.join(&entry.path);
-    let actual = fs::canonicalize(&path).ok()?;
-    if !scope.allowed(&actual) || !same_path(&actual, &path) {
+    let actual = canonicalize_direct(&path)?;
+    if !scope.allowed(&actual) {
         return None;
     }
     let metadata = fs::symlink_metadata(&actual).ok()?;
@@ -1487,7 +1479,7 @@ mod tests {
             ..AccessPolicy::default()
         };
         access.validate(&policy).unwrap();
-        access.save(policy).unwrap();
+        access.save(policy, false).unwrap();
         let request = SearchRequest {
             limit: Some(1),
             ..SearchRequest::default()

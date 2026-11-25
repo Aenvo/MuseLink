@@ -4,6 +4,8 @@
 //!   2. 保留设备名 / ADS / 尾部点空格 / 根内 `..` 一律 400（原版为连接重置或静默别名）
 //!   3. 逃逸出根的 `..` 报 "path escapes root"（错误串与原版一致）
 //!   4. 拒绝非字符串 content 与无效 base64；合法 ASCII 空白仍可解码
+//!   5. 写入请求体按 Base64 编码后的长度放行，再以解码后 10 MiB 兜底；
+//!      原版按解码前的接近 10 MiB 截断，使合法的满额二进制写入提前失败
 //!
 //! 与 Python 版的行为对齐说明（经 11-17 攻击矩阵实测比对）：
 //! - 401/403/404/413/429 与各端点成功响应体逐字段一致；
@@ -29,10 +31,11 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Semaphore, broadcast};
 
-use super::access::{ERR_NOT_AUTHORIZED, ERR_PROTECTED, ERR_REPARSE, Operation, is_reparse};
+use super::access::{ERR_NOT_AUTHORIZED, ERR_PROTECTED, ERR_REPARSE, Operation};
 use super::access_runtime::{AccessRuntime, AgentSearchError};
 use super::audit::{Audit, AuditEntry, now_iso};
 use super::config::BridgeConfig;
+use super::handle;
 use super::path_guard;
 use super::search::{SearchError, SearchRequest};
 use super::token;
@@ -44,6 +47,8 @@ pub const LIST_MAX_ENTRIES: usize = 5000;
 pub const RATE_LIMIT: u64 = 1000;
 pub const RATE_WINDOW_SECS: u64 = 60;
 const MAX_SEARCH_REQUEST_BYTES: usize = 8 * 1024;
+/// 不携带内容的 POST（建目录、轮换令牌）只放行元数据。
+const MAX_METADATA_REQUEST_BYTES: usize = 32 * 1024;
 
 // ---------- 路径集合 ----------
 
@@ -165,7 +170,7 @@ struct Inner {
     paths: BridgePaths,
     token: RwLock<String>,
     config: RwLock<BridgeConfig>,
-    token_update: Mutex<()>,
+    token_update: RwLock<()>,
     audit: Audit,
     options: ApiOptions,
     rate: Mutex<HashMap<String, (Instant, u64)>>,
@@ -197,7 +202,7 @@ impl ApiState {
                     paths: BridgePaths::default(),
                     token: RwLock::new(tok),
                     config: RwLock::new(cfg),
-                    token_update: Mutex::new(()),
+                    token_update: RwLock::new(()),
                     audit,
                     options: ApiOptions::default(),
                     rate: Mutex::new(HashMap::new()),
@@ -229,7 +234,7 @@ impl ApiState {
                     paths,
                     token: RwLock::new(tok),
                     config: RwLock::new(cfg),
-                    token_update: Mutex::new(()),
+                    token_update: RwLock::new(()),
                     audit,
                     options,
                     rate: Mutex::new(HashMap::new()),
@@ -249,6 +254,7 @@ impl ApiState {
         self.inner.token.read().unwrap().clone()
     }
     pub(crate) fn set_token(&self, t: String) {
+        let _guard = self.inner.token_update.write().unwrap();
         *self.inner.token.write().unwrap() = t;
     }
     pub fn read_only(&self) -> bool {
@@ -274,7 +280,10 @@ impl ApiState {
     pub(crate) fn attach_access(&self, access: Arc<AccessRuntime>) {
         let _ = self.inner.access.set(access);
     }
-    pub(crate) fn attach_device_names(&self, controller: std::sync::Weak<crate::service::ServiceController>) {
+    pub(crate) fn attach_device_names(
+        &self,
+        controller: std::sync::Weak<crate::service::ServiceController>,
+    ) {
         let _ = self.inner.device_names.set(controller);
     }
     fn as_agent(&self) -> Self {
@@ -306,6 +315,9 @@ impl ApiState {
             .get()
             .map(|access| access.legacy_requests.read().unwrap())
     }
+    fn legacy_mutation_guard(&self) -> Option<std::sync::RwLockReadGuard<'_, ()>> {
+        (!self.agent).then(|| self.inner.token_update.read().unwrap())
+    }
     fn permits_target(&self, target: &Path, writing: bool) -> bool {
         self.inner
             .access
@@ -317,12 +329,13 @@ impl ApiState {
         roots: &BTreeMap<String, PathBuf>,
         alias: &str,
         relative: &str,
-    ) -> Result<PathBuf, &'static str> {
-        let path = path_guard::resolve(roots, alias, relative)?;
+    ) -> Result<path_guard::Resolved, &'static str> {
+        let mut path = path_guard::resolve(roots, alias, relative)?;
         if let Some(access) = self.inner.access.get()
             && let Some(root) = roots.get(alias)
+            && access.verify_legacy_path(root, relative)?
         {
-            access.verify_legacy_path(root, relative)?;
+            path.reject_reparse = true;
         }
         Ok(path)
     }
@@ -349,17 +362,24 @@ impl ApiState {
         Ok(())
     }
     pub fn rotate_token(&self) -> Result<(), String> {
+        self.rotate_token_if(|_| true).map(|_| ())
+    }
+    fn rotate_token_if(&self, authorized: impl FnOnce(&str) -> bool) -> Result<bool, String> {
+        // Complete admitted legacy writes before publishing a new credential.
         let _guard = self
             .inner
             .token_update
-            .lock()
+            .write()
             .map_err(|_| "令牌更新锁不可用".to_string())?;
+        if !authorized(&self.inner.token.read().unwrap()) {
+            return Ok(false);
+        }
         let new_token = token::generate();
         token::save(&self.inner.paths.token, &new_token)
             .map_err(|_| "保存令牌失败，原令牌仍有效".to_string())?;
         self.inner.audit.protect_secret(&new_token);
-        self.set_token(new_token);
-        Ok(())
+        *self.inner.token.write().unwrap() = new_token;
+        Ok(true)
     }
     fn options(&self) -> &ApiOptions {
         &self.inner.options
@@ -766,61 +786,41 @@ fn list_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
     let root_name = q.get("root").cloned().unwrap_or_default();
     let rel = q.get("path").cloned().unwrap_or_default();
 
-    let target = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
-    let is_dir = std::fs::metadata(&target)
-        .map(|m| m.is_dir())
-        .unwrap_or(false);
-    if !is_dir {
-        return respond(
-            &s,
-            &parts,
-            404,
-            json!({"error": "not a directory"}),
-            true,
-            Some(&root_name),
-            Some(&rel),
-            None,
-        );
-    }
-
     let mut entries = Vec::new();
-    let read = match std::fs::read_dir(&target) {
-        Ok(r) => r,
-        Err(e) => {
-            return respond(
-                &s,
-                &parts,
-                500,
-                json!({"error": e.to_string()}),
-                true,
-                Some(&root_name),
-                Some(&rel),
-                None,
-            );
-        }
-    };
-    for entry in read.flatten() {
-        if !s.agent && !s.permits_target(&entry.path(), false) {
-            continue;
-        }
-        let Ok(st) = entry.metadata() else { continue };
-        if s.agent
-            && (is_reparse(&st)
+    let listed = handle::list(&resolved, |entry| {
+        let path = resolved.path.join(&entry.name);
+        if s.agent {
+            if entry.is_reparse
                 || s.inner
                     .access
                     .get()
-                    .is_none_or(|access| !access.agent_listing_entry_allowed(&entry.path())))
-        {
-            continue;
+                    .is_none_or(|access| access.is_protected_path(&path))
+            {
+                return;
+            }
+        } else if !s.permits_target(&path, false) {
+            return;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let is_dir = st.is_dir();
-        entries.push(((!is_dir, name.to_lowercase(), entries.len()), name, st));
+        let name = entry.name.to_string_lossy().into_owned();
+        entries.push((
+            (!entry.is_directory, name.to_lowercase(), entries.len()),
+            DirectoryEntry {
+                name,
+                mtime: entry.mtime,
+                size: entry.size,
+                kind: if entry.is_directory { "dir" } else { "file" },
+            },
+        ));
+    });
+    if let Err(error) = listed {
+        return file_error(&s, &parts, &root_name, &rel, error, Some("not a directory"));
     }
+
     // The enumeration index preserves the previous stable order for equal keys.
     let list_max = s.options().list_max;
     let truncated = entries.len() > list_max;
@@ -829,23 +829,7 @@ fn list_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
         entries.truncate(list_max);
     }
     entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
-    let entries = entries
-        .into_iter()
-        .map(|((is_file, _, _), name, metadata)| {
-            let mtime = metadata
-                .modified()
-                .ok()
-                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0);
-            DirectoryEntry {
-                mtime,
-                name,
-                size: metadata.len(),
-                kind: if is_file { "file" } else { "dir" },
-            }
-        })
-        .collect();
+    let entries = entries.into_iter().map(|(_, entry)| entry).collect();
     respond(
         &s,
         &parts,
@@ -872,19 +856,23 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
     let root_name = q.get("root").cloned().unwrap_or_default();
     let rel = q.get("path").cloned().unwrap_or_default();
 
-    let target = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
-    let md = match std::fs::metadata(&target) {
-        Ok(m) => m,
-        Err(_) => {
+    let file = match handle::read(&resolved) {
+        Ok(file) => file,
+        Err(error) => return file_error(&s, &parts, &root_name, &rel, error, Some("not a file")),
+    };
+    let size = match file.metadata() {
+        Ok(metadata) => metadata.len(),
+        Err(error) => {
             return respond(
                 &s,
                 &parts,
-                404,
-                json!({"error": "not a file"}),
+                500,
+                json!({"error": error.to_string()}),
                 true,
                 Some(&root_name),
                 Some(&rel),
@@ -892,19 +880,6 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
             );
         }
     };
-    if !md.is_file() {
-        return respond(
-            &s,
-            &parts,
-            404,
-            json!({"error": "not a file"}),
-            true,
-            Some(&root_name),
-            Some(&rel),
-            None,
-        );
-    }
-    let size = md.len();
     if size > s.options().max_read {
         let msg = format!("file too large ({size} bytes)");
         return respond(
@@ -918,13 +893,13 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
             None,
         );
     }
-    let data = match std::fs::File::open(&target).and_then(|file| {
+    let data = match (|| -> std::io::Result<Vec<u8>> {
         use std::io::Read;
         let mut data = Vec::new();
         file.take(s.options().max_read.saturating_add(1))
             .read_to_end(&mut data)?;
         Ok(data)
-    }) {
+    })() {
         Ok(d) => d,
         Err(e) => {
             return respond(
@@ -994,13 +969,31 @@ async fn post_failure(
     .await
 }
 
-/// POST 公共前置：鉴权（仅失败时计入限流）→ 体积检查 → JSON 解析。
+/// 不携带内容的 POST 前置：鉴权（仅失败时计入限流）→ 元数据体积检查 → JSON 解析。
 async fn post_gate(
     s: &ApiState,
     parts: &axum::http::request::Parts,
     body: Body,
 ) -> Result<Value, Response> {
-    post_gate_limited(s, parts, body, s.options().max_write as usize + 4096).await
+    post_gate_limited(s, parts, body, MAX_METADATA_REQUEST_BYTES).await
+}
+
+/// 写入路由的请求体上限：按解码后的上限反推 Base64 长度，再留出 JSON 元数据余量。
+/// Base64 把 3 字节编码成 4 字节，所以 10 MiB 内容在请求体里约占 13.3 MiB。
+fn encoded_write_limit(max_write: u64) -> usize {
+    let encoded = max_write.saturating_add(2) / 3;
+    usize::try_from(encoded.saturating_mul(4))
+        .unwrap_or(usize::MAX)
+        .saturating_add(MAX_METADATA_REQUEST_BYTES)
+}
+
+/// 写入专用前置：体积检查放行编码后的满额内容，解码后的 10 MiB 上限仍单独校验。
+async fn write_gate(
+    s: &ApiState,
+    parts: &axum::http::request::Parts,
+    body: Body,
+) -> Result<Value, Response> {
+    post_gate_limited(s, parts, body, encoded_write_limit(s.options().max_write)).await
 }
 
 async fn post_gate_limited(
@@ -1047,21 +1040,32 @@ async fn confirm_device_name(State(state): State<ApiState>, request: Request) ->
         Ok(body) => body,
         Err(response) => return response,
     };
-    let Some(id) = body.get("update_id").and_then(Value::as_str).filter(|id| id.len() == 43) else {
+    let Some(id) = body
+        .get("update_id")
+        .and_then(Value::as_str)
+        .filter(|id| id.len() == 43)
+    else {
         return post_failure(&state, &parts, 400, "invalid device name update ID", true).await;
     };
     let id = id.to_owned();
     blocking_response(state.inner.control_jobs.clone(), move || {
         let _guard = state.access_guard();
-        if let Some(response) = reject_revoked_agent(&state, &parts) {
+        if let Some(response) = reject_changed_credential(&state, &parts) {
             return response;
         }
-        let result = state.inner.device_names.get().and_then(|controller| controller.upgrade())
+        let result = state
+            .inner
+            .device_names
+            .get()
+            .and_then(|controller| controller.upgrade())
             .map(|controller| controller.confirm_device_name(&id));
         let (code, body) = match result {
             Some(Ok(true)) => (200, json!({"confirmed": true})),
             Some(Ok(false)) => (409, json!({"error": "device_name_update_not_current"})),
-            Some(Err(_)) | None => (503, json!({"error": "device_name_confirmation_unavailable"})),
+            Some(Err(_)) | None => (
+                503,
+                json!({"error": "device_name_confirmation_unavailable"}),
+            ),
         };
         respond(&state, &parts, code, body, true, None, None, None)
     })
@@ -1088,7 +1092,7 @@ async fn agent_search(State(state): State<ApiState>, request: Request) -> Respon
         .await;
     blocking_response(state.inner.control_jobs.clone(), move || {
         let _guard = state.access_guard();
-        if let Some(response) = reject_revoked_agent(&state, &parts) {
+        if let Some(response) = reject_changed_credential(&state, &parts) {
             return response;
         }
         if generation.load(Ordering::Acquire) {
@@ -1105,8 +1109,13 @@ async fn agent_search(State(state): State<ApiState>, request: Request) -> Respon
         }
         let (code, message, authed) = match result {
             Ok(body) => {
-                let search = Some((body.backend, started.elapsed().as_millis().min(u64::MAX as u128) as u64));
-                return respond_with_search(&state, &parts, 200, body, true, None, None, None, search);
+                let search = Some((
+                    body.backend,
+                    started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                ));
+                return respond_with_search(
+                    &state, &parts, 200, body, true, None, None, None, search,
+                );
             }
             Err(AgentSearchError::Unauthorized) => (401, "unauthorized", false),
             Err(AgentSearchError::Forbidden) => (403, "file access denied", true),
@@ -1141,19 +1150,24 @@ async fn agent_search(State(state): State<ApiState>, request: Request) -> Respon
     .await
 }
 
-fn reject_revoked_agent(state: &ApiState, parts: &axum::http::request::Parts) -> Option<Response> {
-    (state.agent && !state.check_auth(auth_header(parts))).then(|| {
-        respond(
-            state,
-            parts,
-            401,
-            json!({"error":"unauthorized"}),
-            false,
-            None,
-            None,
-            None,
-        )
-    })
+fn reject_changed_credential(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+) -> Option<Response> {
+    (!state.check_auth(auth_header(parts))).then(|| unauthorized_response(state, parts))
+}
+
+fn unauthorized_response(state: &ApiState, parts: &axum::http::request::Parts) -> Response {
+    respond(
+        state,
+        parts,
+        401,
+        json!({"error": "unauthorized"}),
+        false,
+        None,
+        None,
+        None,
+    )
 }
 
 /// 只读拦截（对齐 Python：在路径解析之前，审计不记 root/path）。
@@ -1197,14 +1211,14 @@ fn resolve_file_request(
     root: &str,
     relative: &str,
     operation: Operation,
-) -> Result<PathBuf, Response> {
+) -> Result<path_guard::Resolved, Response> {
     let path = if state.agent {
         let result = state
             .inner
             .access
             .get()
             .ok_or(ERR_NOT_AUTHORIZED)
-            .and_then(|access| access.resolve_agent_target(operation, root, relative));
+            .and_then(|access| access.resolve_agent_file(operation, root, relative));
         match result {
             Err(
                 ERR_NOT_AUTHORIZED | ERR_PROTECTED | ERR_REPARSE | path_guard::ERR_UNKNOWN_ROOT,
@@ -1222,7 +1236,7 @@ fn resolve_file_request(
         let result = state.resolve_file_target(&file.roots, root, relative);
         if result
             .as_ref()
-            .is_ok_and(|path| !state.permits_target(path, writing))
+            .is_ok_and(|path| !state.permits_target(&path.path, writing))
         {
             return Err(access_denied(state, parts));
         }
@@ -1242,9 +1256,82 @@ fn resolve_file_request(
     })
 }
 
+fn file_error(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+    root: &str,
+    relative: &str,
+    error: handle::Error,
+    read_error: Option<&str>,
+) -> Response {
+    let (status, message) = match error {
+        handle::Error::Escape => return escape_response(state, parts, root, relative),
+        handle::Error::Changed | handle::Error::Exists => {
+            return changed_response(state, parts, root, relative);
+        }
+        handle::Error::Missing | handle::Error::NotDirectory | handle::Error::IsDirectory
+            if read_error.is_some() =>
+        {
+            (404, read_error.unwrap().to_owned())
+        }
+        handle::Error::Missing => return changed_response(state, parts, root, relative),
+        handle::Error::IsDirectory => (400, "target is a directory".to_owned()),
+        handle::Error::NotDirectory => (400, "not a directory".to_owned()),
+        handle::Error::Io(error) => (500, error.to_string()),
+    };
+    respond(
+        state,
+        parts,
+        status,
+        json!({"error": message}),
+        true,
+        Some(root),
+        Some(relative),
+        None,
+    )
+}
+
+/// 打开后的对象落在授权根外：与解析阶段的拒绝保持同一错误串。
+fn escape_response(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+    root: &str,
+    relative: &str,
+) -> Response {
+    respond(
+        state,
+        parts,
+        400,
+        json!({"error": "path escapes root"}),
+        true,
+        Some(root),
+        Some(relative),
+        None,
+    )
+}
+
+/// 对象在操作期间被替换或改名：状态已不可信，调用方可以重试。
+fn changed_response(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+    root: &str,
+    relative: &str,
+) -> Response {
+    respond(
+        state,
+        parts,
+        409,
+        json!({"error": "path changed; retry"}),
+        true,
+        Some(root),
+        Some(relative),
+        None,
+    )
+}
+
 async fn write_ep(State(s): State<ApiState>, req: Request) -> Response {
     let (parts, body) = req.into_parts();
-    let body_json = match post_gate(&s, &parts, body).await {
+    let body_json = match write_gate(&s, &parts, body).await {
         Ok(v) => v,
         Err(resp) => return resp,
     };
@@ -1256,15 +1343,16 @@ async fn write_ep(State(s): State<ApiState>, req: Request) -> Response {
 
 fn write_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) -> Response {
     let _guard = s.access_guard();
-    if let Some(response) = reject_revoked_agent(&s, &parts) {
+    let _legacy_credential = s.legacy_mutation_guard();
+    if let Some(response) = reject_changed_credential(&s, &parts) {
         return response;
     }
 
     let root_name = body_json.get("root").and_then(|v| v.as_str()).unwrap_or("");
     let rel = body_json.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-    let target = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
@@ -1336,47 +1424,21 @@ fn write_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) 
             None,
         );
     }
-    if let Ok(md) = std::fs::metadata(&target) {
-        if md.is_dir() {
-            return respond(
-                &s,
-                &parts,
-                400,
-                json!({"error": "target is a directory"}),
-                true,
-                Some(root_name),
-                Some(rel),
-                None,
-            );
-        }
+    if let Err(error) = handle::write(&resolved, &data) {
+        return file_error(&s, &parts, root_name, rel, error, None);
     }
-
-    match super::storage::atomic_write(&target, &data) {
-        Ok(()) => {
-            s.mark_index_dirty();
-            let n = data.len() as u64;
-            respond(
-                &s,
-                &parts,
-                200,
-                json!({"ok":true,"bytes":n}),
-                true,
-                Some(root_name),
-                Some(rel),
-                Some(n),
-            )
-        }
-        Err(e) => respond(
-            &s,
-            &parts,
-            500,
-            json!({"error":e.to_string()}),
-            true,
-            Some(root_name),
-            Some(rel),
-            None,
-        ),
-    }
+    s.mark_index_dirty();
+    let written = data.len() as u64;
+    respond(
+        &s,
+        &parts,
+        200,
+        json!({"ok": true, "bytes": written}),
+        true,
+        Some(root_name),
+        Some(rel),
+        Some(written),
+    )
 }
 
 async fn mkdir_ep(State(s): State<ApiState>, req: Request) -> Response {
@@ -1393,43 +1455,33 @@ async fn mkdir_ep(State(s): State<ApiState>, req: Request) -> Response {
 
 fn mkdir_sync(s: ApiState, parts: axum::http::request::Parts, body_json: Value) -> Response {
     let _guard = s.access_guard();
-    if let Some(response) = reject_revoked_agent(&s, &parts) {
+    let _legacy_credential = s.legacy_mutation_guard();
+    if let Some(response) = reject_changed_credential(&s, &parts) {
         return response;
     }
 
     let root_name = body_json.get("root").and_then(|v| v.as_str()).unwrap_or("");
     let rel = body_json.get("path").and_then(|v| v.as_str()).unwrap_or("");
 
-    let target = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
-        Ok(target) => target,
+    let resolved = match resolve_file_request(&s, &parts, root_name, rel, Operation::Write) {
+        Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
-    match std::fs::create_dir_all(&target) {
-        Ok(_) => {
-            s.mark_index_dirty();
-            respond(
-                &s,
-                &parts,
-                200,
-                json!({"ok": true}),
-                true,
-                Some(root_name),
-                Some(rel),
-                None,
-            )
-        }
-        Err(e) => respond(
-            &s,
-            &parts,
-            500,
-            json!({"error": e.to_string()}),
-            true,
-            Some(root_name),
-            Some(rel),
-            None,
-        ),
+    if let Err(error) = handle::mkdir(&resolved) {
+        return file_error(&s, &parts, root_name, rel, error, None);
     }
+    s.mark_index_dirty();
+    respond(
+        &s,
+        &parts,
+        200,
+        json!({"ok": true}),
+        true,
+        Some(root_name),
+        Some(rel),
+        None,
+    )
 }
 
 async fn rotate_token_ep(State(s): State<ApiState>, req: Request) -> Response {
@@ -1444,8 +1496,11 @@ async fn rotate_token_ep(State(s): State<ApiState>, req: Request) -> Response {
 }
 
 fn rotate_token_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
-    if let Err(e) = s.rotate_token() {
-        return respond(
+    match s.rotate_token_if(|current| token::check_auth_header(auth_header(&parts), current)) {
+        // The new credential stays in the local token file.
+        Ok(true) => respond(&s, &parts, 200, json!({"ok": true}), true, None, None, None),
+        Ok(false) => unauthorized_response(&s, &parts),
+        Err(e) => respond(
             &s,
             &parts,
             500,
@@ -1454,10 +1509,8 @@ fn rotate_token_sync(s: ApiState, parts: axum::http::request::Parts) -> Response
             None,
             None,
             None,
-        );
+        ),
     }
-    // 新令牌绝不回显 —— 只写本机文件
-    respond(&s, &parts, 200, json!({"ok": true}), true, None, None, None)
 }
 
 async fn not_found(State(s): State<ApiState>, req: Request) -> Response {
@@ -1631,11 +1684,13 @@ mod tests {
             ..Default::default()
         };
         access.validate(&policy).unwrap();
-        access.save(policy.clone()).unwrap();
+        access.save(policy.clone(), false).unwrap();
 
         let (code, _, _) = call(&e.app, "GET", "/agent/v1/roots", Some(&e.token), "").await;
         assert_eq!(code, 401);
-        access.issue_agent_token(|key| e.state.audit().protect_secret(key)).unwrap();
+        access
+            .issue_agent_token(|key| e.state.audit().protect_secret(key))
+            .unwrap();
         let agent_token = access.agent_token().unwrap();
         let auth = Some(agent_token.as_str());
 
@@ -1643,26 +1698,64 @@ mod tests {
         assert_eq!(code, 401);
         let (code, roots, _) = call(&e.app, "GET", "/agent/v1/roots", auth, "").await;
         assert_eq!(code, 200);
-        assert_eq!(roots["roots"], json!({"search":["test-disk"],"read":["fixture"],"write":[]}));
+        assert_eq!(
+            roots["roots"],
+            json!({"search":["test-disk"],"read":["fixture"],"write":[]})
+        );
         let (code, desktop, _) = call(&e.app, "GET", "/agent/v1/locations/desktop", auth, "").await;
         assert_eq!(code, 200);
         assert_eq!(desktop["root"], "fixture");
         assert_eq!(desktop["path"], "");
         assert_eq!(desktop["absolute_path"], fixture.to_str().unwrap());
-        let (code, search, _) = call(&e.app, "POST", "/agent/v1/search", auth, r#"{"name":"sample.txt"}"#).await;
+        let (code, search, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/search",
+            auth,
+            r#"{"name":"sample.txt"}"#,
+        )
+        .await;
         assert_eq!(code, 200);
         assert_eq!(search["hits"][0]["root"], "test-disk");
         assert_eq!(search["hits"][0]["path"], "sample.txt");
         access.clear_index().unwrap();
-        let (code, search, _) = call(&e.app, "POST", "/agent/v1/search", auth, r#"{"name":"sample.txt"}"#).await;
+        let (code, search, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/search",
+            auth,
+            r#"{"name":"sample.txt"}"#,
+        )
+        .await;
         assert_eq!(code, 409);
         assert_eq!(search["error"], "search_index_cleared");
-        let (code, _, _) = call(&e.app, "GET", "/agent/v1/read?root=test-disk&path=sample.txt", auth, "").await;
+        let (code, _, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=test-disk&path=sample.txt",
+            auth,
+            "",
+        )
+        .await;
         assert_eq!(code, 403);
-        let (code, file, _) = call(&e.app, "GET", "/agent/v1/read?root=fixture&path=sample.txt", auth, "").await;
+        let (code, file, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=sample.txt",
+            auth,
+            "",
+        )
+        .await;
         assert_eq!(code, 200);
         assert_eq!(file["content"], "example");
-        let (code, _, _) = call(&e.app, "GET", "/agent/v1/read?root=fixture&path=../agent-token", auth, "").await;
+        let (code, _, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=../agent-token",
+            auth,
+            "",
+        )
+        .await;
         assert_eq!(code, 400);
         let write = r#"{"root":"test-disk","path":"sample.txt","content":"updated"}"#;
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, write).await;
@@ -1670,20 +1763,44 @@ mod tests {
 
         policy.read = GrantScope::Off;
         policy.write = GrantScope::AllLocal;
-        access.save(policy).unwrap();
+        access.save(policy, false).unwrap();
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, write).await;
         assert_eq!(code, 200);
-        let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", auth, r#"{"root":"test-disk","path":"sample.txt"}"#).await;
+        let (code, _, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/write",
+            auth,
+            r#"{"root":"test-disk","path":"sample.txt"}"#,
+        )
+        .await;
         assert_eq!(code, 400);
-        assert_eq!(std::fs::read_to_string(fixture.join("sample.txt")).unwrap(), "updated");
+        assert_eq!(
+            std::fs::read_to_string(fixture.join("sample.txt")).unwrap(),
+            "updated"
+        );
         let (code, _, _) = call(&e.app, "GET", "/agent/v1/list?root=test-disk", auth, "").await;
         assert_eq!(code, 403);
-        let (code, _, _) = call(&e.app, "POST", "/agent/v1/mkdir", auth, r#"{"root":"test-disk","path":"new-dir"}"#).await;
+        let (code, _, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/mkdir",
+            auth,
+            r#"{"root":"test-disk","path":"new-dir"}"#,
+        )
+        .await;
         assert_eq!(code, 200);
         assert!(fixture.join("new-dir").is_dir());
         let (code, _, _) = call(&e.app, "POST", "/agent/v1/rotate-token", auth, "{}").await;
         assert_eq!(code, 404);
-        let (code, _, _) = call(&e.app, "POST", "/agent/v1/rotate-token", Some(&e.token), "{}").await;
+        let (code, _, _) = call(
+            &e.app,
+            "POST",
+            "/agent/v1/rotate-token",
+            Some(&e.token),
+            "{}",
+        )
+        .await;
         assert_eq!(code, 401);
 
         access.revoke_agent_token().unwrap();
@@ -1859,45 +1976,84 @@ mod tests {
     }
 
     #[cfg(windows)]
+    fn link_fixture(e: &Env) -> PathBuf {
+        let outside = e.root.parent().unwrap().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel.txt"), "outside").unwrap();
+        outside
+    }
+
+    /// 重解析点必须被授权闸门挡住：读取与写入都不得触及根外文件。
+    #[cfg(windows)]
+    async fn assert_link_rejected(e: &Env, kind: &str, outside: &Path) {
+        let uri = format!("/api/list?root=r&path={kind}");
+        let (code, _, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
+        assert_eq!(code, 400, "{kind} 列目录未被拒绝");
+        let uri = format!("/api/read?root=r&path={kind}%2fsentinel.txt");
+        let (code, body, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
+        assert_eq!(code, 400, "{kind} 读取未被拒绝");
+        assert_eq!(body["error"], "path escapes root", "{kind}");
+        let body = json!({"root":"r","path":format!("{kind}/sentinel.txt"),"content":"changed"})
+            .to_string();
+        let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
+        assert_eq!(code, 400, "{kind} 写入未被拒绝");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "outside",
+            "{kind} 改写了根外文件"
+        );
+        // 建目录同样不得穿过重解析点。
+        let body = json!({"root":"r","path":format!("{kind}/newdir")}).to_string();
+        let (code, _, _) = call(&e.app, "POST", "/api/mkdir", Some(&e.token), &body).await;
+        assert_eq!(code, 400, "{kind} 建目录未被拒绝");
+        assert!(!outside.join("newdir").exists(), "{kind} 在根外建了目录");
+    }
+
+    /// 目录联接不要求管理员权限，创建失败即真实失败，不能算作通过。
+    #[cfg(windows)]
     #[tokio::test]
     async fn junction_escape() {
         use std::os::windows::process::CommandExt;
         let e = setup(false, default_opts());
-        let outside = e.root.parent().unwrap().join("outside");
-        std::fs::create_dir_all(&outside).unwrap();
-        std::fs::write(outside.join("sentinel.txt"), "outside").unwrap();
-        for kind in ["junction", "symlink"] {
-            let link = e.root.join(kind);
-            if kind == "junction" {
-                let status = std::process::Command::new("cmd.exe")
-                    .creation_flags(0x08000000)
-                    .args(["/D", "/C", "mklink", "/J"])
-                    .arg(&link)
-                    .arg(&outside)
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .unwrap();
-                assert!(status.success(), "目录联接未创建，不能将攻击矩阵判为通过");
-            } else {
-                std::os::windows::fs::symlink_dir(&outside, &link)
-                    .expect("符号链接未创建，该覆盖项未通过");
-            }
-            let uri = format!("/api/read?root=r&path={kind}%2fsentinel.txt");
-            let (code, body, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
-            assert_eq!(code, 400);
-            assert_eq!(body["error"], "path escapes root");
-            let body =
-                json!({"root":"r","path":format!("{kind}/sentinel.txt"),"content":"changed"})
-                    .to_string();
-            let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
-            assert_eq!(code, 400);
-            assert_eq!(
-                std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
-                "outside"
+        let outside = link_fixture(&e);
+        let link = e.root.join("junction");
+        let status = std::process::Command::new("cmd.exe")
+            .creation_flags(0x08000000)
+            .args(["/D", "/C", "mklink", "/J"])
+            .arg(&link)
+            .arg(&outside)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "目录联接未创建，不能将攻击矩阵判为通过");
+        assert_link_rejected(&e, "junction", &outside).await;
+        std::fs::remove_dir(&link).unwrap();
+    }
+
+    /// 符号链接需要 SeCreateSymbolicLinkPrivilege（管理员或开发者模式）。
+    /// 缺权限时本机标为未覆盖；设置 `MUSE_CONNECTOR_REQUIRE_SYMLINK_TESTS=1` 时改为失败，
+    /// 供 CI 断言该用例确实执行，避免把跳过当成通过。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn symlink_escape() {
+        let e = setup(false, default_opts());
+        let outside = link_fixture(&e);
+        let link = e.root.join("symlink");
+        if let Err(error) = std::os::windows::fs::symlink_dir(&outside, &link) {
+            assert!(
+                matches!(error.raw_os_error(), Some(5 | 1314)),
+                "符号链接创建失败且不是权限原因，不能将攻击矩阵判为通过: {error:?}"
             );
-            std::fs::remove_dir(link).unwrap();
+            assert!(
+                std::env::var_os("MUSE_CONNECTOR_REQUIRE_SYMLINK_TESTS").is_none(),
+                "当前环境缺少创建符号链接的权限，symlink_escape 未覆盖: {error:?}"
+            );
+            eprintln!("symlink_escape 未覆盖：环境不允许创建符号链接（{error:?}）");
+            return;
         }
+        assert_link_rejected(&e, "symlink", &outside).await;
+        std::fs::remove_dir(&link).unwrap();
     }
 
     // ---- 读写功能矩阵 ----
@@ -1905,8 +2061,8 @@ mod tests {
     #[tokio::test]
     async fn write_read_roundtrip_text() {
         let e = setup(false, default_opts());
-        let body =
-            json!({"root":"r","path":"notes/todo.txt","content":"你好，MuseLink\nline 2"}).to_string();
+        let body = json!({"root":"r","path":"notes/todo.txt","content":"你好，MuseLink\nline 2"})
+            .to_string();
         let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
         assert_eq!(c, 200);
         assert_eq!(v["ok"], true);
@@ -2189,28 +2345,49 @@ mod tests {
         assert_eq!(new_tok.len(), 43);
         assert_ne!(new_tok, e.token);
         assert_eq!(e.state.token(), new_tok);
+        let old_header = format!("Bearer {}", e.token);
+        assert!(
+            !e.state
+                .rotate_token_if(|current| token::check_auth_header(Some(&old_header), current))
+                .unwrap()
+        );
+        assert_eq!(token::load(&e.token_path).unwrap(), new_tok);
         let (c, _, _) = call(&e.app, "GET", "/api/health", Some(&new_tok), "").await;
         assert_eq!(c, 200);
     }
 
+    #[test]
+    fn legacy_mutations_hold_the_rotation_guard() {
+        let e = setup(false, default_opts());
+        let legacy = e.state.legacy_mutation_guard();
+        assert!(e.state.inner.token_update.try_write().is_err());
+        assert!(e.state.as_agent().legacy_mutation_guard().is_none());
+        drop(legacy);
+        assert!(e.state.inner.token_update.try_write().is_ok());
+    }
+
     #[tokio::test]
     async fn size_limits() {
-        // content 超限
         let opts = ApiOptions {
             max_write: 1024,
             ..default_opts()
         };
         let e = setup(false, opts);
+        // content 解码后超限；请求体本身仍在编码后上限内
         let big = "x".repeat(2000);
         let body = json!({"root":"r","path":"big.txt","content":big}).to_string();
         let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
         assert_eq!(c, 413);
         assert_eq!(v["error"], "content too large");
-        // 原始 payload 超限（> max + 4096）
-        let huge = json!({"root":"r","path":"big.txt","content":"y".repeat(6000)}).to_string();
+        assert!(!e.root.join("big.txt").exists());
+        // 原始 payload 超出编码后上限（max_write 的 Base64 长度 + 元数据余量）
+        let limit = encoded_write_limit(1024);
+        let huge = json!({"root":"r","path":"big.txt","content":"y".repeat(limit)}).to_string();
+        assert!(huge.len() > limit);
         let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &huge).await;
         assert_eq!(c, 413);
         assert_eq!(v["error"], "payload too large");
+        assert!(!e.root.join("big.txt").exists());
 
         // 读超限
         let opts = ApiOptions {
@@ -2235,6 +2412,192 @@ mod tests {
         .await;
         assert_eq!(c, 413);
         assert_eq!(v["error"], "file too large (3000 bytes)");
+    }
+
+    #[test]
+    fn write_envelope_covers_base64_and_metadata() {
+        // 10 MiB 恰好编码成 13,981,016 字节，再加 32 KiB 元数据余量
+        assert_eq!(
+            B64.encode(vec![0u8; MAX_WRITE_BYTES as usize]).len(),
+            13_981_016
+        );
+        assert_eq!(encoded_write_limit(MAX_WRITE_BYTES), 14_013_784);
+        assert_eq!(encoded_write_limit(0), MAX_METADATA_REQUEST_BYTES);
+        // 3 字节 -> 4 个字符，向上取整
+        assert_eq!(encoded_write_limit(1) - MAX_METADATA_REQUEST_BYTES, 4);
+        assert_eq!(encoded_write_limit(3) - MAX_METADATA_REQUEST_BYTES, 4);
+        assert_eq!(encoded_write_limit(4) - MAX_METADATA_REQUEST_BYTES, 8);
+        // 极端值不溢出，且门限随 max_write 单调增长
+        assert!(encoded_write_limit(u64::MAX) > encoded_write_limit(MAX_WRITE_BYTES));
+    }
+
+    /// 旧 `/api` 与 `/agent/v1` 共用同一写入限制：五个边界都必须一致。
+    async fn assert_write_boundaries(
+        app: &Router,
+        auth: Option<&str>,
+        route: &str,
+        alias: &str,
+        dir: &Path,
+    ) {
+        let payload = |path: &str, content: &str, encoding: &str| {
+            json!({"root": alias, "path": path, "content": content, "encoding": encoding})
+                .to_string()
+        };
+
+        // 文本写入
+        let text = "第一行 hello\nsecond line";
+        let body = payload("text.txt", text, "text");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 200, "{route} text");
+        assert_eq!(v["bytes"], text.len() as u64, "{route} text bytes");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("text.txt")).unwrap(),
+            text,
+            "{route} text content"
+        );
+
+        // 上限以内
+        let inside = vec![0x11u8; 1024 * 1024];
+        let body = payload("inside.bin", &B64.encode(&inside), "base64");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 200, "{route} inside limit");
+        assert_eq!(v["bytes"], inside.len() as u64);
+
+        // 恰好 10 MiB：编码后 13,981,016 字节必须穿过请求体检查
+        let full = vec![0xA5u8; MAX_WRITE_BYTES as usize];
+        let encoded = B64.encode(&full);
+        let body = payload("full.bin", &encoded, "base64");
+        assert!(body.len() < encoded_write_limit(MAX_WRITE_BYTES));
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 200, "{route} exact limit");
+        assert_eq!(v["bytes"], MAX_WRITE_BYTES);
+        let written = std::fs::read(dir.join("full.bin")).unwrap();
+        assert_eq!(written.len() as u64, MAX_WRITE_BYTES, "{route} file length");
+        assert!(
+            written.iter().all(|byte| *byte == 0xA5),
+            "{route} file content"
+        );
+
+        // 超出 1 字节：413，且原文件保持 10 MiB 内容不变
+        let over = vec![0x5Au8; MAX_WRITE_BYTES as usize + 1];
+        let body = payload("full.bin", &B64.encode(&over), "base64");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 413, "{route} one byte over");
+        assert_eq!(v["error"], "content too large");
+        let kept = std::fs::read(dir.join("full.bin")).unwrap();
+        assert_eq!(kept.len() as u64, MAX_WRITE_BYTES, "{route} kept length");
+        assert!(
+            kept.iter().all(|byte| *byte == 0xA5),
+            "{route} kept content"
+        );
+
+        // 非法编码：400，原文件不被改写
+        let body = payload("text.txt", "!!!not-base64!!!", "base64");
+        let (code, v, _) = call(app, "POST", route, auth, &body).await;
+        assert_eq!(code, 400, "{route} bad base64");
+        assert_eq!(v["error"], "bad content encoding");
+        assert_eq!(
+            std::fs::read_to_string(dir.join("text.txt")).unwrap(),
+            text,
+            "{route} text preserved"
+        );
+    }
+
+    fn setup_agent_file_grant(e: &Env) -> (PathBuf, String) {
+        use super::super::access::{AccessPolicy, GrantScope, ScopeMode};
+        use crate::profile::{ProfileKind, RuntimeProfile};
+
+        let profile = RuntimeProfile {
+            kind: ProfileKind::Development,
+            home: e.root.parent().unwrap().join("agent-write"),
+            onboarding_qa: false,
+        };
+        let fixture = profile.home.join("files");
+        std::fs::create_dir_all(&fixture).unwrap();
+        let (access, error) = AccessRuntime::open(&profile);
+        assert!(error.is_none());
+        e.state.attach_access(access.clone());
+        let policy = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: [("fixture".into(), fixture.clone())].into(),
+            search: GrantScope::Off,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..Default::default()
+        };
+        access.validate(&policy).unwrap();
+        access.save(policy, false).unwrap();
+        access
+            .issue_agent_token(|key| e.state.audit().protect_secret(key))
+            .unwrap();
+        (fixture, access.agent_token().unwrap())
+    }
+
+    #[tokio::test]
+    async fn write_boundaries_accept_base64_up_to_the_decoded_limit() {
+        let e = setup(false, default_opts());
+        assert_write_boundaries(&e.app, Some(&e.token), "/api/write", "r", &e.root).await;
+
+        let (fixture, agent_token) = setup_agent_file_grant(&e);
+        assert_write_boundaries(
+            &e.app,
+            Some(&agent_token),
+            "/agent/v1/write",
+            "fixture",
+            &fixture,
+        )
+        .await;
+
+        // 两个凭证入口不能互换
+        let (code, _, _) = call(&e.app, "POST", "/agent/v1/write", Some(&e.token), "{}").await;
+        assert_eq!(code, 401);
+        let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&agent_token), "{}").await;
+        assert_eq!(code, 401);
+    }
+
+    #[tokio::test]
+    async fn both_file_apis_support_long_unicode_paths() {
+        let e = setup(false, default_opts());
+        let agent = setup(false, default_opts());
+        let (fixture, agent_token) = setup_agent_file_grant(&agent);
+        let parent = format!("{}/{}/{}", "a".repeat(96), "b".repeat(96), "c".repeat(96));
+        let directory = format!("{parent}/notes");
+        let name = "中文 测试.txt";
+        let encoded_name = "%E4%B8%AD%E6%96%87%20%E6%B5%8B%E8%AF%95.txt";
+
+        for (app, prefix, alias, token, root) in [
+            (&e.app, "/api", "r", &e.token, &e.root),
+            (&agent.app, "/agent/v1", "fixture", &agent_token, &fixture),
+        ] {
+            let auth = Some(token.as_str());
+            let mkdir = json!({"root": alias, "path": parent}).to_string();
+            let (code, body, _) = call(app, "POST", &format!("{prefix}/mkdir"), auth, &mkdir).await;
+            assert_eq!(code, 200, "{prefix} mkdir returned {body}");
+
+            let path = format!("{directory}/{name}");
+            for content in ["first", "updated"] {
+                let write = json!({"root": alias, "path": path, "content": content}).to_string();
+                let (code, body, _) =
+                    call(app, "POST", &format!("{prefix}/write"), auth, &write).await;
+                assert_eq!(code, 200, "{prefix} write returned {body}");
+            }
+
+            let list = format!("{prefix}/list?root={alias}&path={directory}");
+            let (code, body, _) = call(app, "GET", &list, auth, "").await;
+            assert_eq!(code, 200, "{prefix} list returned {body}");
+            assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+            assert_eq!(body["entries"][0]["name"], name);
+            assert_eq!(body["entries"][0]["size"], 7);
+
+            let read = format!("{prefix}/read?root={alias}&path={directory}/{encoded_name}");
+            let (code, body, _) = call(app, "GET", &read, auth, "").await;
+            assert_eq!(code, 200, "{prefix} read returned {body}");
+            assert_eq!(body["content"], "updated");
+            assert_eq!(
+                std::fs::read_to_string(root.join(&path)).unwrap(),
+                "updated"
+            );
+        }
     }
 
     #[tokio::test]

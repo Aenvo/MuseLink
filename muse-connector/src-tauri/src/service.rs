@@ -12,7 +12,7 @@ use crate::profile::{
     DesktopState, DeviceNameUpdate, Language, ProviderSettings, RuntimeProfile, valid_device_name,
 };
 use crate::tunnel::{Health, TunnelManager, TunnelObservation, TunnelStatus, observe_tailscale};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, RwLock,
@@ -64,6 +64,13 @@ pub struct Snapshot {
     pub version: &'static str,
     pub log_errors: Vec<String>,
 }
+
+#[derive(Clone, Copy, Deserialize)]
+pub(crate) struct FileAccessEdit {
+    pub(super) expected_mode: Option<ScopeMode>,
+    pub(super) enable_all_operations: bool,
+}
+
 pub struct ServiceController {
     pub profile: RuntimeProfile,
     pub api: ApiState,
@@ -188,7 +195,9 @@ impl ServiceController {
             maintenance: AtomicBool::new(false),
             ntfs_service_observed: AtomicBool::new(false),
         });
-        controller.api.attach_device_names(Arc::downgrade(&controller));
+        controller
+            .api
+            .attach_device_names(Arc::downgrade(&controller));
         controller
     }
     pub fn snapshot(&self) -> Snapshot {
@@ -302,13 +311,46 @@ impl ServiceController {
     }
 
     pub async fn save_file_access(&self, policy: AccessPolicy) -> Result<(), String> {
+        self.save_file_access_edit(policy, None).await
+    }
+
+    pub(crate) async fn save_file_access_edit(
+        &self,
+        mut policy: AccessPolicy,
+        edit: Option<FileAccessEdit>,
+    ) -> Result<(), String> {
         let _update = self.access_update.lock().await;
+        let saved = self.access.policy();
+        if let Some(edit) = edit
+            && edit.expected_mode != saved.as_ref().map(|saved| saved.mode)
+        {
+            return Err("文件权限已变更，请检查后重新保存。".into());
+        }
         self.access.validate(&policy)?;
-        if self.access.policy().as_ref() == Some(&policy) {
+        if !edit.is_some_and(|edit| edit.enable_all_operations)
+            && let Some(saved) = saved.as_ref().filter(|saved| saved.mode != policy.mode)
+        {
+            let scopes = [policy.search, policy.read, policy.write];
+            if scopes.contains(&GrantScope::AllLocal) {
+                return Err("切换到磁盘模式前，请确认对所选范围启用全部操作。".into());
+            }
+            if scopes.contains(&GrantScope::Folders) {
+                let access = self.access.clone();
+                let saved = saved.clone();
+                policy = tokio::task::spawn_blocking(move || {
+                    access.preserve_folder_access(&saved, policy)
+                })
+                .await
+                .map_err(|_| "保存文件授权未完成".to_string())??;
+            }
+        }
+        if saved.as_ref() == Some(&policy) {
             return Ok(());
         }
+        let initialized = self.initialized.load(Ordering::Relaxed);
+        let legacy_read_only = initialized && self.api.read_only();
         // Bootstrap a narrow v0.3 entry only when the user explicitly selects folders.
-        if !self.initialized.load(Ordering::Relaxed)
+        if !initialized
             && initialization_files_absent(&self.profile)
             && policy.mode == ScopeMode::Folders
             && policy.read == GrantScope::Folders
@@ -321,7 +363,7 @@ impl ServiceController {
             .await?;
         }
         let access = self.access.clone();
-        tokio::task::spawn_blocking(move || access.save(policy))
+        tokio::task::spawn_blocking(move || access.save(policy, legacy_read_only))
             .await
             .map_err(|_| "保存文件授权未完成".to_string())??;
         self.reset_agent_public_result();
@@ -841,7 +883,9 @@ impl ServiceController {
         update_muse: bool,
     ) -> Result<Option<DeviceNameUpdate>, String> {
         if !valid_device_name(&name) {
-            return Err("请输入 1–32 个字符，可用文字、0–9、空格、连字符和下划线，首尾不能有空格。".into());
+            return Err(
+                "请输入 1–32 个字符，可用文字、0–9、空格、连字符和下划线，首尾不能有空格。".into(),
+            );
         }
         let mut receipt = None;
         let changed = self.update_desktop(|state| {
@@ -851,7 +895,10 @@ impl ServiceController {
             }
             // 保留无法读取的状态文件，等待用户修复。
             self.profile.load_desktop()?;
-            let pending = state.device_name_update.as_ref().is_some_and(|item| item.pending);
+            let pending = state
+                .device_name_update
+                .as_ref()
+                .is_some_and(|item| item.pending);
             receipt = (update_muse || pending).then(|| DeviceNameUpdate {
                 id: token::generate(),
                 pending: true,
@@ -868,9 +915,11 @@ impl ServiceController {
     pub(crate) fn confirm_device_name(&self, id: &str) -> Result<bool, String> {
         let mut matched = false;
         let changed = self.update_desktop(|state| {
-            let Some(receipt) = state.device_name_update.as_mut().filter(|item| {
-                token::constant_time_eq(&item.id, id)
-            }) else {
+            let Some(receipt) = state
+                .device_name_update
+                .as_mut()
+                .filter(|item| token::constant_time_eq(&item.id, id))
+            else {
                 return Ok(false);
             };
             matched = true;
@@ -1010,7 +1059,13 @@ mod tests {
         assert!(controller.snapshot().desktop.device_name.is_empty());
 
         let name = "测试笔记本 2_A-𠀀";
-        assert!(controller.save_device_name(name.into(), false).await.unwrap().is_none());
+        assert!(
+            controller
+                .save_device_name(name.into(), false)
+                .await
+                .unwrap()
+                .is_none()
+        );
         controller.save_language(Language::English).await.unwrap();
         let saved = std::fs::read_to_string(profile.state_path()).unwrap();
         for invalid in [
@@ -1022,7 +1077,12 @@ mod tests {
             "bad😃",
             &"机".repeat(33),
         ] {
-            assert!(controller.save_device_name(invalid.into(), false).await.is_err());
+            assert!(
+                controller
+                    .save_device_name(invalid.into(), false)
+                    .await
+                    .is_err()
+            );
         }
         assert!(valid_device_name(&"𠀀".repeat(32)));
         assert_eq!(controller.snapshot().desktop.device_name, name);
@@ -1049,21 +1109,35 @@ mod tests {
         let profile = profile();
         profile.initialize_development().unwrap();
         let controller = ServiceController::open_inner(profile.clone(), Some(0));
-        controller.save_file_access(AccessPolicy {
-            mode: ScopeMode::Folders,
-            roots: [("fixture".into(), profile.home.join("files"))].into(),
-            read: GrantScope::Folders,
-            ..AccessPolicy::default()
-        }).await.unwrap();
+        controller
+            .save_file_access(AccessPolicy {
+                mode: ScopeMode::Folders,
+                roots: [("fixture".into(), profile.home.join("files"))].into(),
+                read: GrantScope::Folders,
+                ..AccessPolicy::default()
+            })
+            .await
+            .unwrap();
         controller.set_agent_access(true).await.unwrap();
-        let previous = controller.save_device_name("笔记本".into(), true).await.unwrap().unwrap();
-        let current = controller.save_device_name("工作笔记本".into(), true).await.unwrap().unwrap();
+        let previous = controller
+            .save_device_name("笔记本".into(), true)
+            .await
+            .unwrap()
+            .unwrap();
+        let current = controller
+            .save_device_name("工作笔记本".into(), true)
+            .await
+            .unwrap()
+            .unwrap();
         let agent = controller.access.agent_token().unwrap();
         let legacy = controller.api.token();
         let port = controller.toggle(true).await.unwrap().api_port;
         let client = reqwest::Client::builder().no_proxy().build().unwrap();
         let confirm = |id: &str, credential: &str| {
-            client.post(format!("http://127.0.0.1:{port}/agent/v1/device-name/confirm"))
+            client
+                .post(format!(
+                    "http://127.0.0.1:{port}/agent/v1/device-name/confirm"
+                ))
                 .bearer_auth(credential)
                 .header("Content-Type", "application/json")
                 .body(json!({"update_id": id}).to_string())
@@ -1071,7 +1145,14 @@ mod tests {
         };
         assert_eq!(confirm(&current.id, &legacy).await.unwrap().status(), 401);
         assert_eq!(confirm(&previous.id, &agent).await.unwrap().status(), 409);
-        assert!(profile.load_desktop().unwrap().device_name_update.unwrap().pending);
+        assert!(
+            profile
+                .load_desktop()
+                .unwrap()
+                .device_name_update
+                .unwrap()
+                .pending
+        );
         assert_eq!(confirm(&current.id, &agent).await.unwrap().status(), 200);
         assert_eq!(confirm(&current.id, &agent).await.unwrap().status(), 200);
         let stored = profile.load_desktop().unwrap();
@@ -1080,7 +1161,14 @@ mod tests {
         controller.shutdown().await;
         drop(controller);
         let reopened = ServiceController::open_inner(profile.clone(), Some(0));
-        assert!(!reopened.snapshot().desktop.device_name_update.unwrap().pending);
+        assert!(
+            !reopened
+                .snapshot()
+                .desktop
+                .device_name_update
+                .unwrap()
+                .pending
+        );
         drop(reopened);
         std::fs::remove_dir_all(profile.home).unwrap();
     }
@@ -1264,7 +1352,18 @@ mod tests {
             read: GrantScope::AllLocal,
             ..AccessPolicy::default()
         };
-        controller.save_file_access(full).await.unwrap();
+        assert!(controller.save_file_access(full.clone()).await.is_err());
+        assert_eq!(controller.snapshot().file_access.as_ref(), Some(&folders));
+        controller
+            .save_file_access_edit(
+                full,
+                Some(FileAccessEdit {
+                    expected_mode: Some(ScopeMode::Folders),
+                    enable_all_operations: true,
+                }),
+            )
+            .await
+            .unwrap();
         let narrowed = controller.api.file_view();
         assert_eq!(narrowed.roots, folders.roots);
         assert!(narrowed.read_only);
@@ -1276,6 +1375,175 @@ mod tests {
         drop(controller);
         std::fs::remove_dir_all(profile.home).unwrap();
     }
+    #[tokio::test]
+    async fn switching_to_folders_keeps_only_the_saved_file_permissions() {
+        use crate::core::access::FolderGrant;
+
+        let mut profile = profile();
+        profile.onboarding_qa = true;
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        let inside = profile.home.join("files/inside");
+        let restricted = inside.join("restricted");
+        let outside = profile.home.join("outside");
+        std::fs::create_dir_all(&restricted).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+
+        let initial = AccessPolicy {
+            mode: ScopeMode::Full,
+            roots: [
+                ("inside".into(), inside.clone()),
+                ("restricted".into(), restricted.clone()),
+                ("outside".into(), outside.clone()),
+            ]
+            .into(),
+            disks: Some(["test-disk".into()].into()),
+            folder_grants: Some(
+                [
+                    (
+                        "inside".into(),
+                        FolderGrant {
+                            search: true,
+                            ..Default::default()
+                        },
+                    ),
+                    ("restricted".into(), FolderGrant::default()),
+                    (
+                        "outside".into(),
+                        FolderGrant {
+                            search: true,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into(),
+            ),
+            search: GrantScope::Folders,
+            read: GrantScope::Off,
+            write: GrantScope::AllLocal,
+        };
+        controller.save_file_access(initial.clone()).await.unwrap();
+
+        let mut folders = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: initial.roots.clone(),
+            search: GrantScope::Folders,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..Default::default()
+        };
+        let denied_change = AccessPolicy {
+            roots: [("outside".into(), outside.clone())].into(),
+            search: GrantScope::Off,
+            ..folders.clone()
+        };
+        assert!(controller.save_file_access(denied_change).await.is_err());
+        assert_eq!(controller.snapshot().file_access.as_ref(), Some(&initial));
+
+        folders.roots.remove("restricted");
+        folders.roots.insert("renamed".into(), restricted);
+        let switch = Some(FileAccessEdit {
+            expected_mode: Some(ScopeMode::Full),
+            enable_all_operations: false,
+        });
+        controller
+            .save_file_access_edit(folders.clone(), switch)
+            .await
+            .unwrap();
+        assert_eq!(
+            controller
+                .save_file_access_edit(folders.clone(), switch)
+                .await,
+            Err("文件权限已变更，请检查后重新保存。".into())
+        );
+        controller.set_agent_access(true).await.unwrap();
+        let port = controller.toggle(true).await.unwrap().api_port;
+        let token = controller.current_agent_token().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let base = format!("http://127.0.0.1:{port}/agent/v1");
+        let roots = || {
+            client
+                .get(format!("{base}/roots"))
+                .bearer_auth(&token)
+                .send()
+        };
+        let write = |root| {
+            client
+                .post(format!("{base}/write"))
+                .bearer_auth(&token)
+                .json(&json!({"root": root, "path": "sample.txt", "content": "fixture"}))
+                .send()
+        };
+        let reply = roots().await.unwrap().error_for_status().unwrap();
+        let reply = reply.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(
+            reply["roots"],
+            json!({"search": ["inside", "outside"], "read": [], "write": ["inside", "renamed"]})
+        );
+        assert_eq!(write("outside").await.unwrap().status(), 403);
+        assert!(!outside.join("sample.txt").exists());
+        assert_eq!(write("inside").await.unwrap().status(), 200);
+        assert_eq!(
+            std::fs::read_to_string(inside.join("sample.txt")).unwrap(),
+            "fixture"
+        );
+
+        controller
+            .save_file_access_edit(
+                folders,
+                Some(FileAccessEdit {
+                    expected_mode: Some(ScopeMode::Folders),
+                    enable_all_operations: true,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write("outside").await.unwrap().status(), 200);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sample.txt")).unwrap(),
+            "fixture"
+        );
+        controller.shutdown().await;
+        drop(controller);
+        std::fs::remove_dir_all(profile.home).unwrap();
+    }
+    #[tokio::test]
+    async fn first_muse_grant_preserves_existing_legacy_read_only() {
+        use crate::core::access::Operation;
+
+        let profile = profile();
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        let config = controller.api.config_snapshot();
+        assert!(controller.snapshot().initialized);
+        assert!(config.read_only);
+        assert!(controller.access.policy().is_none());
+
+        let policy = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: config.roots.clone(),
+            search: GrantScope::Folders,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..AccessPolicy::default()
+        };
+        controller.save_file_access(policy.clone()).await.unwrap();
+        controller.shutdown().await;
+        drop(controller);
+
+        let reopened = ServiceController::open_inner(profile.clone(), Some(0));
+        assert_eq!(reopened.api.file_view().roots, config.roots);
+        assert!(reopened.api.file_view().read_only);
+        assert_eq!(reopened.access.policy().as_ref(), Some(&policy));
+        assert!(
+            reopened
+                .access
+                .resolve_agent_target(Operation::Write, "development", "sample.txt")
+                .is_ok()
+        );
+        reopened.shutdown().await;
+        drop(reopened);
+        std::fs::remove_dir_all(profile.home).unwrap();
+    }
+
     #[tokio::test]
     async fn legacy_http_checks_each_folders_write_permission_and_revocation() {
         use crate::core::access::FolderGrant;

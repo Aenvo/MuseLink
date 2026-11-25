@@ -20,7 +20,12 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     let sep = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&status, &toggle, &show, &sep, &quit])?;
-    app.manage(TrayItems { toggle, status, show, quit });
+    app.manage(TrayItems {
+        toggle,
+        status,
+        show,
+        quit,
+    });
     TrayIconBuilder::with_id("main")
         .icon(tauri::include_image!("icons/32x32.png"))
         .menu(&menu)
@@ -84,10 +89,13 @@ pub fn refresh(app: &AppHandle) {
     } else {
         language.text("开启连接", "Start connection")
     });
+    let _ = items.toggle.set_enabled(!matches!(
+        status.health,
+        Health::Starting | Health::Stopping
+    ));
     let _ = items
-        .toggle
-        .set_enabled(!matches!(status.health, Health::Starting | Health::Stopping));
-    let _ = items.show.set_text(language.text("打开主窗口", "Open main window"));
+        .show
+        .set_text(language.text("打开主窗口", "Open main window"));
     let _ = items.quit.set_text(language.text("退出", "Quit"));
 }
 

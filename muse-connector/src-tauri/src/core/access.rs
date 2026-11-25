@@ -114,11 +114,8 @@ impl AccessPolicy {
             return Err("全盘访问需要选择管理本机磁盘");
         }
         if let Some(disks) = &self.disks {
-            if self.mode != ScopeMode::Full
-                || grants != [GrantScope::AllLocal; 3]
-                || !self.roots.is_empty()
-            {
-                return Err("选择指定磁盘时，搜索、读取与写入须使用同一磁盘范围");
+            if self.mode != ScopeMode::Full || !grants.contains(&GrantScope::AllLocal) {
+                return Err("选择指定磁盘需要至少一项操作使用磁盘授权");
             }
             if disks.is_empty()
                 || disks.iter().any(|alias| {
@@ -225,6 +222,18 @@ impl AccessPolicy {
         alias: &str,
         relative: &str,
     ) -> Result<PathBuf, &'static str> {
+        self.resolve_file(operation, local_roots, protected, alias, relative)
+            .map(|resolved| resolved.path)
+    }
+
+    pub(crate) fn resolve_file(
+        &self,
+        operation: Operation,
+        local_roots: &BTreeMap<String, PathBuf>,
+        protected: &[PathBuf],
+        alias: &str,
+        relative: &str,
+    ) -> Result<path_guard::Resolved, &'static str> {
         let roots = self
             .scope_roots(operation, local_roots)
             .ok_or(ERR_NOT_AUTHORIZED)?;
@@ -242,8 +251,8 @@ fn check_target(
     protected: &[PathBuf],
     alias: &str,
     relative: &str,
-) -> Result<PathBuf, &'static str> {
-    let resolved = path_guard::resolve(roots, alias, relative)?;
+) -> Result<path_guard::Resolved, &'static str> {
+    let mut resolved = path_guard::resolve(roots, alias, relative)?;
     let lexical = relative
         .split(['/', '\\'])
         .filter(|component| !component.is_empty() && *component != ".")
@@ -251,10 +260,11 @@ fn check_target(
             path.push(component);
             path
         });
-    if protected_path(&lexical, protected) || protected_path(&resolved, protected) {
+    if protected_path(&lexical, protected) || protected_path(&resolved.path, protected) {
         return Err(ERR_PROTECTED);
     }
     reject_reparse_ancestors(&lexical)?;
+    resolved.reject_reparse = true;
     Ok(resolved)
 }
 
@@ -262,6 +272,46 @@ fn check_target(
 /// Protected entries should also be canonicalized by the caller when they exist.
 pub fn protected_path(candidate: &Path, protected: &[PathBuf]) -> bool {
     protected.iter().any(|path| within(candidate, path))
+}
+
+/// Canonicalize an existing path only if it has the same spelling after expanding DOS aliases.
+pub(crate) fn canonicalize_direct(path: &Path) -> Option<PathBuf> {
+    let canonical = std::fs::canonicalize(path).ok()?;
+    let same = |spelling: &Path| within(spelling, &canonical) && within(&canonical, spelling);
+    if same(path) {
+        return Some(canonical);
+    }
+    #[cfg(windows)]
+    if reject_reparse_ancestors(path).is_ok()
+        && long_path_spelling(path).is_some_and(|spelling| same(&spelling))
+    {
+        return Some(canonical);
+    }
+    None
+}
+
+#[cfg(windows)]
+fn long_path_spelling(path: &Path) -> Option<PathBuf> {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::Storage::FileSystem::GetLongPathNameW;
+
+    // This expands DOS short names without substituting the target of a junction or symlink.
+    let path: Vec<u16> = path.as_os_str().encode_wide().chain([0]).collect();
+    let mut output = vec![0u16; 512];
+    loop {
+        // Both buffers are valid UTF-16 storage, with a NUL terminator on the input.
+        let len =
+            unsafe { GetLongPathNameW(path.as_ptr(), output.as_mut_ptr(), output.len() as u32) }
+                as usize;
+        if len == 0 {
+            return None;
+        }
+        if len < output.len() {
+            return Some(OsString::from_wide(&output[..len]).into());
+        }
+        output.resize(len + 1, 0);
+    }
 }
 
 #[cfg(not(windows))]
@@ -438,7 +488,7 @@ mod tests {
         );
         policy.disks = Some(["drive-e".into()].into());
         assert!(policy.validate(&[], None).is_ok());
-        let policy: AccessPolicy =
+        let mut policy: AccessPolicy =
             serde_json::from_value(serde_json::to_value(policy).unwrap()).unwrap();
         for operation in [Operation::Search, Operation::Read, Operation::Write] {
             let granted = policy.roots_for(operation, &roots).unwrap();
@@ -456,6 +506,13 @@ mod tests {
                 Err(ERR_NOT_AUTHORIZED)
             );
         }
+        policy.write = GrantScope::Off;
+        assert!(policy.validate(&[], None).is_ok());
+        assert!(policy.roots_for(Operation::Write, &roots).is_none());
+        assert_eq!(
+            policy.resolve(Operation::Read, &roots, &[], "drive-c", ""),
+            Err(ERR_NOT_AUTHORIZED)
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 

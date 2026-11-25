@@ -20,6 +20,9 @@ Thumbs.db
 Desktop.ini
 $RECYCLE.BIN/
 
+# --- 本地工具与工作区数据 ---
+.workbuddy/
+
 # --- 敏感（桥接运行时产物不入库）---
 /doc/
 .env

@@ -20,11 +20,19 @@ const RESERVED: &[&str] = &[
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
 ];
 
-pub fn resolve(
+pub(crate) struct Resolved {
+    pub(crate) root: PathBuf,
+    pub(crate) path: PathBuf,
+    pub(crate) requested_root: PathBuf,
+    pub(crate) requested_relative: PathBuf,
+    pub(crate) reject_reparse: bool,
+}
+
+pub(crate) fn resolve(
     roots: &BTreeMap<String, PathBuf>,
     root_name: &str,
     rel: &str,
-) -> Result<PathBuf, &'static str> {
+) -> Result<Resolved, &'static str> {
     let base = roots.get(root_name).ok_or(ERR_UNKNOWN_ROOT)?;
 
     // 绝对路径检测（对齐 Windows ntpath.isabs 的判定面）
@@ -79,10 +87,8 @@ pub fn resolve(
         clean.push(comp);
     }
 
-    let mut target = base.clone();
-    for c in clean {
-        target.push(c);
-    }
+    let requested_relative: PathBuf = clean.into_iter().collect();
+    let target = base.join(&requested_relative);
 
     // 白名单判定：canonicalize 消解 junction/符号链接/剩余 .. 后必须仍在根内。
     // base 在 config 加载时已 ensure_roots，此处仍容忍竞态导致的失败。
@@ -90,7 +96,13 @@ pub fn resolve(
     let target_canon = canonical_non_strict(&target).map_err(|_| ERR_INVALID)?;
 
     if target_canon == base_canon || target_canon.starts_with(&base_canon) {
-        Ok(target_canon)
+        Ok(Resolved {
+            root: base_canon,
+            path: target_canon,
+            requested_root: base.clone(),
+            requested_relative,
+            reject_reparse: false,
+        })
     } else {
         Err(ERR_ESCAPE)
     }
