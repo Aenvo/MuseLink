@@ -5,7 +5,7 @@
 <h1 align="center">MuseLink — Windows File Connector for Muse</h1>
 
 <p align="center">
-  Let Muse search, read, and write files in the Windows folders and drives you authorize.
+  Let Muse search, read, and write files in authorized Windows folders and drives, and optionally run project commands inside a write-restricted sandbox with local approval.
 </p>
 
 <p align="center">
@@ -44,12 +44,12 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 
 | Feature | What it does |
 | --- | --- |
-| File permissions | Authorize selected folders and their subfolders, or choose from local fixed drives. |
-| Local file tools | Let Muse search by file name, list folders, read files, and write when needed. |
-| Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project folders (Windows write-restricted sandbox + local approval dialog). |
+| File permissions | Authorize selected folders and their subfolders, or choose from local fixed drives, with built-in protection for credentials and sensitive system paths. |
+| Local file tools | Let Muse search by file name, list folders, read files, and write or create folders when needed. |
+| Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. |
 | Public connection | Use Tailscale Funnel by default, or choose a Cloudflare quick or named tunnel. |
-| Dedicated token | Generate, copy, rotate, or revoke the Muse token in **File Access**. |
-| Desktop controls | Check connection status and access logs, pause or start the connection from the app or tray, and switch between English and Simplified Chinese. |
+| Dedicated token | Generate, copy, rotate, or revoke the Muse token in **File Access**, with automatic token redaction in logs. |
+| Desktop controls | Filter audit logs by **Files**, **Command execution**, or runtime events; wake and elevate approval prompts from the tray; cleanly terminate managed child processes on exit; switch between English and Simplified Chinese. |
 
 ## Download and install
 
@@ -78,12 +78,15 @@ File indexing starts in the background after you first save permissions. Check i
 
 ## Access and connection boundaries
 
-- Muse's file operations follow the saved access scope and the current Windows account's permissions. The chosen tunnel forwards the public endpoint to the local file service. Credential directories (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg`) are protected by default, and system folders, Startup folders, shell profiles, and the app directory are write-protected by default.
-- Local command execution is off by default and can be toggled under **File Access → Muse file tools**. When enabled, commands run inside a Windows write-restricted sandbox (Restricted Token + JobObject) scoped to the requested project subfolder and an isolated temp folder (bare drive roots are rejected). Common read-only and build/test commands run automatically; first-time shell use in a project, dependency changes, or remote pushes prompt for local approval (with an optional per-project session grant), while sensitive paths or unsandboxed requests always require a single confirmation. Turning off the toggle immediately stops running commands.
-- Muse can search, read, and write within the scope you first authorize. When switching to selected folders, each folder keeps the operations covered by your previous grant. If there are no permissions to carry over, select authorized folders or confirm that all operations are enabled. Switching from folders to drives requires confirmation to enable all operations on the selected drives. Existing read-only File Bridge settings still apply to the legacy API.
-- Enter the dedicated token in the Muse security card. To stop access, pause the connection or revoke the token. Update the security card after rotating it.
-- The public health check verifies the endpoint. Have Muse read a non-sensitive file to confirm that the integration works.
-- Cloudflare named tunnels require an available domain in your account. Update the connection in Muse if switching providers changes the public URL.
+- **File & sensitive-path protection**: Muse's file operations follow the saved access scope and the current Windows account's permissions. Credential directories (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg`) are excluded by default, and system folders, Startup folders, shell profiles, `.gitconfig`, and the app directory are write-protected by default. Reads and atomic writes are verified through open OS handles.
+- **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access → Muse file tools** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory, process-count, and timeout limits) with a unique SHA-256-derived SID per workspace. Writes are restricted strictly to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution.
+- **3-tier risk model & auto-elevated approval dialog**:
+  - **Auto-allowed**: Standard read-only and project build/test commands (such as `git status`/`diff`/`log`, `cargo test`/`check`, `pnpm build`, `pytest`) run without interrupting you and return HTTP 200 directly when they finish quickly; pure read-only direct commands skip workspace write ACLs entirely.
+  - **Per-project session approval**: First-time `powershell`/`cmd` usage, package installs/updates, or `git push` in a project wakes the MuseLink window to the foreground (120-second timeout defaults to deny) and lets you choose **Allow once** or **Allow project this session** (valid for 4 hours, strictly scoped per folder, revocable anytime via **Revoke session grants** in **File Access**).
+  - **Always single confirmation**: Sensitive paths, parent-directory traversal (`..`), force push, recursive/forced deletion, system admin tools, obfuscated scripts, or `unsandboxed` requests always require a single-use approval with session grants disabled.
+- **Kill switch, redaction, and clean teardown**: Disabling command execution, pausing the connection, or rotating/revoking the token immediately cancels running commands and pending approvals and terminates child process trees. Audit and runtime logs automatically redact `mfa_` tokens and can be filtered by **Files** or **Command execution**. Exiting MuseLink cleanly tears down managed `Everything.exe`, `cloudflared`, and command child processes via Windows JobObjects.
+- **Permission changes & legacy compatibility**: When you first authorize files, Muse can search, read, and write within that scope. Switching to selected folders preserves only the operations covered by your previous grant; switching from folders to drives requires confirming all operations on the selected drives. Legacy read-only File Bridge settings still apply to the legacy API.
+- **Tokens & tunnels**: Enter the dedicated token in the Muse security card. Pause the connection or revoke the token to stop access, and update the security card after rotating it. Cloudflare named tunnels require an available domain in your account; update the URL in Muse whenever switching providers changes the public endpoint.
 
 ## Build from source
 

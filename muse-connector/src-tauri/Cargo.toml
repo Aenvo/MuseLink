@@ -1,6 +1,6 @@
 [package]
 name = "muse-connector"
-version = "0.1.0"
+version = "0.2.0"
 description = "MuseLink connects Muse to authorized files on Windows."
 edition = "2024"
 
