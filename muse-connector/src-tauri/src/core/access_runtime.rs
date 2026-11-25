@@ -712,6 +712,57 @@ impl AccessRuntime {
         }
     }
 
+    pub(crate) fn preserve_folder_access(
+        &self,
+        saved: &AccessPolicy,
+        mut policy: AccessPolicy,
+    ) -> Result<AccessPolicy, String> {
+        use super::access::{FolderGrant, canonicalize_direct};
+
+        let operations = [Operation::Search, Operation::Read, Operation::Write];
+        let local_roots = self.local_roots();
+        let authorized = operations.map(|operation| {
+            saved
+                .roots_for(operation, &local_roots)
+                .into_iter()
+                .flatten()
+                .filter_map(|(_, root)| canonicalize_direct(&root))
+                .collect::<Vec<_>>()
+        });
+        let grants = policy
+            .roots
+            .iter()
+            .map(|(alias, path)| {
+                let path = canonicalize_direct(path).ok_or("无法访问目录")?;
+                let [search, read, write] = std::array::from_fn(|index| {
+                    let operation = operations[index];
+                    policy.grant(operation) == GrantScope::Folders
+                        && policy.permits_folder(alias, operation)
+                        && protected_path(&path, &authorized[index])
+                        && (saved.grant(operation) != GrantScope::Folders
+                            || !saved.roots.iter().any(|(alias, root)| {
+                                !saved.permits_folder(alias, operation) && same_path(&path, root)
+                            }))
+                });
+                Ok((
+                    alias.clone(),
+                    FolderGrant {
+                        search,
+                        read,
+                        write,
+                    },
+                ))
+            })
+            .collect::<Result<BTreeMap<_, _>, &str>>()?;
+        policy.folder_grants = Some(grants);
+        if !has_agent_grant(&policy) {
+            return Err(
+                "所选文件夹没有可保留的权限。请选择已授权的文件夹，或确认启用全部操作。".into(),
+            );
+        }
+        Ok(policy)
+    }
+
     pub(crate) async fn search_local(
         self: Arc<Self>,
         request: SearchRequest,

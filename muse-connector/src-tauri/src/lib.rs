@@ -82,9 +82,10 @@ async fn save_config(
 #[tauri::command]
 async fn save_file_access(
     policy: core::access::AccessPolicy,
+    edit: service::FileAccessEdit,
     state: tauri::State<'_, Services>,
 ) -> Result<(), String> {
-    state.save_file_access(policy).await
+    state.save_file_access_edit(policy, Some(edit)).await
 }
 
 #[tauri::command]

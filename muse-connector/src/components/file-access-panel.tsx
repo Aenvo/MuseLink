@@ -128,16 +128,19 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
   const [enableAllOperations, setEnableAllOperations] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const folders = Object.entries(roots);
+  const modeChanged = saved !== null && saved.mode !== mode;
+  const diskConfirmationRequired = modeChanged && mode === "full" && !enableAllOperations;
   const policy = editFileAccessPolicy(enableAllOperations ? null : saved, mode, roots, disks);
-  const showFolders = mode === "folders" || accessOperations.some(operation => policy[operation] === "folders");
-  const showDisks = accessOperations.some(operation => policy[operation] === "all_local");
+  const showFolders = mode === "folders" || (!diskConfirmationRequired && accessOperations.some(operation => policy[operation] === "folders"));
+  const showDisks = diskConfirmationRequired || accessOperations.some(operation => policy[operation] === "all_local");
   const missingFolder = showFolders && !folders.length;
   const missingDisk = showDisks && disks?.length === 0;
-  const canEnableAll = saved !== null && !completeScope(saved);
+  const canEnableAll = saved !== null && (modeChanged || !completeScope(saved));
   const changed = !saved || accessPolicyKey(policy) !== accessPolicyKey(saved);
   const busy = !!bridge.busy;
   const savedSearch = !!saved && saved.search !== "off";
   const showNtfs = policy.search === "all_local" && ntfsSearchService != null;
+  const canSave = !busy && !missingFolder && !missingDisk && !diskConfirmationRequired && changed;
 
   const removeFolder = (name: string) => {
     setRoots(current => Object.fromEntries(Object.entries(current).filter(([key]) => key !== name)));
@@ -158,9 +161,10 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
   };
 
   const save = async () => {
-    if (busy || missingFolder || missingDisk || !changed) return;
+    if (!canSave) return;
     setError(null);
-    const result = await bridge.run(t("正在保存文件授权"), "save_file_access", { policy }, t("文件授权已保存"), false);
+    const edit = { expected_mode: saved?.mode ?? null, enable_all_operations: enableAllOperations };
+    const result = await bridge.run(t("正在保存文件授权"), "save_file_access", { policy, edit }, t("文件授权已保存"), false);
     if (!result.ok) setError(result.error);
     else if (guided) onSaved();
   };
@@ -176,16 +180,21 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
           <input type="radio" name={`${prefix}-access-mode`} value={key} checked={mode === key}
             className="mt-1 shrink-0 accent-primary focus-visible:outline focus-visible:outline-ring" onChange={() => {
               setMode(key);
+              setEnableAllOperations(false);
               setError(null);
             }} />
           <span>{key === "full" && canEnableAll && !enableAllOperations ? t("管理本机磁盘") : t(label)}</span>
         </label>)}
       </div>
-      <p className="text-caption text-muted-foreground">{canEnableAll && !enableAllOperations
-        ? t("调整范围时会保留当前的搜索、读取和写入权限。")
-        : mode === "full"
-          ? t("Muse 可搜索、读取和写入所选磁盘中当前 Windows 账户可访问的文件。")
-          : t("Muse 可搜索、读取和写入所选文件夹及其子文件夹。")}</p>
+      <p className="text-caption text-muted-foreground">{diskConfirmationRequired
+        ? t("切换到磁盘模式前，请确认对所选范围启用全部操作。")
+        : modeChanged && !enableAllOperations
+          ? t("各文件夹只保留当前授权范围内的搜索、读取和写入权限。")
+          : canEnableAll && !enableAllOperations
+            ? t("调整范围时会保留当前的搜索、读取和写入权限。")
+            : mode === "full"
+              ? t("Muse 可搜索、读取和写入所选磁盘中当前 Windows 账户可访问的文件。")
+              : t("Muse 可搜索、读取和写入所选文件夹及其子文件夹。")}</p>
       {showDisks ? <DiskPicker selected={disks} disabled={busy} onChange={selection => { setDisks(selection); setError(null); }} /> : null}
       {showFolders ? <div className="flex min-w-0 flex-col gap-2">
         <Button id={guided ? undefined : "add-directory"} type="button" variant="outline" size="sm" className="self-start" disabled={busy} onClick={() => void selectFolder()}>
@@ -247,7 +256,7 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
       {missingFolder ? <p className="text-caption text-muted-foreground">{t("请选择至少一个文件夹。")}</p> : null}
       {missingDisk ? <p className="text-caption text-muted-foreground">{t("请至少选择一个磁盘。")}</p> : null}
       {error ? <FieldError>{diagnostic(error)}</FieldError> : null}
-      <Button type="submit" size="sm" className="self-start" disabled={busy || missingFolder || missingDisk || !changed}>
+      <Button type="submit" size="sm" className="self-start" disabled={!canSave}>
         {guided ? t("确认并继续") : t("保存授权")}
       </Button>
     </FieldSet>

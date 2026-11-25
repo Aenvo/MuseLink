@@ -12,7 +12,7 @@ use crate::profile::{
     DesktopState, DeviceNameUpdate, Language, ProviderSettings, RuntimeProfile, valid_device_name,
 };
 use crate::tunnel::{Health, TunnelManager, TunnelObservation, TunnelStatus, observe_tailscale};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{
     Arc, RwLock,
@@ -64,6 +64,13 @@ pub struct Snapshot {
     pub version: &'static str,
     pub log_errors: Vec<String>,
 }
+
+#[derive(Clone, Copy, Deserialize)]
+pub(crate) struct FileAccessEdit {
+    pub(super) expected_mode: Option<ScopeMode>,
+    pub(super) enable_all_operations: bool,
+}
+
 pub struct ServiceController {
     pub profile: RuntimeProfile,
     pub api: ApiState,
@@ -304,9 +311,40 @@ impl ServiceController {
     }
 
     pub async fn save_file_access(&self, policy: AccessPolicy) -> Result<(), String> {
+        self.save_file_access_edit(policy, None).await
+    }
+
+    pub(crate) async fn save_file_access_edit(
+        &self,
+        mut policy: AccessPolicy,
+        edit: Option<FileAccessEdit>,
+    ) -> Result<(), String> {
         let _update = self.access_update.lock().await;
+        let saved = self.access.policy();
+        if let Some(edit) = edit
+            && edit.expected_mode != saved.as_ref().map(|saved| saved.mode)
+        {
+            return Err("文件权限已变更，请检查后重新保存。".into());
+        }
         self.access.validate(&policy)?;
-        if self.access.policy().as_ref() == Some(&policy) {
+        if !edit.is_some_and(|edit| edit.enable_all_operations)
+            && let Some(saved) = saved.as_ref().filter(|saved| saved.mode != policy.mode)
+        {
+            let scopes = [policy.search, policy.read, policy.write];
+            if scopes.contains(&GrantScope::AllLocal) {
+                return Err("切换到磁盘模式前，请确认对所选范围启用全部操作。".into());
+            }
+            if scopes.contains(&GrantScope::Folders) {
+                let access = self.access.clone();
+                let saved = saved.clone();
+                policy = tokio::task::spawn_blocking(move || {
+                    access.preserve_folder_access(&saved, policy)
+                })
+                .await
+                .map_err(|_| "保存文件授权未完成".to_string())??;
+            }
+        }
+        if saved.as_ref() == Some(&policy) {
             return Ok(());
         }
         let initialized = self.initialized.load(Ordering::Relaxed);
@@ -1314,7 +1352,18 @@ mod tests {
             read: GrantScope::AllLocal,
             ..AccessPolicy::default()
         };
-        controller.save_file_access(full).await.unwrap();
+        assert!(controller.save_file_access(full.clone()).await.is_err());
+        assert_eq!(controller.snapshot().file_access.as_ref(), Some(&folders));
+        controller
+            .save_file_access_edit(
+                full,
+                Some(FileAccessEdit {
+                    expected_mode: Some(ScopeMode::Folders),
+                    enable_all_operations: true,
+                }),
+            )
+            .await
+            .unwrap();
         let narrowed = controller.api.file_view();
         assert_eq!(narrowed.roots, folders.roots);
         assert!(narrowed.read_only);
@@ -1323,6 +1372,137 @@ mod tests {
             .await
             .unwrap();
         assert!(controller.api.file_view().roots.is_empty());
+        drop(controller);
+        std::fs::remove_dir_all(profile.home).unwrap();
+    }
+    #[tokio::test]
+    async fn switching_to_folders_keeps_only_the_saved_file_permissions() {
+        use crate::core::access::FolderGrant;
+
+        let mut profile = profile();
+        profile.onboarding_qa = true;
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        let inside = profile.home.join("files/inside");
+        let restricted = inside.join("restricted");
+        let outside = profile.home.join("outside");
+        std::fs::create_dir_all(&restricted).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+
+        let initial = AccessPolicy {
+            mode: ScopeMode::Full,
+            roots: [
+                ("inside".into(), inside.clone()),
+                ("restricted".into(), restricted.clone()),
+                ("outside".into(), outside.clone()),
+            ]
+            .into(),
+            disks: Some(["test-disk".into()].into()),
+            folder_grants: Some(
+                [
+                    (
+                        "inside".into(),
+                        FolderGrant {
+                            search: true,
+                            ..Default::default()
+                        },
+                    ),
+                    ("restricted".into(), FolderGrant::default()),
+                    (
+                        "outside".into(),
+                        FolderGrant {
+                            search: true,
+                            ..Default::default()
+                        },
+                    ),
+                ]
+                .into(),
+            ),
+            search: GrantScope::Folders,
+            read: GrantScope::Off,
+            write: GrantScope::AllLocal,
+        };
+        controller.save_file_access(initial.clone()).await.unwrap();
+
+        let mut folders = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: initial.roots.clone(),
+            search: GrantScope::Folders,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..Default::default()
+        };
+        let denied_change = AccessPolicy {
+            roots: [("outside".into(), outside.clone())].into(),
+            search: GrantScope::Off,
+            ..folders.clone()
+        };
+        assert!(controller.save_file_access(denied_change).await.is_err());
+        assert_eq!(controller.snapshot().file_access.as_ref(), Some(&initial));
+
+        folders.roots.remove("restricted");
+        folders.roots.insert("renamed".into(), restricted);
+        let switch = Some(FileAccessEdit {
+            expected_mode: Some(ScopeMode::Full),
+            enable_all_operations: false,
+        });
+        controller
+            .save_file_access_edit(folders.clone(), switch)
+            .await
+            .unwrap();
+        assert_eq!(
+            controller
+                .save_file_access_edit(folders.clone(), switch)
+                .await,
+            Err("文件权限已变更，请检查后重新保存。".into())
+        );
+        controller.set_agent_access(true).await.unwrap();
+        let port = controller.toggle(true).await.unwrap().api_port;
+        let token = controller.current_agent_token().unwrap();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let base = format!("http://127.0.0.1:{port}/agent/v1");
+        let roots = || {
+            client
+                .get(format!("{base}/roots"))
+                .bearer_auth(&token)
+                .send()
+        };
+        let write = |root| {
+            client
+                .post(format!("{base}/write"))
+                .bearer_auth(&token)
+                .json(&json!({"root": root, "path": "sample.txt", "content": "fixture"}))
+                .send()
+        };
+        let reply = roots().await.unwrap().error_for_status().unwrap();
+        let reply = reply.json::<serde_json::Value>().await.unwrap();
+        assert_eq!(
+            reply["roots"],
+            json!({"search": ["inside", "outside"], "read": [], "write": ["inside", "renamed"]})
+        );
+        assert_eq!(write("outside").await.unwrap().status(), 403);
+        assert!(!outside.join("sample.txt").exists());
+        assert_eq!(write("inside").await.unwrap().status(), 200);
+        assert_eq!(
+            std::fs::read_to_string(inside.join("sample.txt")).unwrap(),
+            "fixture"
+        );
+
+        controller
+            .save_file_access_edit(
+                folders,
+                Some(FileAccessEdit {
+                    expected_mode: Some(ScopeMode::Folders),
+                    enable_all_operations: true,
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(write("outside").await.unwrap().status(), 200);
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sample.txt")).unwrap(),
+            "fixture"
+        );
+        controller.shutdown().await;
         drop(controller);
         std::fs::remove_dir_all(profile.home).unwrap();
     }
