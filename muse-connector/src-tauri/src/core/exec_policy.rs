@@ -581,6 +581,9 @@ fn inspect_shell_high_risk(command: &str) -> Vec<&'static str> {
     {
         push("destructive_delete");
     }
+    if lower.contains("..\\") || lower.contains("../") || has_token_any(&lower, &[".."]) {
+        push("path_escape_attempt");
+    }
     if lower.contains(".muse-bridge")
         || lower.contains("\\.ssh")
         || lower.contains("/.ssh")
@@ -696,6 +699,19 @@ mod tests {
         assert_eq!(sensitive.tier, RiskTier::Always);
         assert!(!sensitive.allow_session);
         assert!(sensitive.risk_tags.contains(&"sensitive_path"));
+
+        let escape_ps = validate_request(ExecRequest {
+            root: "project".into(),
+            cwd: Some("app".into()),
+            mode: ExecMode::Powershell,
+            command: Some(r#"Set-Content ..\escape.txt "test""#.into()),
+            ..Default::default()
+        })
+        .unwrap();
+        let escape_verdict = evaluate(&escape_ps, false);
+        assert_eq!(escape_verdict.tier, RiskTier::Always);
+        assert!(!escape_verdict.allow_session);
+        assert!(escape_verdict.risk_tags.contains(&"path_escape_attempt"));
     }
 
     #[test]

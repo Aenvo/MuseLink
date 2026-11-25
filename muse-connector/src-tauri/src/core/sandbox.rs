@@ -49,8 +49,9 @@ use windows_sys::Win32::System::Threading::{
 
 use super::job::{ChildJob, JobLimits};
 
-/// MuseLink 专用合成限制 SID，仅用于标记写受限沙箱允许写入的工作目录与隔离临时目录。
-const SANDBOX_SID_STR: &str = "S-1-5-21-3892149017-1290471821-2910478123-9001";
+/// MuseLink 专用合成限制 SID 域前缀：每个工作目录通过 SHA-256 派生唯一 SID，
+/// 彻底隔离不同项目与父子目录之间的写权限（即便父目录或兄弟项目曾运行过沙箱命令也互不可写）。
+const SANDBOX_DOMAIN_PREFIX: u32 = 3_892_149_017;
 /// Windows 内置 RESTRICTED SID 与 World/Everyone SID：用于通过系统 DLL、控制台与运行时早期初始化，
 /// 普通用户目录、桌面、启动项、.ssh 及注册表均不授予二者写权限。
 const RESTRICTED_SID_STR: &str = "S-1-5-12";
@@ -136,8 +137,9 @@ impl LocalSid {
         Ok(Self(sid))
     }
 
-    fn sandbox() -> io::Result<Self> {
-        Self::from_str(SANDBOX_SID_STR)
+    fn for_workspace(path: &Path) -> io::Result<Self> {
+        let sid_str = workspace_sid_string(path);
+        Self::from_str(&sid_str)
     }
 
     fn restricted() -> io::Result<Self> {
@@ -147,6 +149,98 @@ impl LocalSid {
     fn world() -> io::Result<Self> {
         Self::from_str(WORLD_SID_STR)
     }
+}
+
+fn workspace_sid_string(path: &Path) -> String {
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let normalized = strip_verbatim(&canonical)
+        .trim_end_matches(['\\', '/'])
+        .to_ascii_lowercase();
+    let mut input = Vec::with_capacity(32 + normalized.len());
+    input.extend_from_slice(b"muselink-sandbox-ws-v2:");
+    input.extend_from_slice(normalized.as_bytes());
+    let digest = sha256(&input);
+    let a = u32::from_be_bytes([digest[0], digest[1], digest[2], digest[3]]);
+    let b = u32::from_be_bytes([digest[4], digest[5], digest[6], digest[7]]);
+    let mut c = u32::from_be_bytes([digest[8], digest[9], digest[10], digest[11]]);
+    if c == 9001 {
+        c = 9002;
+    }
+    format!("S-1-5-21-{SANDBOX_DOMAIN_PREFIX}-{a}-{b}-{c}")
+}
+
+fn sha256(data: &[u8]) -> [u8; 32] {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut h: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    let bit_len = (data.len() as u64).wrapping_mul(8);
+    let mut msg = data.to_vec();
+    msg.push(0x80);
+    while (msg.len() % 64) != 56 {
+        msg.push(0);
+    }
+    msg.extend_from_slice(&bit_len.to_be_bytes());
+    for chunk in msg.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes([
+                chunk[i * 4],
+                chunk[i * 4 + 1],
+                chunk[i * 4 + 2],
+                chunk[i * 4 + 3],
+            ]);
+        }
+        for i in 16..64 {
+            let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);
+            let s1 = w[i - 2].rotate_right(17) ^ w[i - 2].rotate_right(19) ^ (w[i - 2] >> 10);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh] = h;
+        for i in 0..64 {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let ch = (e & f) ^ ((!e) & g);
+            let t1 = hh
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let maj = (a & b) ^ (a & c) ^ (b & c);
+            let t2 = s0.wrapping_add(maj);
+            hh = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (slot, delta) in h.iter_mut().zip([a, b, c, d, e, f, g, hh]) {
+            *slot = slot.wrapping_add(delta);
+        }
+    }
+    let mut out = [0u8; 32];
+    for (i, word) in h.iter().enumerate() {
+        out[i * 4..i * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    out
 }
 
 impl Drop for LocalSid {
@@ -164,10 +258,14 @@ pub(crate) fn spawn(
 ) -> io::Result<SpawnedProcess> {
     std::fs::create_dir_all(&config.temp_dir)?;
     let sandbox_sid = if config.sandboxed {
-        let sid = LocalSid::sandbox()?;
-        if config.write_workspace {
+        let sid = if config.write_workspace {
+            let sid = LocalSid::for_workspace(&config.cwd)?;
             ensure_sandbox_write_access(&config.cwd, sid.0, cancel)?;
-        }
+            sid
+        } else {
+            // 纯只读命令使用单任务临时目录派生 SID，连工作区本身也保持只读
+            LocalSid::for_workspace(&config.temp_dir)?
+        };
         apply_sandbox_ace_single(&config.temp_dir, sid.0, true)?;
         Some(sid)
     } else {
@@ -1071,5 +1169,40 @@ mod tests {
                 "sandboxed powershell.exe escaped workspace write boundary!"
             );
         }
+
+        // 4) 跨工作区与父子目录严格隔离：即便父目录 base 与另一个项目 sibling 都运行过沙箱命令，
+        //    子工作区 workspace 内运行的命令仍不能向父目录或 sibling 写入。
+        let parent_sid = LocalSid::for_workspace(&base).unwrap();
+        ensure_sandbox_write_access(&base, parent_sid.0, None).unwrap();
+        let parent_escape = base.join("parent-escape.txt");
+        let parent_proc = spawn(
+            &SpawnConfig {
+                application: cmd_exe.clone(),
+                command_line: format!(
+                    "{} /d /s /c \"echo escape-parent> {}\"",
+                    quote_windows_arg(&strip_verbatim(&cmd_exe)),
+                    quote_windows_arg(&strip_verbatim(&parent_escape))
+                ),
+                cwd: workspace.clone(),
+                temp_dir: temp_dir.clone(),
+                sandboxed: true,
+                write_workspace: true,
+                limits: JobLimits {
+                    memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
+                    max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+                },
+            },
+            None,
+        )
+        .unwrap();
+        let parent_code = parent_proc.wait_timeout(10_000).unwrap().unwrap();
+        assert_ne!(
+            parent_code, 0,
+            "child workspace must NOT inherit write access to previously-sandboxed parent!"
+        );
+        assert!(
+            !parent_escape.exists(),
+            "child workspace escaped into previously-sandboxed parent directory!"
+        );
     }
 }
