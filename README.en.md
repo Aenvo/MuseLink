@@ -25,17 +25,21 @@
 
 ## App preview
 
-The setup guide in the lower-right corner walks you through granting file access, preparing a public connection, connecting Muse, and testing it for the first time. Return to **File Access** to change folders or drives, manage the index, or manage the Muse token.
+The setup guide in the lower-right corner walks you through granting file access, preparing a public connection, connecting Muse, and testing it for the first time. Return to **File Access** to adjust authorized folders or drives and toggle local command execution, copy connection instructions and the dedicated token under **Connection**, or manage the local file index, logs, and token under **Settings → Data**.
 
 <table>
   <tr>
-    <td width="50%" align="center">
-      <a href="assets/readme/en/setup-guide.png"><img src="assets/readme/en/setup-guide.png" alt="Connection tab with the first-time setup guide in the lower-right corner"></a><br>
-      <sub>First-time setup · Preparing the public connection</sub>
+    <td width="33%" align="center">
+      <a href="assets/readme/en/setup-guide.png"><img src="assets/readme/en/setup-guide.png" alt="Connection tab with the first-time setup guide showing the Connect Muse step and copy controls"></a><br>
+      <sub>First-time setup · Connect Muse</sub>
     </td>
-    <td width="50%" align="center">
-      <a href="assets/readme/en/file-access.png"><img src="assets/readme/en/file-access.png" alt="File Access tab showing authorized folders, index status, and token controls"></a><br>
-      <sub>File Access · Managing permissions and the token</sub>
+    <td width="33%" align="center">
+      <a href="assets/readme/en/file-access.png"><img src="assets/readme/en/file-access.png" alt="File Access tab showing authorized folders and the write-restricted command sandbox toggle"></a><br>
+      <sub>File Access · Permissions &amp; command sandbox</sub>
+    </td>
+    <td width="33%" align="center">
+      <a href="assets/readme/en/settings.png"><img src="assets/readme/en/settings.png" alt="Settings tab showing General startup/tray options and Data management"></a><br>
+      <sub>Settings · General &amp; Data</sub>
     </td>
   </tr>
 </table>
@@ -81,7 +85,7 @@ File indexing starts in the background after you first save permissions. Manage 
 ## Access and connection boundaries
 
 - **File & sensitive-path protection**: Muse's file operations follow the saved access scope and the current Windows account's permissions. Credential directories (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg`) are excluded by default, and system folders, Startup folders, shell profiles, `.gitconfig`, and the app directory are write-protected by default. Reads and atomic writes are verified through open OS handles.
-- **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access → Muse file tools** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory, process-count, and timeout limits) with a unique SHA-256-derived SID per workspace. Writes are restricted strictly to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution.
+- **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory, process-count, and timeout limits) with a unique SHA-256-derived SID per workspace. Writes are restricted strictly to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution.
 - **3-tier risk model & auto-elevated approval dialog**:
   - **Auto-allowed**: Standard read-only and project build/test commands (such as `git status`/`diff`/`log`, `cargo test`/`check`, `pnpm build`, `pytest`) run without interrupting you and return HTTP 200 directly when they finish quickly; pure read-only direct commands skip workspace write ACLs entirely.
   - **Per-project session approval**: First-time `powershell`/`cmd` usage, package installs/updates, or `git push` in a project wakes the MuseLink window to the foreground (120-second timeout defaults to deny) with long-polling via `GET /agent/v1/exec/<job_id>?wait_ms=20000` so Muse receives approvals and outputs immediately without waiting for a manual chat reply. Choose **Allow once** or **Allow project this session** (valid for 4 hours, strictly scoped per folder, revocable anytime via **Revoke session grants** in **File Access**).

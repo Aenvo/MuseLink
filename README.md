@@ -25,17 +25,21 @@
 
 ## 界面预览
 
-右下角的配置指引会带你完成文件授权、准备公网连接、接入 Muse 和首次试用。之后可以回到「文件权限」调整目录或磁盘，管理索引和 Muse 专用令牌。
+右下角的配置指引会带你完成文件授权、准备公网连接、接入 Muse 和首次试用。之后可以在「文件权限」调整目录或磁盘并按需开关本机命令执行，在「连接」复制接入说明与专用令牌，或在「设置 → 数据」管理本机文件索引、日志和专用令牌。
 
 <table>
   <tr>
-    <td width="50%" align="center">
-      <a href="assets/readme/zh-cn/setup-guide.png"><img src="assets/readme/zh-cn/setup-guide.png" alt="连接页和右下角的首次配置指引"></a><br>
-      <sub>首次配置 · 准备公网连接</sub>
+    <td width="33%" align="center">
+      <a href="assets/readme/zh-cn/setup-guide.png"><img src="assets/readme/zh-cn/setup-guide.png" alt="连接页和右下角的首次配置指引，展示接入 Muse 步骤与并排复制按钮"></a><br>
+      <sub>首次配置 · 接入 Muse</sub>
     </td>
-    <td width="50%" align="center">
-      <a href="assets/readme/zh-cn/file-access.png"><img src="assets/readme/zh-cn/file-access.png" alt="文件权限页，展示文件夹授权范围、索引状态和令牌操作"></a><br>
-      <sub>文件权限 · 管理授权与令牌</sub>
+    <td width="33%" align="center">
+      <a href="assets/readme/zh-cn/file-access.png"><img src="assets/readme/zh-cn/file-access.png" alt="文件权限页，展示文件夹授权范围与本机命令执行沙箱开关"></a><br>
+      <sub>文件权限 · 授权范围与命令沙箱</sub>
+    </td>
+    <td width="33%" align="center">
+      <a href="assets/readme/zh-cn/settings.png"><img src="assets/readme/zh-cn/settings.png" alt="设置页，展示常规托盘选项与数据管理板块"></a><br>
+      <sub>设置 · 常规与数据管理</sub>
     </td>
   </tr>
 </table>
@@ -81,7 +85,7 @@
 ## 权限与连接边界
 
 - **文件与敏感路径保护**：Muse 的操作受已保存的授权范围和当前 Windows 账户权限约束。默认排除凭证私钥目录（如 `~/.muse-bridge`、`~/.ssh`、`~/.aws`、`~/.gnupg`），并对系统目录、启动项、Shell Profile、`.gitconfig` 与程序自身目录启用默认写保护；文件读取与原子写入通过已校验的内核句柄完成。
-- **每工作区独立写受限沙箱**：命令执行默认关闭，可在「文件权限 → Muse 文件工具」按需开启（开启后请重新复制接入说明发给 Muse）。命令默认运行在 Windows 写受限沙箱（`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` 内存/进程数/超时硬限制）中，按工作区路径派生独立 SID，仅允许写入当次指定的具体项目子目录与单任务隔离临时目录（禁止直接对盘符根目录执行，不同项目与父子目录之间互不可写），且剥离内部环境变量、失败即拒（绝不静默降级无沙箱）。
+- **每工作区独立写受限沙箱**：命令执行默认关闭，可在「文件权限」按需开启（开启后请重新复制接入说明发给 Muse）。命令默认运行在 Windows 写受限沙箱（`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` 内存/进程数/超时硬限制）中，按工作区路径派生独立 SID，仅允许写入当次指定的具体项目子目录与单任务隔离临时目录（禁止直接对盘符根目录执行，不同项目与父子目录之间互不可写），且剥离内部环境变量、失败即拒（绝不静默降级无沙箱）。
 - **三档风险分流与本机置顶审批**：
   - **自动放行**：项目内常见只读与标准开发构建/测试命令（如 `git status`/`diff`/`log`、`cargo test`/`check`、`pnpm build`、`pytest` 等），快速命令在短等待内直接返回 HTTP 200 与完整输出；纯只读直调命令不触碰工作区写权限。
   - **项目会话免打扰**：首次在某项目目录内使用 `powershell`/`cmd`、安装/变更依赖或 `git push` 时，自动唤醒并临时置顶本机审批窗（120 秒未确认自动拒绝），支持通过 `GET /agent/v1/exec/<job_id>?wait_ms=20000` 长轮询实时感知审批与执行结果（无需回到聊天手动回复），可选择「仅允许这一次」或「本次会话允许该项目」（4 小时有效、按目录严格隔离，可在「文件权限 → 收回会话授权」一键撤销）。
