@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use axum::Router;
 use axum::body::{Body, to_bytes};
-use axum::extract::{ConnectInfo, OriginalUri, Request, State};
+use axum::extract::{ConnectInfo, OriginalUri, Path as AxumPath, Request, State};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -35,6 +35,8 @@ use super::access::{ERR_NOT_AUTHORIZED, ERR_PROTECTED, ERR_REPARSE, Operation};
 use super::access_runtime::{AccessRuntime, AgentSearchError};
 use super::audit::{Audit, AuditEntry, now_iso};
 use super::config::BridgeConfig;
+use super::exec_policy::ExecRequest;
+use super::exec_runtime::{ExecRuntime, ExecSubmitError};
 use super::handle;
 use super::path_guard;
 use super::search::{SearchError, SearchRequest};
@@ -179,6 +181,7 @@ struct Inner {
     file_jobs: Arc<Semaphore>,
     control_jobs: Arc<Semaphore>,
     access: std::sync::OnceLock<Arc<AccessRuntime>>,
+    exec: std::sync::OnceLock<Arc<ExecRuntime>>,
     device_names: std::sync::OnceLock<std::sync::Weak<crate::service::ServiceController>>,
 }
 
@@ -211,6 +214,7 @@ impl ApiState {
                     file_jobs: Arc::new(Semaphore::new(4)),
                     control_jobs: Arc::new(Semaphore::new(4)),
                     access: std::sync::OnceLock::new(),
+                    exec: std::sync::OnceLock::new(),
                     device_names: std::sync::OnceLock::new(),
                 }),
             },
@@ -243,6 +247,7 @@ impl ApiState {
                     file_jobs: Arc::new(Semaphore::new(4)),
                     control_jobs: Arc::new(Semaphore::new(4)),
                     access: std::sync::OnceLock::new(),
+                    exec: std::sync::OnceLock::new(),
                     device_names: std::sync::OnceLock::new(),
                 }),
             },
@@ -279,6 +284,9 @@ impl ApiState {
     }
     pub(crate) fn attach_access(&self, access: Arc<AccessRuntime>) {
         let _ = self.inner.access.set(access);
+    }
+    pub(crate) fn attach_exec(&self, exec: Arc<ExecRuntime>) {
+        let _ = self.inner.exec.set(exec);
     }
     pub(crate) fn attach_device_names(
         &self,
@@ -591,6 +599,9 @@ pub fn router(state: ApiState) -> Router {
         .route("/read", get(read))
         .route("/write", post(write_ep))
         .route("/mkdir", post(mkdir_ep))
+        .route("/exec", post(agent_exec_submit))
+        .route("/exec/{job_id}", get(agent_exec_status))
+        .route("/exec/{job_id}/cancel", post(agent_exec_cancel))
         .route("/device-name/confirm", post(confirm_device_name))
         .fallback(not_found)
         .method_not_allowed_fallback(not_found)
@@ -1032,6 +1043,171 @@ async fn post_gate_limited(
         }
     };
     Ok(body)
+}
+
+async fn agent_exec_submit(State(state): State<ApiState>, request: Request) -> Response {
+    let (parts, body) = request.into_parts();
+    let body = match post_gate_limited(&state, &parts, body, MAX_METADATA_REQUEST_BYTES).await {
+        Ok(body) => body,
+        Err(response) => return response,
+    };
+    let Ok(exec_req) = serde_json::from_value::<ExecRequest>(body) else {
+        return post_failure(&state, &parts, 400, "invalid exec request", true).await;
+    };
+    let Some(access) = state.inner.access.get().cloned() else {
+        return post_failure(&state, &parts, 403, "command execution unavailable", true).await;
+    };
+    let Some(exec) = state.inner.exec.get().cloned() else {
+        return post_failure(&state, &parts, 403, "exec_disabled", true).await;
+    };
+    let client = client_of(&parts);
+    blocking_response(state.inner.file_jobs.clone(), move || {
+        let _guard = state.access_guard();
+        if let Some(response) = reject_changed_credential(&state, &parts) {
+            return response;
+        }
+        match exec.submit(exec_req, &access, &client) {
+            Ok((code, view)) => {
+                let mut response = json_resp(code, &view);
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static("no-store"),
+                );
+                response
+            }
+            Err(ExecSubmitError::Disabled) => respond(
+                &state,
+                &parts,
+                403,
+                json!({"error": "exec_disabled", "message": "command execution is disabled"}),
+                true,
+                None,
+                None,
+                None,
+            ),
+            Err(ExecSubmitError::Forbidden(message)) => respond(
+                &state,
+                &parts,
+                403,
+                json!({"error": message}),
+                true,
+                None,
+                None,
+                None,
+            ),
+            Err(ExecSubmitError::Invalid(message)) => respond(
+                &state,
+                &parts,
+                400,
+                json!({"error": message}),
+                true,
+                None,
+                None,
+                None,
+            ),
+            Err(ExecSubmitError::Busy) => respond(
+                &state,
+                &parts,
+                429,
+                json!({"error": "too many commands running; retry shortly"}),
+                true,
+                None,
+                None,
+                None,
+            ),
+        }
+    })
+    .await
+}
+
+async fn agent_exec_status(
+    State(state): State<ApiState>,
+    AxumPath(job_id): AxumPath<String>,
+    request: Request,
+) -> Response {
+    let (parts, _) = request.into_parts();
+    blocking_response(state.inner.control_jobs.clone(), move || {
+        let _guard = state.access_guard();
+        if let Some(response) = get_auth_failure(&state, &parts) {
+            return response;
+        }
+        let Some(exec) = state.inner.exec.get() else {
+            return respond(
+                &state,
+                &parts,
+                403,
+                json!({"error": "exec_disabled", "message": "command execution is disabled"}),
+                true,
+                None,
+                None,
+                None,
+            );
+        };
+        match exec.get_job(&job_id) {
+            Some(view) => {
+                let mut response = json_resp(200, &view);
+                response.headers_mut().insert(
+                    header::CACHE_CONTROL,
+                    header::HeaderValue::from_static("no-store"),
+                );
+                response
+            }
+            None => respond(
+                &state,
+                &parts,
+                404,
+                json!({"error": "job not found"}),
+                true,
+                None,
+                None,
+                None,
+            ),
+        }
+    })
+    .await
+}
+
+async fn agent_exec_cancel(
+    State(state): State<ApiState>,
+    AxumPath(job_id): AxumPath<String>,
+    request: Request,
+) -> Response {
+    let (parts, body) = request.into_parts();
+    if let Err(response) = post_gate_limited(&state, &parts, body, 512).await {
+        return response;
+    }
+    blocking_response(state.inner.control_jobs.clone(), move || {
+        let _guard = state.access_guard();
+        if let Some(response) = reject_changed_credential(&state, &parts) {
+            return response;
+        }
+        let Some(exec) = state.inner.exec.get() else {
+            return respond(
+                &state,
+                &parts,
+                403,
+                json!({"error": "exec_disabled", "message": "command execution is disabled"}),
+                true,
+                None,
+                None,
+                None,
+            );
+        };
+        match exec.cancel_job(&job_id) {
+            Some(view) => respond(&state, &parts, 200, view, true, None, Some(&job_id), None),
+            None => respond(
+                &state,
+                &parts,
+                404,
+                json!({"error": "job not found"}),
+                true,
+                None,
+                Some(&job_id),
+                None,
+            ),
+        }
+    })
+    .await
 }
 
 async fn confirm_device_name(State(state): State<ApiState>, request: Request) -> Response {
@@ -1578,11 +1754,18 @@ mod tests {
     static NONCE: AtomicU64 = AtomicU64::new(0);
 
     struct Env {
+        dir: PathBuf,
         app: Router,
         state: ApiState,
         root: PathBuf,
         token: String,
         token_path: PathBuf,
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     fn setup(read_only: bool, options: ApiOptions) -> Env {
@@ -1613,6 +1796,7 @@ mod tests {
         let (state, _rx) = ApiState::new(cfg, tok.clone(), paths, options);
         let app = router(state.clone());
         Env {
+            dir,
             app,
             state,
             root,

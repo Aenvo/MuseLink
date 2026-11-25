@@ -133,7 +133,7 @@ pub fn show_main(app: &AppHandle) {
     }
 }
 
-fn open_main(app: &AppHandle) -> tauri::Result<()> {
+pub(crate) fn open_main(app: &AppHandle) -> tauri::Result<tauri::WebviewWindow> {
     let window = if let Some(window) = app.get_webview_window("main") {
         window
     } else {
@@ -151,5 +151,6 @@ fn open_main(app: &AppHandle) -> tauri::Result<()> {
     window.unminimize()?;
     window.show()?;
     let _ = window.emit("desktop-visibility", true);
-    window.set_focus()
+    let _ = window.set_focus();
+    Ok(window)
 }

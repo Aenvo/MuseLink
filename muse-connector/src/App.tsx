@@ -12,6 +12,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Spinner } from "@/components/ui/spinner";
 import { StatusBadge } from "@/components/status-badge";
 import { ConfirmAction, Notice, type Confirmation } from "@/components/feedback";
+import ApprovalDialog from "@/components/approval-dialog";
 import { useBridge, type BridgeModel } from "@/lib/use-bridge";
 import { LanguageProvider } from "@/lib/i18n";
 import { connectionPresentation } from "@/lib/connection-presentation";
@@ -211,6 +212,7 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
       if (target?.isConnected && target.getClientRects().length && !target.matches(":disabled")) target.focus();
       else document.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus();
     }} />
+    <ApprovalDialog bridge={bridge} />
   </main><Toaster theme="dark" richColors={false} containerAriaLabel={t("通知")}
     position={guideVisible ? "top-left" : "bottom-right"}
     toastOptions={{ className: guideVisible ? "setup-guide-toast" : undefined, closeButtonAriaLabel: t("关闭") }} closeButton /></TooltipProvider>;

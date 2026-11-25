@@ -378,7 +378,7 @@ fn is_directory_path(path: &Path) -> bool {
     }
 }
 
-fn is_drive_root(path: &Path) -> bool {
+pub(crate) fn is_drive_root(path: &Path) -> bool {
     #[cfg(windows)]
     {
         use std::path::{Component, Prefix};

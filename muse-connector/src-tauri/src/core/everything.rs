@@ -47,6 +47,7 @@ struct Instance {
     name: String,
     cli: PathBuf,
     child: Child,
+    _job: super::job::ChildJob,
     ready_deadline: Instant,
     verified_volumes: usize,
 }
@@ -344,19 +345,28 @@ impl Everything {
         let config = data.join("Everything.ini");
         let database = data.join("Everything.db");
         super::storage::atomic_write(&config, &settings(roots, &volumes)?)?;
-        let child = command(&self.binaries.join("Everything.exe"))
+        let mut child = command(&self.binaries.join("Everything.exe"))
             .current_dir(&data)
             .args(["-instance", &name, "-startup", "-config"])
             .arg(&config)
             .arg("-db")
             .arg(database)
             .spawn()?;
+        let job = match super::job::ChildJob::attach_std(&child) {
+            Ok(job) => job,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
         Ok(Instance {
             roots: roots.to_vec(),
             volumes,
             name,
             cli: self.binaries.join("es.exe"),
             child,
+            _job: job,
             ready_deadline: Instant::now() + Duration::from_secs(180),
             verified_volumes: 0,
         })

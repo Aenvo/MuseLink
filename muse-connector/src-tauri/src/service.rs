@@ -3,8 +3,11 @@ use crate::core::{
     access::{AccessPolicy, GrantScope, ScopeMode},
     access_runtime::{AccessRuntime, IndexStatus},
     api::{self, ApiOptions, ApiState, BridgePaths},
-    audit::{Audit, now_iso},
+    audit::{Audit, AuditEntry, now_iso},
     config::BridgeConfig,
+    exec_runtime::{
+        ApprovalDecision, ApprovalEvent, ApprovalView, AuditSink, ExecRuntime, SessionGrantView,
+    },
     search::{SearchRequest, SearchResponse},
     token,
 };
@@ -50,6 +53,9 @@ pub struct Snapshot {
     pub agent_enabled: bool,
     pub agent_ready: bool,
     pub agent_token_version: Option<String>,
+    pub exec_enabled: bool,
+    pub pending_approvals: Vec<ApprovalView>,
+    pub exec_sessions: Vec<SessionGrantView>,
     pub fresh_setup: bool,
     pub setup_error: Option<String>,
     pub file_token_version: Option<String>,
@@ -71,11 +77,23 @@ pub(crate) struct FileAccessEdit {
     pub(super) enable_all_operations: bool,
 }
 
+struct ApiAuditSink(ApiState);
+
+impl AuditSink for ApiAuditSink {
+    fn record_exec(&self, entry: AuditEntry) {
+        self.0.audit().record(&entry);
+    }
+    fn redact(&self, text: &str) -> String {
+        self.0.audit().redact_text(text)
+    }
+}
+
 pub struct ServiceController {
     pub profile: RuntimeProfile,
     pub api: ApiState,
     pub logs: Arc<Audit>,
     access: Arc<AccessRuntime>,
+    exec: Arc<ExecRuntime>,
     access_update: Mutex<()>,
     desktop: RwLock<DesktopState>,
     runtime: Mutex<Runtime>,
@@ -150,6 +168,9 @@ impl ServiceController {
             ApiOptions::default(),
         );
         api.attach_access(access.clone());
+        let exec = ExecRuntime::new(&profile.home, desktop.exec_enabled);
+        exec.attach_audit(Arc::new(ApiAuditSink(api.clone())));
+        api.attach_exec(exec.clone());
         let logs = Arc::new(Audit::runtime(profile.home.join("server.log")));
         logs.protect_secret(&api.token());
         if let Some(secret) = access.agent_token() {
@@ -170,6 +191,7 @@ impl ServiceController {
             api,
             logs,
             access,
+            exec,
             access_update: Mutex::new(()),
             desktop: RwLock::new(desktop),
             runtime: Mutex::new(Runtime {
@@ -227,6 +249,9 @@ impl ServiceController {
             agent_token_version: agent_enabled
                 .then(|| token::file_version(self.access.agent_token_path()))
                 .flatten(),
+            exec_enabled: self.exec.is_enabled(),
+            pending_approvals: self.exec.pending_approvals(),
+            exec_sessions: self.exec.active_sessions(),
             setup_error: self.setup_error.read().unwrap().clone(),
             file_token_version: if initialized {
                 token::file_version(&self.api.paths().token)
@@ -242,7 +267,10 @@ impl ServiceController {
             status: self.status(),
             stats: self.api.stats_snapshot(),
             dependencies: self.tool_status(),
-            capabilities: crate::capabilities::file_tools_boundary(agent_ready),
+            capabilities: crate::capabilities::file_tools_boundary(
+                agent_ready,
+                self.exec.is_enabled(),
+            ),
             version: env!("CARGO_PKG_VERSION"),
             log_errors: [self.api.audit().error(), self.logs.error()]
                 .into_iter()
@@ -277,6 +305,7 @@ impl ServiceController {
         })
         .await
         .map_err(|_| "Muse 文件工具凭证更新未完成".to_string())??;
+        self.exec.abort_all("Muse 专用令牌已变更");
         self.reset_agent_public_result();
         if !enabled && !self.connection_configured() && self.desktop_state().desired_enabled {
             self.toggle(false)
@@ -366,6 +395,7 @@ impl ServiceController {
         tokio::task::spawn_blocking(move || access.save(policy, legacy_read_only))
             .await
             .map_err(|_| "保存文件授权未完成".to_string())??;
+        self.exec.revoke_sessions();
         self.reset_agent_public_result();
         if self.initialized.load(Ordering::Relaxed) || initialization_files_absent(&self.profile) {
             *self.setup_error.write().unwrap() = None;
@@ -703,6 +733,7 @@ impl ServiceController {
     }
     async fn stop_locked(&self, runtime: &mut Runtime) -> Result<(), String> {
         self.access.cancel_search();
+        self.exec.abort_all("连接已暂停");
         runtime.generation = runtime.generation.wrapping_add(1);
         self.publish(
             Health::Stopping,
@@ -932,6 +963,51 @@ impl ServiceController {
         }
         Ok(matched)
     }
+    pub(crate) fn attach_approval_notifier(
+        &self,
+        notifier: Arc<dyn Fn(ApprovalEvent) + Send + Sync>,
+    ) {
+        self.exec.attach_notifier(notifier);
+    }
+
+    pub async fn set_exec_enabled(&self, enabled: bool) -> Result<(), String> {
+        let _operation = self.runtime.lock().await;
+        self.update_desktop(|state| {
+            state.exec_enabled = enabled;
+            Ok(true)
+        })?;
+        self.exec.set_enabled(enabled);
+        self.logs.runtime_entry(
+            "info",
+            if enabled {
+                "命令执行能力已开启（默认运行于写受限沙箱）"
+            } else {
+                "命令执行能力已关闭，待审批项与运行中任务已中止"
+            },
+        );
+        self.status.send_modify(|_| {});
+        Ok(())
+    }
+
+    pub fn resolve_exec_approval(
+        &self,
+        id: &str,
+        decision: ApprovalDecision,
+    ) -> Result<bool, String> {
+        let handled = self.exec.resolve_approval(id, decision)?;
+        if handled {
+            self.status.send_modify(|_| {});
+        }
+        Ok(handled)
+    }
+
+    pub fn revoke_exec_sessions(&self) {
+        self.exec.revoke_sessions();
+        self.logs
+            .runtime_entry("info", "已收回所有项目会话执行授权");
+        self.status.send_modify(|_| {});
+    }
+
     pub async fn shutdown(&self) {
         {
             let mut runtime = self.runtime.lock().await;
@@ -1974,6 +2050,192 @@ mod tests {
         }
         assert!(controller.status().api_up);
         controller.toggle(false).await.unwrap();
+        drop(controller);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn agent_exec_enforces_toggle_approval_session_and_sandbox_boundary() {
+        let profile = profile();
+        let home = profile.home.clone();
+        profile.initialize_development().unwrap();
+        let project = home.join("files/demo-project");
+        let outside = home.join("outside-sibling");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        controller
+            .save_file_access(AccessPolicy {
+                mode: ScopeMode::Folders,
+                roots: [("work".into(), home.join("files"))].into(),
+                search: GrantScope::Folders,
+                read: GrantScope::Folders,
+                write: GrantScope::Folders,
+                ..AccessPolicy::default()
+            })
+            .await
+            .unwrap();
+        controller.set_agent_access(true).await.unwrap();
+        let agent_key = controller.access.agent_token().unwrap();
+        let legacy_key = controller.api.token();
+        let port = controller.toggle(true).await.unwrap().api_port;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(15))
+            .build()
+            .unwrap();
+        let origin = format!("http://127.0.0.1:{port}");
+
+        // 1) 默认关闭：返回 403
+        let disabled_resp = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-project",
+                "mode": "direct",
+                "program": "where",
+                "args": ["cmd.exe"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(disabled_resp.status(), 403);
+
+        // 2) 开启总开关，但旧版 file token 依然 401
+        controller.set_exec_enabled(true).await.unwrap();
+        assert!(controller.snapshot().exec_enabled);
+        let legacy_resp = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&legacy_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-project",
+                "mode": "direct",
+                "program": "where",
+                "args": ["cmd.exe"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(legacy_resp.status(), 401);
+
+        // 3) Direct 常规只读工具：无感自动放行并短等待直返 200
+        let direct_resp = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-project",
+                "mode": "direct",
+                "program": "where",
+                "args": ["cmd.exe"],
+                "wait_ms": 5000
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(direct_resp.status(), 200);
+        let direct_body: Value = direct_resp.json().await.unwrap();
+        assert_eq!(direct_body["status"], "completed");
+        assert_eq!(direct_body["exit_code"], 0);
+        assert_eq!(direct_body["sandboxed"], true);
+
+        // 4) 首次在该项目使用 cmd：进入 202 awaiting_approval，并出现在 pending_approvals
+        let first_cmd = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-project",
+                "mode": "cmd",
+                "command": "echo inside-ok> inside.txt",
+                "reason": "write test marker"
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(first_cmd.status(), 202);
+        let first_body: Value = first_cmd.json().await.unwrap();
+        assert_eq!(first_body["status"], "awaiting_approval");
+        let job_id = first_body["job_id"].as_str().unwrap().to_owned();
+        let approvals = controller.snapshot().pending_approvals;
+        assert_eq!(approvals.len(), 1);
+        assert!(approvals[0].allow_session);
+
+        // 5) 桌面端批准「本会话允许此项目」，等待作业完成
+        assert!(
+            controller
+                .resolve_exec_approval(&approvals[0].id, ApprovalDecision::AllowSession)
+                .unwrap()
+        );
+        assert!(controller.snapshot().pending_approvals.is_empty());
+        assert_eq!(controller.snapshot().exec_sessions.len(), 1);
+        let mut finished = Value::Null;
+        for _ in 0..40 {
+            let poll: Value = client
+                .get(format!("{origin}/agent/v1/exec/{job_id}"))
+                .bearer_auth(&agent_key)
+                .send()
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            if poll["status"] != "running" {
+                finished = poll;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(finished["status"], "completed");
+        assert_eq!(finished["exit_code"], 0);
+        assert!(project.join("inside.txt").is_file());
+
+        // 6) 同一项目第二次 cmd：命中本会话豁免直接无感放行，但尝试写工作区外仍被写受限沙箱拦截
+        let escaped_file = outside.join("nope.txt");
+        let second_cmd = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-project",
+                "mode": "cmd",
+                "command": format!("echo nope> \"{}\"", escaped_file.display()),
+                "wait_ms": 5000
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(second_cmd.status(), 200);
+        let second_body: Value = second_cmd.json().await.unwrap();
+        assert_eq!(second_body["status"], "completed");
+        assert_ne!(second_body["exit_code"], 0);
+        assert!(!escaped_file.exists());
+
+        // 7) 关闭命令执行总开关：立即熔断并清空会话授权
+        controller.set_exec_enabled(false).await.unwrap();
+        assert!(controller.snapshot().exec_sessions.is_empty());
+        let after_off = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-project",
+                "mode": "direct",
+                "program": "where",
+                "args": ["cmd.exe"]
+            }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(after_off.status(), 403);
+
+        controller.shutdown().await;
         drop(controller);
         std::fs::remove_dir_all(home).unwrap();
     }

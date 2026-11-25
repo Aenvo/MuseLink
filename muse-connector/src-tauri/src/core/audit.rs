@@ -200,17 +200,17 @@ impl Audit {
     pub fn error(&self) -> Option<String> {
         self.state.lock().unwrap().error.clone()
     }
+    pub(crate) fn redact_text(&self, value: &str) -> String {
+        self.redact(value)
+    }
     fn redact(&self, value: &str) -> String {
         let mut result = value.to_string();
         for secret in self.secrets.read().unwrap().iter() {
             result = result.replace(secret, "[已隐藏令牌]");
         }
+        result = redact_agent_tokens(&result);
         let trimmed = result.trim();
-        if trimmed.len() == 43
-            && trimmed
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
+        if trimmed.len() == 43 && trimmed.bytes().all(is_token_byte) {
             return "[已隐藏令牌]".into();
         }
         result
@@ -260,6 +260,43 @@ impl Audit {
         std::fs::rename(&self.path, suffix(&self.path, 1))
     }
 }
+fn is_token_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'-' || b == b'_'
+}
+
+fn redact_agent_tokens(value: &str) -> String {
+    const PREFIX: &str = "mfa_";
+    const BODY_LEN: usize = 43;
+    const TOTAL_LEN: usize = PREFIX.len() + BODY_LEN;
+
+    let bytes = value.as_bytes();
+    let mut out = String::with_capacity(value.len());
+    let mut cursor = 0;
+    while let Some(offset) = value[cursor..].find(PREFIX) {
+        let start = cursor + offset;
+        let end = start + TOTAL_LEN;
+        let valid_before = start == 0 || !is_token_byte(bytes[start - 1]);
+        let valid_after = end == bytes.len() || (end < bytes.len() && !is_token_byte(bytes[end]));
+        if valid_before
+            && end <= bytes.len()
+            && valid_after
+            && bytes[start + PREFIX.len()..end]
+                .iter()
+                .all(|&b| is_token_byte(b))
+        {
+            out.push_str(&value[cursor..start]);
+            out.push_str("[已隐藏令牌]");
+            cursor = end;
+        } else {
+            let next = start + PREFIX.len();
+            out.push_str(&value[cursor..next]);
+            cursor = next;
+        }
+    }
+    out.push_str(&value[cursor..]);
+    out
+}
+
 fn suffix(path: &Path, n: u32) -> PathBuf {
     let mut s = path.as_os_str().to_os_string();
     s.push(format!(".{n}"));
@@ -365,6 +402,24 @@ mod tests {
                 .unwrap()
                 .contains(&secret)
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn rotated_agent_tokens_are_redacted_by_shape_without_touching_normal_text() {
+        let dir =
+            std::env::temp_dir().join(format!("muse-log-mfa-{}", crate::core::token::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.log");
+        let rotated = format!("mfa_{}", crate::core::token::generate());
+        let log = Audit::runtime(path.clone());
+        log.runtime_entry(
+            "error",
+            &format!("header Bearer {rotated} failed; keep mfa_short_name and normal text"),
+        );
+        let entry = &log.recent(None, 10).entries[0].text;
+        assert!(!entry.contains(&rotated));
+        assert!(entry.contains("[已隐藏令牌]"));
+        assert!(entry.contains("mfa_short_name"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

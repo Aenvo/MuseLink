@@ -91,6 +91,7 @@ pub(crate) struct AccessRuntime {
     settings_path: PathBuf,
     agent_token_path: PathBuf,
     protected: Vec<PathBuf>,
+    write_protected: Vec<PathBuf>,
     development_home: Option<PathBuf>,
     active: RwLock<ActiveAccess>,
     index: Arc<SearchIndex>,
@@ -123,8 +124,8 @@ impl AccessRuntime {
         let agent_token_path = profile.home.join(AGENT_TOKEN_FILE);
         let agent_token = load_agent_token(&agent_token_path);
         let development_home = profile.is_development().then(|| profile.home.clone());
-        let protected = if development_home.is_some() {
-            [
+        let (protected, write_protected) = if development_home.is_some() {
+            let protected: Vec<PathBuf> = [
                 "config.json",
                 "token",
                 AGENT_TOKEN_FILE,
@@ -139,14 +140,12 @@ impl AccessRuntime {
             ]
             .into_iter()
             .map(|item| profile.home.join(item))
-            .collect()
+            .map(normalize_protected)
+            .collect();
+            (protected.clone(), protected)
         } else {
-            vec![profile.home.clone()]
+            production_protection(&SensitiveRoots::from_host(&profile.home))
         };
-        let protected = protected
-            .into_iter()
-            .map(|path| super::path_guard::canonical_non_strict(&path).unwrap_or(path))
-            .collect::<Vec<_>>();
         let (policy, preserve_legacy_read_only, error) = match Self::load_settings(&settings_path) {
             Ok(settings) => match settings
                 .policy
@@ -167,6 +166,7 @@ impl AccessRuntime {
                 settings_path,
                 agent_token_path,
                 protected,
+                write_protected,
                 development_home,
                 active: RwLock::new(ActiveAccess {
                     policy,
@@ -285,6 +285,13 @@ impl AccessRuntime {
             .map(|resolved| resolved.path)
     }
 
+    fn protected_for(&self, op: Operation) -> &[PathBuf] {
+        match op {
+            Operation::Write => &self.write_protected,
+            Operation::Search | Operation::Read => &self.protected,
+        }
+    }
+
     pub(crate) fn resolve_agent_file(
         &self,
         op: Operation,
@@ -296,7 +303,7 @@ impl AccessRuntime {
         policy.resolve_file(
             op,
             &self.operation_roots(policy, op),
-            &self.protected,
+            self.protected_for(op),
             alias,
             relative,
         )
@@ -304,6 +311,10 @@ impl AccessRuntime {
 
     pub(crate) fn is_protected_path(&self, path: &Path) -> bool {
         protected_path(path, &self.protected)
+    }
+
+    pub(crate) fn is_write_protected_path(&self, path: &Path) -> bool {
+        protected_path(path, &self.write_protected)
     }
 
     pub(crate) fn agent_listing_entry_allowed(&self, path: &Path) -> bool {
@@ -359,6 +370,20 @@ impl AccessRuntime {
         policy
             .validate(&self.protected, self.development_home.as_deref())
             .map_err(str::to_owned)?;
+        if policy.write == GrantScope::Folders {
+            for (alias, path) in &policy.roots {
+                if !policy.permits_folder(alias, Operation::Write) {
+                    continue;
+                }
+                let canonical =
+                    super::path_guard::canonical_non_strict(path).unwrap_or_else(|_| path.clone());
+                if protected_path(path, &self.write_protected)
+                    || protected_path(&canonical, &self.write_protected)
+                {
+                    return Err(super::access::ERR_PROTECTED.into());
+                }
+            }
+        }
         if let Some(disks) = &policy.disks {
             let local = self.local_roots();
             if disks.iter().any(|alias| !local.contains_key(alias)) {
@@ -635,7 +660,12 @@ impl AccessRuntime {
     }
 
     pub(crate) fn permits_legacy(&self, target: &Path, writing: bool) -> bool {
-        if protected_path(target, &self.protected) {
+        let protected = if writing {
+            &self.write_protected
+        } else {
+            &self.protected
+        };
+        if protected_path(target, protected) {
             return false;
         }
         let access = self.active.read().unwrap();
@@ -920,6 +950,131 @@ impl AccessRuntime {
     }
 }
 
+fn normalize_protected(path: PathBuf) -> PathBuf {
+    super::path_guard::canonical_non_strict(&path).unwrap_or(path)
+}
+
+struct SensitiveRoots {
+    profile_home: PathBuf,
+    user_home: Option<PathBuf>,
+    roaming_app_data: Option<PathBuf>,
+    local_app_data: Option<PathBuf>,
+    documents: Option<PathBuf>,
+    desktop: Option<PathBuf>,
+    downloads: Option<PathBuf>,
+    program_data: Option<PathBuf>,
+    system_root: Option<PathBuf>,
+    program_files: Vec<PathBuf>,
+    current_exe: Option<PathBuf>,
+}
+
+impl SensitiveRoots {
+    fn from_host(profile_home: &Path) -> Self {
+        let env_path = |key: &str| {
+            std::env::var_os(key)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from)
+        };
+        let program_files = ["ProgramFiles", "ProgramFiles(x86)"]
+            .into_iter()
+            .filter_map(env_path)
+            .collect();
+        Self {
+            profile_home: profile_home.to_path_buf(),
+            user_home: dirs::home_dir(),
+            roaming_app_data: dirs::config_dir(),
+            local_app_data: dirs::data_local_dir(),
+            documents: dirs::document_dir(),
+            desktop: dirs::desktop_dir(),
+            downloads: dirs::download_dir(),
+            program_data: env_path("ProgramData"),
+            system_root: env_path("SystemRoot"),
+            program_files,
+            current_exe: std::env::current_exe().ok(),
+        }
+    }
+}
+
+fn push_unique(list: &mut Vec<PathBuf>, path: PathBuf) {
+    let normalized = normalize_protected(path);
+    if !list.iter().any(|existing| existing == &normalized) {
+        list.push(normalized);
+    }
+}
+
+fn production_protection(env: &SensitiveRoots) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut protected = Vec::new();
+    push_unique(&mut protected, env.profile_home.clone());
+    if let Some(home) = &env.user_home {
+        for dir in [".ssh", ".aws", ".gnupg"] {
+            push_unique(&mut protected, home.join(dir));
+        }
+    }
+
+    let mut write_protected = protected.clone();
+    if let Some(roaming) = &env.roaming_app_data {
+        push_unique(
+            &mut write_protected,
+            roaming.join(r"Microsoft\Windows\Start Menu\Programs\Startup"),
+        );
+    }
+    if let Some(program_data) = &env.program_data {
+        push_unique(
+            &mut write_protected,
+            program_data.join(r"Microsoft\Windows\Start Menu\Programs\StartUp"),
+        );
+    }
+    if let Some(system_root) = &env.system_root {
+        push_unique(&mut write_protected, system_root.clone());
+    }
+    for dir in &env.program_files {
+        push_unique(&mut write_protected, dir.clone());
+    }
+    if let Some(local) = &env.local_app_data {
+        push_unique(&mut write_protected, local.join("Programs"));
+    }
+    if let Some(documents) = &env.documents {
+        for dir in ["PowerShell", "WindowsPowerShell"] {
+            push_unique(&mut write_protected, documents.join(dir));
+        }
+    }
+    if let Some(home) = &env.user_home {
+        for file in [
+            ".gitconfig",
+            ".bashrc",
+            ".zshrc",
+            ".profile",
+            ".npmrc",
+            ".pypirc",
+        ] {
+            push_unique(&mut write_protected, home.join(file));
+        }
+    }
+    if let Some(exe) = &env.current_exe
+        && let Some(exe_dir) = exe.parent()
+    {
+        let shared_roots = [
+            env.user_home.as_deref(),
+            env.desktop.as_deref(),
+            env.downloads.as_deref(),
+            env.documents.as_deref(),
+        ];
+        let is_shared_dir = super::access::is_drive_root(exe_dir)
+            || shared_roots
+                .into_iter()
+                .flatten()
+                .any(|shared| same_path(exe_dir, shared));
+        if is_shared_dir {
+            push_unique(&mut write_protected, exe.clone());
+            push_unique(&mut write_protected, exe_dir.join("everything"));
+        } else {
+            push_unique(&mut write_protected, exe_dir.to_path_buf());
+        }
+    }
+
+    (protected, write_protected)
+}
+
 fn agent_auth(active: &ActiveAccess, header: Option<&str>) -> bool {
     active
         .agent_token
@@ -1190,5 +1345,94 @@ mod tests {
                 Err(super::super::access::ERR_PROTECTED)
             );
         }
+    }
+
+    #[test]
+    fn production_protection_blocks_credentials_and_sensitive_writes_only() {
+        let root = std::env::temp_dir().join(format!("muse-sensitive-test-{}", token::generate()));
+        let home = root.join("Users/Alice");
+        let documents = home.join("Documents");
+        let desktop = home.join("Desktop");
+        let downloads = home.join("Downloads");
+        let roaming = home.join("AppData/Roaming");
+        let local = home.join("AppData/Local");
+        let startup = roaming.join(r"Microsoft\Windows\Start Menu\Programs\Startup");
+        let ps_profile = documents.join("PowerShell");
+        let ssh = home.join(".ssh");
+        let app_dir = root.join("Portable/MuseLink");
+        let project = desktop.join("MyProject");
+        for dir in [
+            &home,
+            &documents,
+            &desktop,
+            &downloads,
+            &startup,
+            &ps_profile,
+            &ssh,
+            &app_dir,
+            &project,
+            &local,
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let exe = app_dir.join("muse-connector.exe");
+        std::fs::write(&exe, b"bin").unwrap();
+
+        let env = SensitiveRoots {
+            profile_home: home.join(".muse-bridge"),
+            user_home: Some(home.clone()),
+            roaming_app_data: Some(roaming.clone()),
+            local_app_data: Some(local.clone()),
+            documents: Some(documents.clone()),
+            desktop: Some(desktop.clone()),
+            downloads: Some(downloads.clone()),
+            program_data: Some(root.join("ProgramData")),
+            system_root: Some(root.join("Windows")),
+            program_files: vec![root.join("Program Files")],
+            current_exe: Some(exe.clone()),
+        };
+        let (protected, write_protected) = production_protection(&env);
+
+        // 凭证私钥目录：读写搜全部保护
+        assert!(protected_path(&ssh.join("id_ed25519"), &protected));
+        assert!(protected_path(&ssh.join("id_ed25519"), &write_protected));
+
+        // 启动项、PowerShell Profile、.gitconfig 与程序目录：允许读，但禁止写
+        for target in [
+            startup.join("evil.bat"),
+            ps_profile.join("Microsoft.PowerShell_profile.ps1"),
+            home.join(".gitconfig"),
+            app_dir.join("version.dll"),
+        ] {
+            assert!(!protected_path(&target, &protected));
+            assert!(protected_path(&target, &write_protected));
+        }
+
+        // 普通项目目录与文档根目录自身可正常读写
+        assert!(!protected_path(&project.join("main.rs"), &write_protected));
+        assert!(!protected_path(
+            &documents.join("notes.txt"),
+            &write_protected
+        ));
+
+        // 便携 exe 裸放在桌面时，不误把整个桌面标成只读，仍保护 exe 自身与 everything/
+        let loose_exe = desktop.join("muse-connector.exe");
+        std::fs::write(&loose_exe, b"bin").unwrap();
+        let loose_env = SensitiveRoots {
+            current_exe: Some(loose_exe.clone()),
+            ..env
+        };
+        let (_, loose_write_protected) = production_protection(&loose_env);
+        assert!(!protected_path(
+            &project.join("main.rs"),
+            &loose_write_protected
+        ));
+        assert!(protected_path(&loose_exe, &loose_write_protected));
+        assert!(protected_path(
+            &desktop.join("everything/Everything.exe"),
+            &loose_write_protected
+        ));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
