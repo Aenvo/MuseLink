@@ -190,10 +190,16 @@ function csvCell(value: unknown) {
 function formatExportContent(rows: ParsedLog[], format: ExportFormat, includeKind: boolean) {
   if (format === "jsonl") {
     return rows.map(entry => {
-      if (includeKind && entry.object) {
-        return JSON.stringify({ kind: entry.record.kind, ...entry.object });
+      if (entry.object) {
+        return includeKind
+          ? JSON.stringify({ kind: entry.record.kind, ...entry.object })
+          : entry.record.text;
       }
-      return entry.record.text;
+      return JSON.stringify(
+        includeKind
+          ? { kind: entry.record.kind, message: entry.record.text }
+          : { message: entry.record.text },
+      );
     }).join("\n") + (rows.length ? "\n" : "");
   }
   const header = ["ts", "kind", "result", "method", "endpoint", "root", "path", "message", "bytes", "persisted"];
