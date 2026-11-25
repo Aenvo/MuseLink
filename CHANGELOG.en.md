@@ -12,6 +12,7 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 - **Prevent stale clicks at approval expiry**: Disables approval dialog buttons once the countdown reaches 0 seconds.
 - **Filterable log export & log folder shortcut**: Added an **Export logs** dialog and **Open log folder** button to the Logs page. Filter by log scope (All / Files / Command execution / All access / Runtime), result, time range, and keyword, then export chronologically as `JSONL` or `CSV` (with UTF-8 BOM and redundant token redaction) through the native save dialog, or jump straight to the rotated 10 MiB log files on disk.
 - **Start in system tray enabled by default**: New profiles default to **Settings → Start in the system tray** enabled (the main window still opens normally during first-time setup).
+- **MIT open-source license & notices**: Added repository-root [LICENSE](LICENSE) (MIT License), synced `package.json`, `Cargo.toml`, bilingual READMEs, third-party notices, and bundled `LICENSE` in release packages.
 
 ### Fixes
 - **Fixed jobs hanging in `running` when a detached grandchild holds stdio pipes**: Terminates and drops the per-job Windows `JobObject` right after the primary command exits and before joining the stdout/stderr reader threads, preventing inherited pipe write handles from blocking EOF indefinitely.

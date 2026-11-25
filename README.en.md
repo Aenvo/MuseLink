@@ -18,6 +18,7 @@
 <p align="center">
   <img alt="Windows desktop app" src="https://img.shields.io/badge/Windows-Desktop-0078D4?logo=windows&amp;logoColor=white">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white">
+  <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>
 
 ![MuseLink overview showing connection status, the public endpoint, and file activity](assets/readme/en/overview.png)
@@ -108,6 +109,6 @@ pnpm -C muse-connector tauri build --bundles nsis
 
 The installer is written to `muse-connector/src-tauri/target/release/bundle/nsis/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just `muse-connector/src-tauri/target/release/muse-connector.exe`.
 
-## Acknowledgments
+## License and acknowledgments
 
-The legacy file API is based on the [muse-file-bridge](https://github.com/TTNAN/muse-file-bridge) v0.3 protocol. See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for the upstream MIT license notice.
+MuseLink is open-sourced under the [MIT License](./LICENSE). The legacy file API is based on the [muse-file-bridge](https://github.com/TTNAN/muse-file-bridge) v0.3 protocol. See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for third-party licenses and bundled binary notices.

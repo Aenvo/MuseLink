@@ -31,3 +31,6 @@ $RECYCLE.BIN/
 token
 agent-token
 config.json
+desktop-state.json
+access-policy.json
+search-index*

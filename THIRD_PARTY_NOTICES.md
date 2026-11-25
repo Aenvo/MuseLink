@@ -1,5 +1,9 @@
 # Third-party notices
 
+MuseLink itself is licensed under the [MIT License](./LICENSE). This document lists third-party software referenced by or bundled with MuseLink distributions.
+
+## muse-file-bridge
+
 MuseLink's legacy file API is based on the [muse-file-bridge](https://github.com/TTNAN/muse-file-bridge) v0.3 protocol.
 
 MIT License
@@ -23,3 +27,7 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+## voidtools Everything & ES (bundled in Windows release packages)
+
+Official Windows release builds (portable ZIP and NSIS installer) bundle unmodified, Authenticode-signed `Everything.exe` and `es.exe` binaries from [voidtools](https://www.voidtools.com/) under the `everything/` directory alongside their respective license files (`Everything-License.txt` and `ES-License.txt`). Those binaries are not committed to this Git repository and remain governed by their respective upstream licenses.

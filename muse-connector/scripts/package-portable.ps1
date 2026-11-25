@@ -8,7 +8,9 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $project = Split-Path -Parent $PSScriptRoot
-$notices = Join-Path (Split-Path -Parent $project) 'THIRD_PARTY_NOTICES.md'
+$repoRoot = Split-Path -Parent $project
+$license = Join-Path $repoRoot 'LICENSE'
+$notices = Join-Path $repoRoot 'THIRD_PARTY_NOTICES.md'
 $connector = Get-Item -LiteralPath $ConnectorExe
 if ($connector.PSIsContainer -or $connector.Extension -ne '.exe') {
     throw 'ConnectorExe must be a built Windows executable.'
@@ -68,6 +70,8 @@ try {
         Get-ChildItem -LiteralPath $vendor -File | ForEach-Object {
             $resources["$targetRelative/everything/$($_.Name)"] = "everything/$($_.Name)"
         }
+        Copy-Item -LiteralPath $license -Destination $nsisTarget
+        $resources["$targetRelative/LICENSE"] = 'LICENSE'
         Copy-Item -LiteralPath $notices -Destination $nsisTarget
         $resources["$targetRelative/THIRD_PARTY_NOTICES.md"] = 'THIRD_PARTY_NOTICES.md'
         $release = Join-Path $nsisTarget 'release'
@@ -99,6 +103,7 @@ try {
     $null = [IO.Directory]::CreateDirectory($destinationPath)
     Copy-Item -LiteralPath (Join-Path $stage 'muse-connector.exe') -Destination $destinationPath
     Copy-Item -LiteralPath $vendor -Destination $destinationPath -Recurse
+    Copy-Item -LiteralPath $license -Destination $destinationPath
     Copy-Item -LiteralPath $notices -Destination $destinationPath
     Get-Item -LiteralPath $destinationPath
 } finally {

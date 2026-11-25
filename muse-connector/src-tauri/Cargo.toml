@@ -2,6 +2,7 @@
 name = "muse-connector"
 version = "0.2.1"
 description = "MuseLink connects Muse to authorized files on Windows."
+license = "MIT"
 edition = "2024"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

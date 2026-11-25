@@ -18,6 +18,7 @@
 <p align="center">
   <img alt="Windows 桌面应用" src="https://img.shields.io/badge/Windows-Desktop-0078D4?logo=windows&amp;logoColor=white">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white">
+  <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>
 
 ![Muse连接器概览页，显示连接状态、公网入口和文件访问趋势](assets/readme/zh-cn/overview.png)
@@ -108,6 +109,6 @@ pnpm -C muse-connector tauri build --bundles nsis
 
 安装包输出在 `muse-connector/src-tauri/target/release/bundle/nsis/`。如只需 EXE，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector.exe`。
 
-## 致谢
+## 许可证与致谢
 
-旧版文件接口基于 [muse-file-bridge](https://github.com/TTNAN/muse-file-bridge) v0.3 协议。上游 MIT 许可证声明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
+本项目采用 [MIT License](./LICENSE) 开源。旧版文件接口基于 [muse-file-bridge](https://github.com/TTNAN/muse-file-bridge) v0.3 协议；第三方许可与随包组件声明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
