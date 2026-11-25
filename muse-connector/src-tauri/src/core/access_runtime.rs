@@ -1349,7 +1349,11 @@ mod tests {
 
     #[test]
     fn production_protection_blocks_credentials_and_sensitive_writes_only() {
-        let root = std::env::temp_dir().join(format!("muse-sensitive-test-{}", token::generate()));
+        let raw_root =
+            std::env::temp_dir().join(format!("muse-sensitive-test-{}", token::generate()));
+        std::fs::create_dir_all(&raw_root).unwrap();
+        // GitHub Actions windows-latest 的 %TEMP% 含 8.3 短路径（RUNNER~1）；先规范化再构造预期路径。
+        let root = std::fs::canonicalize(&raw_root).unwrap();
         let home = root.join("Users/Alice");
         let documents = home.join("Documents");
         let desktop = home.join("Desktop");
