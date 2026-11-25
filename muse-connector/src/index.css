@@ -25,6 +25,7 @@
   --status-success: #4ade80;
   --status-warning: #facc15;
   --status-error: #f87171;
+  --switch-checked: #48c52c;
   --scrollbar-thumb: #737373;
   --scrollbar-thumb-hover: #a3a3a3;
   --radius: 0.625rem;
@@ -57,6 +58,7 @@
   --color-status-success: var(--status-success);
   --color-status-warning: var(--status-warning);
   --color-status-error: var(--status-error);
+  --color-switch-checked: var(--switch-checked);
   --text-caption: 0.8125rem;
   --text-caption--line-height: 1.6;
   --text-sm: 0.875rem;
@@ -122,8 +124,8 @@ html:hover::-webkit-scrollbar-thumb:hover, html:hover *::-webkit-scrollbar-thumb
 .app-scroll > [data-slot="scroll-area-viewport"] { scroll-padding-block-end: var(--setup-guide-space, 0px); }
 .app-page { padding-block: 8px calc(var(--app-gutter) + var(--setup-guide-space, 0px)); }
 .page-stack { display: flex; flex-direction: column; gap: 24px; }
-.detail-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); gap: 24px; }
-.detail-grid > div { display: flex; min-width: 0; flex-direction: column; gap: 8px; }
+.detail-grid { display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1fr); row-gap: 20px; column-gap: 24px; }
+.detail-grid > div { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
 .detail-grid dt { font-size: var(--text-caption); line-height: 1.6; }
 .detail-grid dd { margin: 0; font-size: var(--text-sm); line-height: 1.6; }
 .metric-grid { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 24px; }

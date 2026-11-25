@@ -16,7 +16,7 @@ import ApprovalDialog from "@/components/approval-dialog";
 import { useBridge, type BridgeModel } from "@/lib/use-bridge";
 import { LanguageProvider } from "@/lib/i18n";
 import { connectionPresentation } from "@/lib/connection-presentation";
-import { providerToolAvailable, publicAddress, readSetupVerification, setupStorageKey } from "@/lib/setup-progress";
+import { providerToolAvailable, readSetupVerification, setupStorageKey } from "@/lib/setup-progress";
 import { hasFileGrant } from "@/lib/agent-setup";
 import { useDeviceName } from "@/lib/use-device-name";
 import Overview from "@/pages/overview";
@@ -187,11 +187,11 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
           {needsAttention && !guiding ? <Notice title={s.status.health === "Conflict" ? t("本地端口冲突") : t("连接需要处理")} tone={presentation.tone === "error" ? "error" : "warning"}>{s.agent_ready && s.status.agent_public_verified === false && s.status.health === "Up" ? t("Muse 专用令牌的公网验证未通过，请重试。") : diagnostic(s.status.note)}</Notice> : null}
           {s?.log_errors?.length ? <Notice title={t("日志未能完整保存")} error>{s.log_errors.map(diagnostic).join(" · ")}</Notice> : null}
           {s ? <>
-            <TabsContent value="overview"><Overview bridge={bridge} confirm={confirm} guideVisible={guideVisible} guiding={guiding} onStartGuide={expandGuide} onOpenFileAccess={() => navigate("roots")} onTestPublicConnection={() => testPublicConnection()} /></TabsContent>
-            {visited.has("connection") ? <TabsContent value="connection" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Connection bridge={bridge} deviceName={deviceName} museSetupComplete={verified || s.desktop.device_name_update?.pending === false} museSetupReady={!!publicAddress(s) && s.agent_ready && s.status.agent_public_verified === true} confirm={confirm} guideVisible={guideVisible} guiding={guiding} onDirtyChange={setConnectionDirty} onStartGuide={expandGuide} /></Suspense></TabsContent> : null}
-            <TabsContent value="roots">{page === "roots" ? <Suspense fallback={loadingPage}><Roots bridge={bridge} deviceName={deviceName} onEditDeviceName={() => navigate("connection", "connection-device-name")} guided={guideVisible && !hasFileGrant(s.file_access)} guiding={guiding} onAccessSaved={expandGuide} confirm={confirm} /></Suspense> : null}</TabsContent>
+            <TabsContent value="overview"><Overview bridge={bridge} confirm={confirm} guideVisible={guideVisible} guiding={guiding} onStartGuide={expandGuide} onOpenConnection={() => navigate("connection", "muse-agent-connection")} onTestPublicConnection={() => testPublicConnection()} /></TabsContent>
+            {visited.has("connection") ? <TabsContent value="connection" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Connection bridge={bridge} deviceName={deviceName} confirm={confirm} guiding={guiding} onDirtyChange={setConnectionDirty} onStartGuide={expandGuide} onCollapseGuide={() => setGuideMode("collapsed")} /></Suspense></TabsContent> : null}
+            <TabsContent value="roots">{page === "roots" ? <Suspense fallback={loadingPage}><Roots bridge={bridge} guided={guideVisible && !hasFileGrant(s.file_access)} guiding={guiding} onAccessSaved={expandGuide} confirm={confirm} /></Suspense> : null}</TabsContent>
             {visited.has("logs") ? <TabsContent value="logs" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Logs key={s.run_id} bridge={bridge} selected={page === "logs"} /></Suspense></TabsContent> : null}
-            {visited.has("settings") ? <TabsContent value="settings" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Settings bridge={bridge} /></Suspense></TabsContent> : null}
+            {visited.has("settings") ? <TabsContent value="settings" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Settings bridge={bridge} confirm={confirm} /></Suspense></TabsContent> : null}
             <TabsContent value="about">{page === "about" ? <Suspense fallback={loadingPage}><About version={s.version} onError={bridge.setError} /></Suspense> : null}</TabsContent>
           </> : loadingPage}
         </div>

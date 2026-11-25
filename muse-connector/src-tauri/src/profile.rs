@@ -62,6 +62,10 @@ pub struct DeviceNameUpdate {
     pub pending: bool,
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct DesktopState {
@@ -69,6 +73,8 @@ pub struct DesktopState {
     pub desired_enabled: bool,
     pub provider: ProviderSettings,
     pub start_minimized: bool,
+    #[serde(default = "default_true")]
+    pub close_to_tray: bool,
     pub language: Language,
     pub device_name: String,
     pub device_name_update: Option<DeviceNameUpdate>,
@@ -83,7 +89,8 @@ impl Default for DesktopState {
             schema_version: 1,
             desired_enabled: false,
             provider: ProviderSettings::default(),
-            start_minimized: true,
+            start_minimized: false,
+            close_to_tray: true,
             language: Language::default(),
             device_name: String::new(),
             device_name_update: None,
@@ -321,9 +328,16 @@ mod tests {
             profile.window_title(reopened.language),
             "MuseLink · Development"
         );
-        assert!(DesktopState::default().start_minimized);
-        std::fs::write(profile.state_path(), r#"{"start_minimized":false}"#).unwrap();
-        assert!(!profile.load_desktop().unwrap().start_minimized);
+        assert!(!DesktopState::default().start_minimized);
+        assert!(DesktopState::default().close_to_tray);
+        std::fs::write(
+            profile.state_path(),
+            r#"{"close_to_tray":false,"provider":{"kind":"cloudflare_quick"}}"#,
+        )
+        .unwrap();
+        let legacy = profile.load_desktop().unwrap();
+        assert!(!legacy.close_to_tray);
+        assert_eq!(legacy.provider.kind, ProviderKind::Tailscale);
         std::fs::remove_file(profile.state_path()).unwrap();
         std::fs::remove_dir(home).unwrap();
     }

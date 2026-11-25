@@ -68,6 +68,7 @@ pub struct Snapshot {
     pub dependencies: Value,
     pub capabilities: crate::capabilities::CapabilityBoundary,
     pub version: &'static str,
+    pub log_bytes: u64,
     pub log_errors: Vec<String>,
 }
 
@@ -272,6 +273,11 @@ impl ServiceController {
                 self.exec.is_enabled(),
             ),
             version: env!("CARGO_PKG_VERSION"),
+            log_bytes: self
+                .api
+                .audit()
+                .disk_bytes()
+                .saturating_add(self.logs.disk_bytes()),
             log_errors: [self.api.audit().error(), self.logs.error()]
                 .into_iter()
                 .flatten()
@@ -419,6 +425,27 @@ impl ServiceController {
         tokio::task::spawn_blocking(move || access.clear_index())
             .await
             .map_err(|_| "清理索引任务中断".to_string())?
+    }
+
+    pub fn index_folder_path(&self) -> std::path::PathBuf {
+        let dir = self.access.index_home();
+        if dir.is_dir() {
+            dir.to_path_buf()
+        } else {
+            self.profile.home.clone()
+        }
+    }
+
+    pub async fn clear_logs(&self) -> Result<(), String> {
+        let api = self.api.clone();
+        let runtime = self.logs.clone();
+        tokio::task::spawn_blocking(move || {
+            api.audit().clear()?;
+            runtime.clear()?;
+            Ok::<(), String>(())
+        })
+        .await
+        .map_err(|_| "清除日志任务中断".to_string())?
     }
 
     pub async fn rebuild_search_index(&self) -> Result<(), String> {
@@ -892,10 +919,19 @@ impl ServiceController {
         }
         Ok(())
     }
-    pub async fn save_window_preferences(&self, start_minimized: bool) -> Result<(), String> {
+    pub async fn save_window_preferences(
+        &self,
+        close_to_tray: Option<bool>,
+        start_minimized: Option<bool>,
+    ) -> Result<(), String> {
         let _operation = self.runtime.lock().await;
         self.update_desktop(|state| {
-            state.start_minimized = start_minimized;
+            if let Some(value) = close_to_tray {
+                state.close_to_tray = value;
+            }
+            if let Some(value) = start_minimized {
+                state.start_minimized = value;
+            }
             Ok(true)
         })?;
         Ok(())
@@ -1177,6 +1213,7 @@ mod tests {
         assert_eq!(state.device_name, name);
         assert_eq!(state.language, Language::English);
         assert!(state.start_minimized);
+        assert!(state.close_to_tray);
         drop(reopened);
         std::fs::remove_dir_all(profile.home).unwrap();
     }

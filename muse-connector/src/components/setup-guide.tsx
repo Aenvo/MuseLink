@@ -265,24 +265,38 @@ export default function SetupGuide({
       <DeviceNameField id="setup-device-name" deviceName={deviceName} />
       <p>{t("把接入说明发给 Muse。打开 Muse 发来的安全卡片，再复制并粘贴专用令牌。")}</p>
       {aliasPicker}
+      <div className="flex flex-wrap items-center gap-2 pt-0.5">
+        <Button
+          size="sm"
+          variant={showCredentialActions ? "outline" : "default"}
+          disabled={busy || !instructions}
+          onClick={() => void copyInstructions()}
+        >
+          <Clipboard data-icon="inline-start" />
+          {showCredentialActions ? t("重新复制说明") : t("复制接入说明")}
+        </Button>
+        <Button size="sm" variant="outline" disabled={busy} onClick={() => void copyToken()}>
+          <Copy data-icon="inline-start" />
+          {t("复制专用令牌")}
+        </Button>
+      </div>
       {copyState ? copyState.ok
         ? <p role="status">{t("已复制，可以发给 Muse。")}</p>
         : <div className="flex flex-col gap-2">
           <p role="status">{t("复制失败，请手动复制下方说明。")}</p>
           <textarea ref={copyFallback} aria-label={t("给 Muse 的连接说明")} readOnly rows={3} value={instructions ?? ""}
-            className="w-full resize-none rounded-md border bg-muted p-2 text-caption text-foreground" />
+            className="w-full resize-none rounded-md border border-input bg-transparent p-2 text-caption text-foreground" />
         </div> : null}
-      {showCredentialActions ? <Button className="self-start px-0" size="sm" variant="link" disabled={busy} onClick={() => void copyInstructions()}>{t("重新复制")}</Button> : null}
     </>;
-    // 复制之后由用户确认安全卡片，必要时仍可重新复制。
-    action = showCredentialActions ? <>
-      <Button size="sm" variant="outline" disabled={busy} onClick={() => void copyToken()}>
-        <Copy data-icon="inline-start" />{t("复制专用令牌")}
-      </Button>
-      <Button size="sm" disabled={busy || !scope || (!publicReady && !handedOff)} onClick={() => handedOff ? showStep(3) : next(false)}>
-        {handedOff ? t("查看试用") : t("已填写，继续")}
-      </Button>
-    </> : <Button size="sm" disabled={busy || !instructions} onClick={() => void copyInstructions()}><Clipboard data-icon="inline-start" />{t("复制 Muse 接入说明")}</Button>;
+    // 步骤正文并排提供复制说明与复制令牌，底部专注流程推进。
+    action = <Button
+      size="sm"
+      variant={showCredentialActions ? "default" : "outline"}
+      disabled={busy || !scope || (!publicReady && !handedOff) || (!showCredentialActions)}
+      onClick={() => handedOff ? showStep(3) : next(false)}
+    >
+      {handedOff ? t("查看试用") : t("已填写，继续")}
+    </Button>;
   } else if (readConfirmed) {
     content = <p role="status" className="text-foreground">{t("已在 Muse 完成首次试用。")}</p>;
     action = <Button size="sm" onClick={collapse}>{t("收起引导")}</Button>;

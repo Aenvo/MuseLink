@@ -107,6 +107,10 @@ pub(crate) struct AccessRuntime {
 }
 
 impl AccessRuntime {
+    pub(crate) fn index_home(&self) -> &Path {
+        &self.index_home
+    }
+
     #[cfg(all(test, windows))]
     pub(super) fn with_test_engine(
         profile: &RuntimeProfile,

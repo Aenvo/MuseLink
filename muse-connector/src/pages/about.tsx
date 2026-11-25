@@ -48,7 +48,7 @@ export default function About({ version, onError }: { version: string; onError: 
     </CardHeader>
     <Separator />
     <CardFooter className="bg-muted/35 py-4">
-      <p>{t("如果 Muse连接器帮到了你，欢迎在 GitHub 点个 Star。")}</p>
+      <p>{t("如果 Muse连接器帮到了你，欢迎在 GitHub 点个 Star :)")}</p>
     </CardFooter>
   </Card>;
 }

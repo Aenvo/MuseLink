@@ -139,7 +139,7 @@ The API returns JSON. Send Content-Type: application/json for POST requests and 
 - GET /agent/v1/roots returns roots.search, roots.read, and roots.write, each listing the aliases authorized for that operation.
 - GET /agent/v1/locations/desktop returns root, path, and the absolute_path of the Windows Desktop. Use this to locate the Desktop if it is within the authorized scope.
 - POST /agent/v1/search accepts {"name":"part of the file name","limit":30}. Optional fields: root, extensions, modified_since_ms, modified_before_ms, and cursor. If you know the drive letter, pass its root alias first. Results include hits, complete, scanning, backend, scopes, and optional next_cursor and retry_after_ms. Each hit has root, path, kind, size, and modified_ms. When scanning is true, show the current results and scopes still being indexed, wait for retry_after_ms, and try again. If indexing is unfinished or complete is false, say that coverage is incomplete. To paginate, pass next_cursor as cursor and keep the other query parameters the same.
-- If search returns HTTP 409 with search_index_cleared, ask the user to open File Access in MuseLink and select Rebuild index. Wait for the user before searching again.
+- If search returns HTTP 409 with search_index_cleared, ask the user to open Settings → Data in MuseLink and select Rebuild index. Wait for the user before searching again.
 - GET /agent/v1/list?root=<alias>&path=<relative-folder> lists a folder. Use an empty path to list the root.
 - GET /agent/v1/read?root=<alias>&path=<relative-file> returns encoding and content. The encoding is text or base64.
 - POST /agent/v1/write accepts {"root":"alias","path":"relative file","content":"file content","encoding":"text"}. Encoding may also be base64. Write files only at my explicit request.
@@ -162,7 +162,7 @@ Verify the connector once setup is complete. ${trialInstruction} If a request fa
 - GET /agent/v1/roots 返回 roots.search、roots.read、roots.write，各自列出对应操作的目录别名。
 - GET /agent/v1/locations/desktop 返回 root、path 和 Windows 实际桌面的 absolute_path。需要定位桌面时使用，桌面须在授权范围内。
 - POST /agent/v1/search 接收 {"name":"文件名的一部分","limit":30}。可选 root、extensions、modified_since_ms、modified_before_ms 和 cursor。知道盘符时优先传对应的 root。返回 hits、complete、scanning、backend、scopes 及可选 next_cursor、retry_after_ms。命中含 root、path、kind、size、modified_ms。若 scanning 为 true，按 retry_after_ms 等待后再查，先告知当前有哪些结果及未完成的范围。扫描未结束或 complete 为 false 时，标明覆盖还不完整。分页时把 next_cursor 作为下一次的 cursor，其余查询参数保持一致。
-- 若搜索返回 HTTP 409 且 error 为 search_index_cleared，告诉用户在桌面连接器的「文件权限」中点「重新建立索引」。等待用户操作后再搜索。
+- 若搜索返回 HTTP 409 且 error 为 search_index_cleared，告诉用户在桌面连接器的「设置 → 数据」中点「重新建立索引」。等待用户操作后再搜索。
 - GET /agent/v1/list?root=<目录别名>&path=<相对目录> 列出目录。列根目录时 path 填空字符串。
 - GET /agent/v1/read?root=<目录别名>&path=<相对文件> 返回 encoding 和 content，encoding 为 text 或 base64。
 - POST /agent/v1/write 接收 {"root":"目录别名","path":"相对文件","content":"文件内容","encoding":"text"}，encoding 也可以为 base64。写入仅按我的明确请求执行。

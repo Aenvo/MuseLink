@@ -70,13 +70,14 @@ export interface Snapshot {
   pending_approvals: ApprovalView[];
   exec_sessions: SessionGrantView[];
   home: string; config: BridgeConfig;
-  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; permission_mode: string; language: Language; device_name: string; device_name_update?: DeviceNameUpdate | null; exec_enabled?: boolean };
+  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; close_to_tray: boolean; permission_mode: string; language: Language; device_name: string; device_name_update?: DeviceNameUpdate | null; exec_enabled?: boolean };
   suggested_device_name: string | null;
   status: TunnelStatus;
   stats: ActivityStats & { file_activity: ActivityStats };
   dependencies: { tailscale: boolean; cloudflared: boolean; simulated: boolean };
   capabilities: { enabled: boolean; tools: string[] }; version: string;
   autostart: boolean | null; update_configured: boolean;
+  log_bytes: number;
   log_errors: string[];
 }
 export interface LegacyState {
@@ -177,6 +178,6 @@ export function useBridge() {
   return { snapshot, error, setError, busy, run, refresh: refreshNow, legacy, windowVisible };
 }
 export type BridgeModel = ReturnType<typeof useBridge>;
-export const providerLabels = { tailscale: "Tailscale Funnel", cloudflare_named: "Cloudflare 命名隧道" } as const satisfies Record<ProviderKind, string>;
+export const providerLabels = { tailscale: "Tailscale Funnel", cloudflare_named: "Cloudflare 命名隧道（自有域名）" } as const satisfies Record<ProviderKind, string>;
 export const formatTime = (value: string, language: Language) => new Date(value).toLocaleString(language, { hour12: false });
 export function formatBytes(value: number) { if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`; return `${(value / 1024 / 1024).toFixed(2)} MiB`; }

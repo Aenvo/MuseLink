@@ -4,27 +4,16 @@ import { Check, ChevronDown, FolderOpen, Trash2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { DropdownMenu } from "radix-ui";
 import { Button } from "@/components/ui/button";
-import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle, AlertDialogTrigger } from "@/components/ui/alert-dialog";
-import { FieldError, FieldLegend, FieldSet } from "@/components/ui/field";
+import { CardTitle } from "@/components/ui/card";
+import { FieldError } from "@/components/ui/field";
 import { setupRootTarget } from "@/lib/setup-progress";
 import { accessOperations, accessPolicyKey, editFileAccessPolicy, folderGrantEnabled } from "@/lib/agent-setup";
-import { formatBytes, type BridgeModel, type FileAccessMode, type FileAccessPolicy, type IndexStatus, type Snapshot } from "@/lib/use-bridge";
+import type { BridgeModel, FileAccessMode, FileAccessPolicy, Snapshot } from "@/lib/use-bridge";
 
 const modes = [
   { key: "folders", label: "管理指定文件夹（推荐）" },
-  { key: "full", label: "管理本机磁盘（全量授权）" },
+  { key: "full", label: "管理本机磁盘（整机授权）" },
 ] as const;
-
-const indexLabels = {
-  waiting: "等待建立索引",
-  indexing: "正在建立索引",
-  ready: "NTFS 索引已就绪",
-  directory_search: "目录索引已就绪",
-  unavailable: "索引暂不可用",
-  clearing: "正在清除索引",
-  cleared: "索引已清除，自动建库已暂停",
-  clear_failed: "索引清除失败，自动建库已暂停",
-} as const satisfies Record<IndexStatus["state"], string>;
 
 function completeScope(saved: FileAccessPolicy) {
   const scope = saved.mode === "full" ? "all_local" : "folders";
@@ -107,18 +96,15 @@ export default function FileAccessPanel({ bridge, snapshot, guided = false, onSa
   const saved = snapshot.file_access;
   const initialRoots = saved?.roots ?? snapshot.config.roots;
   const savedKey = saved ? accessPolicyKey(saved) : JSON.stringify(Object.entries(initialRoots).sort());
-  return <AccessEditor key={savedKey} bridge={bridge} saved={saved} initialRoots={initialRoots}
-    guided={guided} onSaved={onSaved} ntfsSearchService={snapshot.ntfs_search_service} indexStatus={snapshot.index_status} />;
+  return <AccessEditor key={savedKey} bridge={bridge} saved={saved} initialRoots={initialRoots} guided={guided} onSaved={onSaved} />;
 }
 
-function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearchService, indexStatus }: {
+function AccessEditor({ bridge, saved, initialRoots, guided, onSaved }: {
   bridge: BridgeModel;
   saved: FileAccessPolicy | null;
   initialRoots: FileAccessPolicy["roots"];
   guided: boolean;
   onSaved: () => void;
-  ntfsSearchService: boolean | null;
-  indexStatus: IndexStatus;
 }) {
   const { t, diagnostic } = useLanguage();
   const prefix = useId();
@@ -138,8 +124,6 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
   const canEnableAll = saved !== null && (modeChanged || !completeScope(saved));
   const changed = !saved || accessPolicyKey(policy) !== accessPolicyKey(saved);
   const busy = !!bridge.busy;
-  const savedSearch = !!saved && saved.search !== "off";
-  const showNtfs = policy.search === "all_local" && ntfsSearchService != null;
   const canSave = !busy && !missingFolder && !missingDisk && !diskConfirmationRequired && changed;
 
   const removeFolder = (name: string) => {
@@ -169,96 +153,90 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved, ntfsSearch
     else if (guided) onSaved();
   };
 
-  return <form id="setup-file-access" tabIndex={-1} className="min-w-0" onSubmit={event => {
-    event.preventDefault();
-    void save();
-  }}>
-    <FieldSet disabled={busy} className="min-w-0 gap-4">
-      <FieldLegend className="mb-2 text-foreground">{t("选择 Muse 的文件管理方式")}</FieldLegend>
-      <div className="grid min-w-0 gap-2" data-slot="radio-group">
-        {modes.map(({ key, label }) => <label key={key} className="flex min-w-0 cursor-pointer items-start gap-2 rounded-md border px-3 py-2 text-sm text-foreground has-checked:border-foreground/50 has-checked:bg-accent/50 has-disabled:cursor-not-allowed">
-          <input type="radio" name={`${prefix}-access-mode`} value={key} checked={mode === key}
-            className="mt-1 shrink-0 accent-primary focus-visible:outline focus-visible:outline-ring" onChange={() => {
-              setMode(key);
-              setEnableAllOperations(false);
-              setError(null);
-            }} />
-          <span>{key === "full" && canEnableAll && !enableAllOperations ? t("管理本机磁盘") : t(label)}</span>
-        </label>)}
-      </div>
-      <p className="text-caption text-muted-foreground">{diskConfirmationRequired
-        ? t("切换到磁盘模式前，请确认对所选范围启用全部操作。")
-        : modeChanged && !enableAllOperations
-          ? t("各文件夹只保留当前授权范围内的搜索、读取和写入权限。")
-          : canEnableAll && !enableAllOperations
-            ? t("调整范围时会保留当前的搜索、读取和写入权限。")
-            : mode === "full"
-              ? t("Muse 可搜索、读取和写入所选磁盘中当前 Windows 账户可访问的文件。")
-              : t("Muse 可搜索、读取和写入所选文件夹及其子文件夹。")}</p>
-      {showDisks ? <DiskPicker selected={disks} disabled={busy} onChange={selection => { setDisks(selection); setError(null); }} /> : null}
-      {showFolders ? <div className="flex min-w-0 flex-col gap-2">
-        <Button id={guided ? undefined : "add-directory"} type="button" variant="outline" size="sm" className="self-start" disabled={busy} onClick={() => void selectFolder()}>
-          <FolderOpen data-icon="inline-start" />{t("选择文件夹")}
+  return (
+    <form id="setup-file-access" tabIndex={-1} className="flex min-w-0 flex-col gap-5 focus-visible:outline focus-visible:outline-ring" onSubmit={event => {
+      event.preventDefault();
+      void save();
+    }}>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <CardTitle>{t("文件权限")}</CardTitle>
+        <Button type="submit" size="sm" disabled={!canSave}>
+          {guided ? t("确认并继续") : t("保存授权")}
         </Button>
-        {folders.map(([name, path]) => <div key={name} id={guided ? undefined : setupRootTarget(name)} tabIndex={-1}
-          className="flex min-w-0 items-center gap-2 rounded-md border px-3 py-2 focus-visible:outline focus-visible:outline-ring">
-          <span className="min-w-0 flex-1 break-all text-caption">{path}</span>
-          <Button variant="ghost" type="button" size="icon-sm" aria-label={t("移除目录 {0}", name)} disabled={busy} onClick={() => removeFolder(name)}><Trash2 /></Button>
-        </div>)}
-      </div> : null}
-      {canEnableAll ? <label className="flex items-start gap-2 text-sm">
-        <input type="checkbox" className="mt-1 shrink-0 accent-primary focus-visible:outline focus-visible:outline-ring"
-          checked={enableAllOperations} onChange={event => { setEnableAllOperations(event.target.checked); setError(null); }} />
-        {t("对所选范围启用搜索、读取和写入")}
-      </label> : null}
-        <div className="flex min-w-0 flex-col gap-2 rounded-md border px-3 py-2">
-          <p className="text-sm font-medium text-foreground">{t("本机文件索引")}</p>
-          <p aria-live="polite" className="text-caption text-muted-foreground">
-            {!savedSearch && indexStatus.state === "waiting"
-              ? t("保存搜索授权后，连接器会在后台建立索引。")
-              : t(indexLabels[indexStatus.state])}
-            {indexStatus.bytes != null ? t(" · 占用 {0}", formatBytes(indexStatus.bytes)) : ""}
-          </p>
-          {showNtfs && !ntfsSearchService ? <p className="text-caption text-muted-foreground">
-            {t("启用 NTFS 快速索引需要 Windows 管理员确认。本机其他用户也可通过该服务查询 NTFS 文件名。")}
-          </p> : null}
-          <div className="flex flex-wrap gap-2">
-            {showNtfs && !ntfsSearchService ? <Button type="button" variant="outline" size="sm" onClick={() => {
-              void bridge.run(t("正在打开快速索引设置说明"), "open_tool_setup", { tool: "everything" });
-            }}>{t("启用说明")}</Button> : null}
-            {indexStatus.state === "cleared" && savedSearch ? <Button type="button" variant="outline" size="sm" onClick={() => {
-              void bridge.run(t("正在恢复索引"), "rebuild_search_index", undefined, t("已开始重新建立索引"));
-            }}>{t("重新建立索引")}</Button> : null}
-            {(savedSearch || (indexStatus.bytes ?? 0) > 0 || indexStatus.state === "clear_failed")
-              && indexStatus.state !== "cleared" && indexStatus.state !== "clearing" ? (
-                <AlertDialog>
-                  <AlertDialogTrigger asChild>
-                    <Button type="button" variant="outline" size="sm">
-                      {indexStatus.state === "clear_failed" ? t("重试清除索引") : t("清除本机索引")}
-                    </Button>
-                  </AlertDialogTrigger>
-                  <AlertDialogContent size="sm">
-                    <AlertDialogHeader>
-                      <AlertDialogTitle>{t("清除本机索引？")}</AlertDialogTitle>
-                      <AlertDialogDescription>{t("将清除连接器的搜索索引。下次使用 Muse 搜索前，需要手动重新建立索引。")}</AlertDialogDescription>
-                    </AlertDialogHeader>
-                    <AlertDialogFooter>
-                      <AlertDialogCancel type="button">{t("取消")}</AlertDialogCancel>
-                      <AlertDialogAction type="button" variant="destructive" onClick={() => {
-                        void bridge.run(t("正在清除本机索引"), "clear_search_index", undefined, t("本机索引已清除"));
-                      }}>{t("清除索引")}</AlertDialogAction>
-                    </AlertDialogFooter>
-                  </AlertDialogContent>
-                </AlertDialog>
-            ) : null}
+      </div>
+      <fieldset disabled={busy} className="m-0 flex min-w-0 flex-col gap-5 border-0 p-0">
+        <div className="flex min-w-0 flex-col gap-3.5">
+          <p className="text-sm font-medium text-foreground">{t("选择 Muse 的文件管理方式")}</p>
+          <div className="grid min-w-0 gap-2" data-slot="radio-group" role="radiogroup" aria-label={t("选择 Muse 的文件管理方式")}>
+            {modes.map(({ key, label }) => (
+              <label key={key} className="flex min-w-0 cursor-pointer items-center gap-2.5 rounded-md border px-3 py-2.5 text-sm text-foreground transition-[border-color,background-color] hover:border-ring/70 has-checked:border-foreground/50 has-checked:bg-accent/50 has-disabled:cursor-not-allowed">
+                <input
+                  type="radio"
+                  name={`${prefix}-access-mode`}
+                  value={key}
+                  checked={mode === key}
+                  className="shrink-0 accent-primary focus-visible:outline focus-visible:outline-ring"
+                  onChange={() => {
+                    setMode(key);
+                    setEnableAllOperations(false);
+                    setError(null);
+                  }}
+                />
+                <span>{key === "full" && canEnableAll && !enableAllOperations ? t("管理本机磁盘") : t(label)}</span>
+              </label>
+            ))}
           </div>
         </div>
-      {missingFolder ? <p className="text-caption text-muted-foreground">{t("请选择至少一个文件夹。")}</p> : null}
-      {missingDisk ? <p className="text-caption text-muted-foreground">{t("请至少选择一个磁盘。")}</p> : null}
-      {error ? <FieldError>{diagnostic(error)}</FieldError> : null}
-      <Button type="submit" size="sm" className="self-start" disabled={!canSave}>
-        {guided ? t("确认并继续") : t("保存授权")}
-      </Button>
-    </FieldSet>
-  </form>;
+        <div className="flex min-w-0 flex-col gap-3.5">
+          <p className="text-caption text-muted-foreground">
+            {diskConfirmationRequired
+              ? t("切换到磁盘模式前，请确认对所选范围启用全部操作。")
+              : modeChanged && !enableAllOperations
+                ? t("各文件夹只保留当前授权范围内的搜索、读取和写入权限。")
+                : canEnableAll && !enableAllOperations
+                  ? t("调整范围时会保留当前的搜索、读取和写入权限。")
+                  : mode === "full"
+                    ? t("Muse 可搜索、读取和写入所选磁盘中当前 Windows 账户可访问的文件。")
+                    : t("Muse 可搜索、读取和写入所选文件夹及其子文件夹。")}
+          </p>
+          {showDisks ? <DiskPicker selected={disks} disabled={busy} onChange={selection => { setDisks(selection); setError(null); }} /> : null}
+          {showFolders ? (
+            <div className="flex min-w-0 flex-col gap-2">
+              <Button id={guided ? undefined : "add-directory"} type="button" variant="outline" size="sm" className="self-start" disabled={busy} onClick={() => void selectFolder()}>
+                <FolderOpen data-icon="inline-start" />
+                {t("选择文件夹")}
+              </Button>
+              {folders.map(([name, path]) => (
+                <div
+                  key={name}
+                  id={guided ? undefined : setupRootTarget(name)}
+                  tabIndex={-1}
+                  className="flex min-w-0 items-center gap-2 rounded-md border px-3 py-2 focus-visible:outline focus-visible:outline-ring"
+                >
+                  <span className="min-w-0 flex-1 break-all text-caption">{path}</span>
+                  <Button variant="ghost" type="button" size="icon-sm" aria-label={t("移除目录 {0}", name)} disabled={busy} onClick={() => removeFolder(name)}>
+                    <Trash2 />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          ) : null}
+          {canEnableAll ? (
+            <label className="flex items-start gap-2 text-sm">
+              <input
+                type="checkbox"
+                className="mt-1 shrink-0 accent-primary focus-visible:outline focus-visible:outline-ring"
+                checked={enableAllOperations}
+                onChange={event => { setEnableAllOperations(event.target.checked); setError(null); }}
+              />
+              {t("对所选范围启用搜索、读取和写入")}
+            </label>
+          ) : null}
+          {missingFolder ? <p className="text-caption text-muted-foreground">{t("请选择至少一个文件夹。")}</p> : null}
+          {missingDisk ? <p className="text-caption text-muted-foreground">{t("请至少选择一个磁盘。")}</p> : null}
+          {error ? <FieldError>{diagnostic(error)}</FieldError> : null}
+        </div>
+      </fieldset>
+    </form>
+  );
 }

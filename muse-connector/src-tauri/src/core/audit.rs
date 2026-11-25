@@ -72,6 +72,7 @@ pub struct LogBatch {
 #[derive(Default)]
 struct Buffer {
     seq: u64,
+    cleared_seq: u64,
     entries: VecDeque<LogRecord>,
     error: Option<String>,
 }
@@ -218,10 +219,11 @@ impl Audit {
     pub fn recent(&self, after: Option<u64>, limit: usize) -> LogBatch {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         let gap = after.is_some_and(|seq| {
-            state
-                .entries
-                .front()
-                .is_some_and(|r| seq.saturating_add(1) < r.seq)
+            seq < state.cleared_seq
+                || state
+                    .entries
+                    .front()
+                    .is_some_and(|r| seq.saturating_add(1) < r.seq)
                 || seq > state.seq
         });
         let mut entries: Vec<_> = state
@@ -239,6 +241,36 @@ impl Audit {
             gap,
             error: state.error.clone(),
         }
+    }
+    pub fn disk_bytes(&self) -> u64 {
+        let mut total = std::fs::metadata(&self.path).map(|m| m.len()).unwrap_or(0);
+        for n in 1..=self.keep {
+            total = total.saturating_add(
+                std::fs::metadata(suffix(&self.path, n))
+                    .map(|m| m.len())
+                    .unwrap_or(0),
+            );
+        }
+        total
+    }
+    pub fn clear(&self) -> Result<(), String> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        for path in
+            std::iter::once(self.path.clone()).chain((1..=self.keep).map(|n| suffix(&self.path, n)))
+        {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(format!("清除日志文件失败：{}", e.kind()));
+                }
+            }
+        }
+        state.entries.clear();
+        state.error = None;
+        state.seq += 1;
+        state.cleared_seq = state.seq;
+        Ok(())
     }
     fn rotate_if_needed(&self) -> io::Result<()> {
         match std::fs::metadata(&self.path) {
@@ -420,6 +452,26 @@ mod tests {
         assert!(!entry.contains(&rotated));
         assert!(entry.contains("[已隐藏令牌]"));
         assert!(entry.contains("mfa_short_name"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn clear_removes_rotated_files_resets_disk_bytes_and_signals_gap() {
+        let dir =
+            std::env::temp_dir().join(format!("muse-log-clear-{}", crate::core::token::generate()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("server.log");
+        let (log, _rx) = Audit::with_kind(path.clone(), 64, 3, "runtime");
+        log.runtime_entry("info", "first line long enough to trigger rotation soon");
+        log.runtime_entry("info", "second line long enough to rotate the log file");
+        let before = log.recent(None, 100);
+        assert!(!before.entries.is_empty());
+        assert!(log.disk_bytes() > 0);
+
+        log.clear().unwrap();
+        assert_eq!(log.disk_bytes(), 0);
+        let after_clear = log.recent(Some(before.last_seq), 100);
+        assert!(after_clear.gap);
+        assert!(after_clear.entries.is_empty());
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

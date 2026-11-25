@@ -50,8 +50,8 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | Local file tools | Let Muse search by file name, list folders, read files, and write or create folders when needed. |
 | Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. |
 | Public connection | Use Tailscale Funnel by default, or choose a Cloudflare named tunnel with your own domain. |
-| Dedicated token | Generate, copy, rotate, or revoke the Muse token in **File Access**, with automatic token redaction in logs. |
-| Desktop controls | Filter and export (JSONL/CSV) audit logs by **Files**, **Command execution**, or runtime events and open the log folder directly; wake and elevate approval prompts from the tray; cleanly terminate managed child processes on exit; switch between English and Simplified Chinese. |
+| Dedicated token | Generate and copy Muse connection instructions and the dedicated token under **Connection**; rotate, revoke, or locate the token under **Settings → Data**, with automatic token redaction in logs. |
+| Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and English / Simplified Chinese UI. |
 
 ## Download and install
 
@@ -68,7 +68,7 @@ Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink
 
 For the default connection method, install [Tailscale for Windows](https://tailscale.com/download/windows) and sign in.
 
-1. On **Overview**, select **Start setup**.
+1. On **Overview** or **Connection**, select **Start guide**.
 2. Choose the folders or drives to authorize. All available local fixed drives are selected by default in drive mode. Open the menu to narrow the selection.
 3. Generate a Muse token. Follow the guide to authorize Funnel, start the connection, and verify the public endpoint.
 4. Save a device name for this computer and send the connection instructions to Muse. Confirm that Muse uses the name to create or update the connector, then paste the token into the security card that Muse sends back.
@@ -76,7 +76,7 @@ For the default connection method, install [Tailscale for Windows](https://tails
 
 When connecting several computers, give each one a distinct device name, its own connector, and its own token. Ask Muse for the device by name, for example, “Find `hello.txt` on Laptop.” To rename a connected device, save the new name under **Connection**, then copy the rename instructions and paste them into Muse. The pending status clears when Muse sends its confirmation. You can also check the new name in Muse and confirm it manually under **Connection**.
 
-File indexing starts in the background after you first save permissions. Check its status or rebuild the index in **File Access**. Change the interface language in **Settings → Display language**. MuseLink remembers your choice.
+File indexing starts in the background after you first save permissions. Manage local data, file index usage/rebuilds, log cleanup/export, and token rotation/revocation under **Settings → Data**. Configure display language, silent startup launch, and minimize-to-tray on close under **Settings → General**.
 
 ## Access and connection boundaries
 

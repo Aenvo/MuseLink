@@ -179,10 +179,13 @@ async fn rotate_file_token(state: tauri::State<'_, Services>) -> Result<(), Stri
 }
 #[tauri::command]
 async fn save_preferences(
-    start_minimized: bool,
+    close_to_tray: Option<bool>,
+    start_minimized: Option<bool>,
     state: tauri::State<'_, Services>,
 ) -> Result<(), String> {
-    state.save_window_preferences(start_minimized).await
+    state
+        .save_window_preferences(close_to_tray, start_minimized)
+        .await
 }
 #[tauri::command]
 async fn save_device_name(
@@ -270,6 +273,25 @@ fn open_local_folder(
     app.opener()
         .open_path(state.profile.home.to_string_lossy(), None::<&str>)
         .map_err(|_| "无法打开本机配置文件夹".into())
+}
+#[tauri::command]
+fn open_index_folder(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Services>,
+) -> Result<(), String> {
+    let path = state.index_folder_path();
+    app.opener()
+        .open_path(path.to_string_lossy(), None::<&str>)
+        .map_err(|_| "无法打开索引目录".into())
+}
+#[tauri::command]
+async fn clear_logs(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Services>,
+) -> Result<(), String> {
+    state.clear_logs().await?;
+    let _ = app.emit("bridge-log-gap", ());
+    Ok(())
 }
 #[tauri::command]
 fn open_logs_folder(
@@ -754,6 +776,7 @@ pub fn run() {
     let controller = ServiceController::open(profile);
     let desktop = controller.desktop_state();
     let fresh_setup = controller.snapshot().fresh_setup;
+    let launched_by_autostart = std::env::args().any(|arg| arg == "--autostart");
     if let Some(window) = context
         .config_mut()
         .app
@@ -762,7 +785,7 @@ pub fn run() {
         .find(|w| w.label == "main")
     {
         window.title = controller.profile.window_title(desktop.language);
-        if desktop.start_minimized && !fresh_setup && !controller.profile.onboarding_qa {
+        if launched_by_autostart && !fresh_setup && !controller.profile.onboarding_qa {
             window.create = false;
         }
     }
@@ -776,15 +799,23 @@ pub fn run() {
         }))
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
+            Some(vec!["--autostart"]),
         ))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 let _ = window.set_always_on_top(false);
-                if window.hide().is_ok() {
-                    let _ = window.emit("desktop-visibility", false);
+                let close_to_tray = window
+                    .try_state::<Services>()
+                    .is_none_or(|state| state.desktop_state().close_to_tray);
+                if close_to_tray {
+                    if window.hide().is_ok() {
+                        let _ = window.emit("desktop-visibility", false);
+                    }
+                    api.prevent_close();
+                } else {
+                    api.prevent_close();
+                    window.app_handle().exit(0);
                 }
-                api.prevent_close();
             }
         })
         .setup(move |app| {
@@ -909,7 +940,9 @@ pub fn run() {
             set_autostart,
             pick_directory,
             open_local_folder,
+            open_index_folder,
             open_logs_folder,
+            clear_logs,
             export_logs,
             check_legacy,
             takeover_legacy,
