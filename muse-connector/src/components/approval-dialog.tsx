@@ -58,8 +58,9 @@ export default function ApprovalDialog({ bridge }: { bridge: BridgeModel }) {
   if (!current) return null;
 
   const remaining = Math.max(0, Math.ceil((current.expires_at_ms - now) / 1000));
+  const expired = remaining <= 0;
   const highRisk = current.tier === "always" || !current.sandboxed;
-  const disabled = submitting || !!bridge.busy;
+  const disabled = submitting || !!bridge.busy || expired;
 
   const decide = async (decision: ApprovalDecision) => {
     if (disabled) return;

@@ -36,7 +36,7 @@ use super::access_runtime::{AccessRuntime, AgentSearchError};
 use super::audit::{Audit, AuditEntry, now_iso};
 use super::config::BridgeConfig;
 use super::exec_policy::ExecRequest;
-use super::exec_runtime::{ExecRuntime, ExecSubmitError};
+use super::exec_runtime::{ExecJobStatus, ExecRuntime, ExecSubmitError, MAX_STATUS_WAIT_MS};
 use super::handle;
 use super::path_guard;
 use super::search::{SearchError, SearchRequest};
@@ -1120,51 +1120,138 @@ async fn agent_exec_submit(State(state): State<ApiState>, request: Request) -> R
     .await
 }
 
+fn exec_no_store_response(code: u16, view: &impl Serialize) -> Response {
+    let mut response = json_resp(code, view);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
 async fn agent_exec_status(
     State(state): State<ApiState>,
     AxumPath(job_id): AxumPath<String>,
     request: Request,
 ) -> Response {
     let (parts, _) = request.into_parts();
-    blocking_response(state.inner.control_jobs.clone(), move || {
-        let _guard = state.access_guard();
-        if let Some(response) = get_auth_failure(&state, &parts) {
-            return response;
+    let wait_ms = query_map(parts.uri.query())
+        .get("wait_ms")
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0)
+        .min(MAX_STATUS_WAIT_MS);
+
+    let Ok(slot) = state.inner.control_jobs.clone().acquire_owned().await else {
+        return json_resp(500, &json!({"error": "file service unavailable"}));
+    };
+    let init_state = state.clone();
+    let init_parts = parts.clone();
+    let init_job_id = job_id.clone();
+    let initial = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        let _guard = init_state.access_guard();
+        if let Some(response) = get_auth_failure(&init_state, &init_parts) {
+            return Err(response);
         }
-        let Some(exec) = state.inner.exec.get() else {
-            return respond(
-                &state,
-                &parts,
+        let Some(exec) = init_state.inner.exec.get().cloned() else {
+            return Err(respond(
+                &init_state,
+                &init_parts,
                 403,
                 json!({"error": "exec_disabled", "message": "command execution is disabled"}),
                 true,
                 None,
                 None,
                 None,
-            );
+            ));
         };
-        match exec.get_job(&job_id) {
-            Some(view) => {
-                let mut response = json_resp(200, &view);
-                response.headers_mut().insert(
-                    header::CACHE_CONTROL,
-                    header::HeaderValue::from_static("no-store"),
-                );
-                response
-            }
-            None => respond(
-                &state,
-                &parts,
+        match exec.subscribe_job(&init_job_id) {
+            Some((view, rx, approval_expires)) => Ok((exec, view, rx, approval_expires)),
+            None => Err(respond(
+                &init_state,
+                &init_parts,
                 404,
                 json!({"error": "job not found"}),
                 true,
                 None,
                 None,
                 None,
-            ),
+            )),
         }
     })
     .await
+    .unwrap_or_else(|_| {
+        Err(json_resp(
+            500,
+            &json!({"error": "file service unavailable"}),
+        ))
+    });
+
+    let (exec, mut current_view, mut rx, mut current_expires) = match initial {
+        Ok(sub) => sub,
+        Err(response) => return response,
+    };
+
+    if wait_ms == 0 || current_view.status.is_terminal() {
+        return exec_no_store_response(200, &current_view);
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(wait_ms);
+    loop {
+        let now_tokio = tokio::time::Instant::now();
+        if now_tokio >= deadline {
+            break;
+        }
+        let step_deadline = if current_view.status == ExecJobStatus::AwaitingApproval {
+            if let Some(exp) = current_expires {
+                let remaining = exp.saturating_duration_since(Instant::now());
+                deadline.min(now_tokio + remaining + std::time::Duration::from_millis(15))
+            } else {
+                deadline
+            }
+        } else {
+            deadline
+        };
+
+        let waited = tokio::time::timeout_at(step_deadline, rx.changed()).await;
+
+        if !state.check_auth(auth_header(&parts)) {
+            let state = state.clone();
+            return blocking_response(state.inner.control_jobs.clone(), move || {
+                unauthorized_response(&state, &parts)
+            })
+            .await;
+        }
+
+        let Some((next_view, next_expires)) = exec.get_job_with_expiry(&job_id) else {
+            let state = state.clone();
+            return blocking_response(state.inner.control_jobs.clone(), move || {
+                respond(
+                    &state,
+                    &parts,
+                    404,
+                    json!({"error": "job not found"}),
+                    true,
+                    None,
+                    None,
+                    None,
+                )
+            })
+            .await;
+        };
+        current_view = next_view;
+        current_expires = next_expires;
+
+        if current_view.status.is_terminal() {
+            break;
+        }
+        match waited {
+            Ok(Ok(())) => continue,
+            Ok(Err(_)) | Err(_) => break,
+        }
+    }
+
+    exec_no_store_response(200, &current_view)
 }
 
 async fn agent_exec_cancel(

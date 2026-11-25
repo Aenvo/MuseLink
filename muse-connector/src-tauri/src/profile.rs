@@ -83,7 +83,7 @@ impl Default for DesktopState {
             schema_version: 1,
             desired_enabled: false,
             provider: ProviderSettings::default(),
-            start_minimized: false,
+            start_minimized: true,
             language: Language::default(),
             device_name: String::new(),
             device_name_update: None,
@@ -321,6 +321,9 @@ mod tests {
             profile.window_title(reopened.language),
             "MuseLink · Development"
         );
+        assert!(DesktopState::default().start_minimized);
+        std::fs::write(profile.state_path(), r#"{"start_minimized":false}"#).unwrap();
+        assert!(!profile.load_desktop().unwrap().start_minimized);
         std::fs::remove_file(profile.state_path()).unwrap();
         std::fs::remove_dir(home).unwrap();
     }

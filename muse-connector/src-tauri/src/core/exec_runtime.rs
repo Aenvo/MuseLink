@@ -23,6 +23,7 @@ const JOB_RETENTION: Duration = Duration::from_secs(15 * 60);
 const APPROVAL_TTL: Duration = Duration::from_secs(120);
 const SESSION_TTL: Duration = Duration::from_secs(4 * 60 * 60);
 const MAX_STREAM_BYTES: usize = 128 * 1024;
+pub(crate) const MAX_STATUS_WAIT_MS: u64 = 25_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -153,6 +154,7 @@ struct JobRecord {
     updated_at: Instant,
     cancel_flag: Arc<AtomicBool>,
     done_signal: Arc<(Mutex<bool>, Condvar)>,
+    state_tx: tokio::sync::watch::Sender<u64>,
 }
 
 impl JobRecord {
@@ -231,6 +233,7 @@ impl State {
                 job.error = Some("approval timed out".into());
                 job.updated_at = now;
                 signal_done(&job.done_signal);
+                bump_state(&job.state_tx);
             }
         }
         if had_approvals && self.approvals.is_empty() {
@@ -273,6 +276,10 @@ fn signal_done(signal: &Arc<(Mutex<bool>, Condvar)>) {
         *done = true;
         cv.notify_all();
     }
+}
+
+fn bump_state(tx: &tokio::sync::watch::Sender<u64>) {
+    tx.send_modify(|seq| *seq = seq.wrapping_add(1));
 }
 
 pub(crate) struct ExecRuntime {
@@ -432,6 +439,7 @@ impl ExecRuntime {
                 job.error = Some(reason.to_owned());
                 job.updated_at = now;
                 signal_done(&job.done_signal);
+                bump_state(&job.state_tx);
             }
         }
         drop(state);
@@ -492,6 +500,7 @@ impl ExecRuntime {
         let job_id = format!("job_{}", &token::generate()[..20]);
         let done_signal = Arc::new((Mutex::new(false), Condvar::new()));
         let cancel_flag = Arc::new(AtomicBool::new(false));
+        let (state_tx, _) = tokio::sync::watch::channel(0u64);
 
         let needs_approval = {
             let mut state = self.state.lock().unwrap();
@@ -555,6 +564,7 @@ impl ExecRuntime {
                 updated_at: now,
                 cancel_flag,
                 done_signal,
+                state_tx,
             };
             let job_view = record.view();
             let audit_root = validated.root.clone();
@@ -608,6 +618,7 @@ impl ExecRuntime {
             updated_at: now,
             cancel_flag: cancel_flag.clone(),
             done_signal: done_signal.clone(),
+            state_tx,
         };
         {
             let mut state = self.state.lock().unwrap();
@@ -661,6 +672,7 @@ impl ExecRuntime {
                         job.error = Some("denied by user".into());
                         job.updated_at = now;
                         signal_done(&job.done_signal);
+                        bump_state(&job.state_tx);
                     }
                     (Some((pending, None)), remaining)
                 }
@@ -681,6 +693,7 @@ impl ExecRuntime {
                             job.error = Some("too many running commands".into());
                             job.updated_at = now;
                             signal_done(&job.done_signal);
+                            bump_state(&job.state_tx);
                         }
                         return Err("当前运行中的命令数量已达上限，请稍后重试".into());
                     }
@@ -689,6 +702,7 @@ impl ExecRuntime {
                         job.approval_id = None;
                         job.approval_expires = None;
                         job.updated_at = now;
+                        bump_state(&job.state_tx);
                         (job.cancel_flag.clone(), job.done_signal.clone())
                     });
                     (Some((pending, worker_ctx)), remaining)
@@ -734,14 +748,46 @@ impl ExecRuntime {
     }
 
     pub(crate) fn get_job(&self, job_id: &str) -> Option<ExecJobView> {
+        self.get_job_with_expiry(job_id).map(|(view, _)| view)
+    }
+
+    pub(crate) fn get_job_with_expiry(
+        &self,
+        job_id: &str,
+    ) -> Option<(ExecJobView, Option<Instant>)> {
         let mut state = self.state.lock().unwrap();
         let drained = state.prune_locked(Instant::now());
-        let view = state.jobs.get(job_id).map(JobRecord::view);
+        let result = state
+            .jobs
+            .get(job_id)
+            .map(|job| (job.view(), job.approval_expires));
         drop(state);
         if drained {
             self.notify(ApprovalEvent::Drained);
         }
-        view
+        result
+    }
+
+    pub(crate) fn subscribe_job(
+        &self,
+        job_id: &str,
+    ) -> Option<(
+        ExecJobView,
+        tokio::sync::watch::Receiver<u64>,
+        Option<Instant>,
+    )> {
+        let mut state = self.state.lock().unwrap();
+        let drained = state.prune_locked(Instant::now());
+        let result = state.jobs.get(job_id).map(|job| {
+            let mut rx = job.state_tx.subscribe();
+            let _ = rx.borrow_and_update();
+            (job.view(), rx, job.approval_expires)
+        });
+        drop(state);
+        if drained {
+            self.notify(ApprovalEvent::Drained);
+        }
+        result
     }
 
     pub(crate) fn cancel_job(&self, job_id: &str) -> Option<ExecJobView> {
@@ -761,12 +807,14 @@ impl ExecRuntime {
             job.error = Some("cancelled".into());
             job.updated_at = now;
             signal_done(&job.done_signal);
+            bump_state(&job.state_tx);
         } else if job.status == ExecJobStatus::Running {
             job.cancel_flag.store(true, Ordering::Release);
             job.status = ExecJobStatus::Cancelled;
             job.error = Some("cancelled".into());
             job.updated_at = now;
             signal_done(&job.done_signal);
+            bump_state(&job.state_tx);
         }
         let view = job.view();
         drop(guard);
@@ -869,6 +917,7 @@ impl ExecRuntime {
                     }
                     job.updated_at = Instant::now();
                     signal_done(&job.done_signal);
+                    bump_state(&job.state_tx);
                     (job.root.clone(), job.cwd_rel.clone())
                 } else {
                     signal_done(&done_signal);
@@ -1060,6 +1109,11 @@ fn run_process(
             }
         }
     }
+
+    // 主进程已退出或超时/取消：立即清理 Job Object 中的残留子进程树，
+    // 防止被后台孙进程继承的 stdout/stderr 管道写端保持打开导致读线程永久阻塞在 running。
+    proc.terminate();
+    drop(proc);
 
     let (stdout_bytes, out_trunc) = out_reader.join().unwrap_or_default();
     let (stderr_bytes, err_trunc) = err_reader.join().unwrap_or_default();

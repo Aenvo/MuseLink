@@ -2239,4 +2239,204 @@ mod tests {
         drop(controller);
         std::fs::remove_dir_all(home).unwrap();
     }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn agent_exec_long_poll_wakes_on_approval_denial_and_grandchild_exit() {
+        let profile = profile();
+        let home = profile.home.clone();
+        profile.initialize_development().unwrap();
+        let project = home.join("files/demo-longpoll");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        controller
+            .save_file_access(AccessPolicy {
+                mode: ScopeMode::Folders,
+                roots: [("work".into(), home.join("files"))].into(),
+                search: GrantScope::Folders,
+                read: GrantScope::Folders,
+                write: GrantScope::Folders,
+                ..AccessPolicy::default()
+            })
+            .await
+            .unwrap();
+        controller.set_agent_access(true).await.unwrap();
+        controller.set_exec_enabled(true).await.unwrap();
+        let agent_key = controller.access.agent_token().unwrap();
+        let port = controller.toggle(true).await.unwrap().api_port;
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(Duration::from_secs(20))
+            .build()
+            .unwrap();
+        let origin = format!("http://127.0.0.1:{port}");
+
+        // 1) 提交需审批命令（含继承管道的后台孙进程，验证长轮询实时唤醒且不会因孙进程卡死在 running）
+        let submit: Value = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-longpoll",
+                "mode": "cmd",
+                "command": "start /b cmd /c \"ping -n 30 127.0.0.1 >nul\" & echo longpoll-ok"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(submit["status"], "awaiting_approval");
+        let job_id = submit["job_id"].as_str().unwrap().to_owned();
+        let approval_id = controller.snapshot().pending_approvals[0].id.clone();
+
+        // 2) 短 wait_ms 未审批时应按时返回 awaiting_approval
+        let t0 = std::time::Instant::now();
+        let waiting: Value = client
+            .get(format!("{origin}/agent/v1/exec/{job_id}?wait_ms=150"))
+            .bearer_auth(&agent_key)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(waiting["status"], "awaiting_approval");
+        assert!(t0.elapsed() >= Duration::from_millis(120));
+
+        // 3) 发起长轮询（wait_ms=10000），150ms 后桌面端批准，应迅速一步返回 completed 且不被孙进程阻塞
+        let approver = controller.clone();
+        let aid = approval_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = approver.resolve_exec_approval(&aid, ApprovalDecision::AllowOnce);
+        });
+        let t1 = std::time::Instant::now();
+        let done: Value = client
+            .get(format!("{origin}/agent/v1/exec/{job_id}?wait_ms=10000"))
+            .bearer_auth(&agent_key)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(done["status"], "completed");
+        assert_eq!(done["exit_code"], 0);
+        assert!(
+            done["stdout"]
+                .as_str()
+                .unwrap_or("")
+                .contains("longpoll-ok")
+        );
+        assert!(
+            t1.elapsed() < Duration::from_secs(6),
+            "long poll or detached grandchild stalled: {:?}",
+            t1.elapsed()
+        );
+
+        // 4) 再提交一条审批命令，长轮询期间点击拒绝，应毫秒级立刻返回 denied
+        let submit2: Value = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-longpoll",
+                "mode": "cmd",
+                "command": "echo should-deny"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(submit2["status"], "awaiting_approval");
+        let job_id2 = submit2["job_id"].as_str().unwrap().to_owned();
+        let approval_id2 = controller.snapshot().pending_approvals[0].id.clone();
+
+        let denier = controller.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let _ = denier.resolve_exec_approval(&approval_id2, ApprovalDecision::Deny);
+        });
+        let t2 = std::time::Instant::now();
+        let denied: Value = client
+            .get(format!("{origin}/agent/v1/exec/{job_id2}?wait_ms=10000"))
+            .bearer_auth(&agent_key)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(denied["status"], "denied");
+        assert!(
+            t2.elapsed() < Duration::from_secs(3),
+            "long poll did not wake promptly on denial: {:?}",
+            t2.elapsed()
+        );
+
+        // 5) 并发长轮询（超过 control_jobs 4 槽位）不得阻塞其他接口，且令牌撤销后长轮询返回 401
+        let submit3: Value = client
+            .post(format!("{origin}/agent/v1/exec"))
+            .bearer_auth(&agent_key)
+            .json(&json!({
+                "root": "work",
+                "cwd": "demo-longpoll",
+                "mode": "cmd",
+                "command": "echo concurrent-and-revoke"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(submit3["status"], "awaiting_approval");
+        let job_id3 = submit3["job_id"].as_str().unwrap().to_owned();
+
+        let mut waiters = Vec::new();
+        for _ in 0..5 {
+            let c = client.clone();
+            let url = format!("{origin}/agent/v1/exec/{job_id3}?wait_ms=10000");
+            let key = agent_key.clone();
+            waiters.push(tokio::spawn(async move {
+                c.get(url).bearer_auth(&key).send().await.unwrap().status()
+            }));
+        }
+        tokio::time::sleep(Duration::from_millis(120)).await;
+
+        let roots_t0 = std::time::Instant::now();
+        let roots_resp = client
+            .get(format!("{origin}/agent/v1/roots"))
+            .bearer_auth(&agent_key)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(roots_resp.status(), 200);
+        assert!(
+            roots_t0.elapsed() < Duration::from_secs(2),
+            "long polling blocked /agent/v1/roots: {:?}",
+            roots_t0.elapsed()
+        );
+
+        // 撤销 Muse 专用令牌：会清空待审批并唤醒长轮询，唤醒后凭证复核返回 401
+        controller.set_agent_access(false).await.unwrap();
+        for waiter in waiters {
+            let code = tokio::time::timeout(Duration::from_secs(3), waiter)
+                .await
+                .expect("waiter should wake after token revoke")
+                .unwrap();
+            assert_eq!(code, 401);
+        }
+
+        controller.shutdown().await;
+        drop(controller);
+        std::fs::remove_dir_all(home).unwrap();
+    }
 }

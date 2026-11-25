@@ -272,6 +272,87 @@ fn open_local_folder(
         .map_err(|_| "无法打开本机配置文件夹".into())
 }
 #[tauri::command]
+fn open_logs_folder(
+    kind: Option<String>,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Services>,
+) -> Result<(), String> {
+    let preferred = if kind.as_deref() == Some("runtime") {
+        state.profile.home.join("server.log")
+    } else {
+        state.profile.home.join("audit.log")
+    };
+    if preferred.is_file() {
+        app.opener()
+            .reveal_item_in_dir(&preferred)
+            .map_err(|_| "无法定位日志文件".into())
+    } else {
+        app.opener()
+            .open_path(state.profile.home.to_string_lossy(), None::<&str>)
+            .map_err(|_| "无法打开日志目录".into())
+    }
+}
+#[tauri::command]
+async fn export_logs(
+    default_name: String,
+    format: String,
+    content: String,
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Services>,
+) -> Result<Option<String>, String> {
+    const MAX_EXPORT_BYTES: usize = 16 * 1024 * 1024;
+    if content.len() > MAX_EXPORT_BYTES {
+        return Err("导出内容过大，请缩小筛选范围后重试".into());
+    }
+    let (ext, filter_name) = match format.as_str() {
+        "jsonl" => ("jsonl", "JSON Lines (*.jsonl)"),
+        "csv" => ("csv", "CSV (*.csv)"),
+        _ => return Err("不支持的导出格式".into()),
+    };
+    let clean_name: String = default_name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+        .take(96)
+        .collect();
+    let file_name = if clean_name.is_empty() {
+        format!("muselink-logs.{ext}")
+    } else if clean_name
+        .to_ascii_lowercase()
+        .ends_with(&format!(".{ext}"))
+    {
+        clean_name
+    } else {
+        format!("{clean_name}.{ext}")
+    };
+    let language = state.desktop_state().language;
+    let redacted = state
+        .logs
+        .redact_text(&state.api.audit().redact_text(&content));
+    tauri::async_runtime::spawn_blocking(move || {
+        let picked = app
+            .dialog()
+            .file()
+            .set_title(language.text("导出日志", "Export logs"))
+            .set_file_name(&file_name)
+            .add_filter(filter_name, &[ext])
+            .blocking_save_file();
+        let Some(target) = picked else {
+            return Ok(None);
+        };
+        let mut path = target
+            .into_path()
+            .map_err(|_| "无法解析导出文件路径".to_string())?;
+        if path.extension().is_none() {
+            path.set_extension(ext);
+        }
+        std::fs::write(&path, redacted.as_bytes())
+            .map_err(|_| "写入导出文件失败，请检查目标目录权限".to_string())?;
+        Ok(Some(path.to_string_lossy().into_owned()))
+    })
+    .await
+    .map_err(|_| "导出日志任务未完成".to_string())?
+}
+#[tauri::command]
 async fn check_legacy(state: tauri::State<'_, Services>) -> Result<legacy::LegacyState, String> {
     let profile = state.profile.clone();
     tauri::async_runtime::spawn_blocking(move || legacy::check_legacy(&profile))
@@ -672,6 +753,7 @@ pub fn run() {
     }
     let controller = ServiceController::open(profile);
     let desktop = controller.desktop_state();
+    let fresh_setup = controller.snapshot().fresh_setup;
     if let Some(window) = context
         .config_mut()
         .app
@@ -680,7 +762,7 @@ pub fn run() {
         .find(|w| w.label == "main")
     {
         window.title = controller.profile.window_title(desktop.language);
-        if desktop.start_minimized {
+        if desktop.start_minimized && !fresh_setup && !controller.profile.onboarding_qa {
             window.create = false;
         }
     }
@@ -827,6 +909,8 @@ pub fn run() {
             set_autostart,
             pick_directory,
             open_local_folder,
+            open_logs_folder,
+            export_logs,
             check_legacy,
             takeover_legacy,
             restore_legacy,

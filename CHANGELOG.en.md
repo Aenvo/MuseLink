@@ -4,6 +4,18 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
+## [v0.2.1] - 2026-11-25
+
+### Improvements & Added
+- **Real-time long-polling for command approvals and execution status**: `GET /agent/v1/exec/{job_id}` now supports an optional `?wait_ms=` query parameter (defaults to `0` for full compatibility, capped at `25000` ms, recommended `20000` ms). Waiting runs asynchronously without holding request slots or access locks, waking immediately when you click **Allow** or **Deny**, when approval expires, or when the job finishes—no need to reply in chat after approving on Windows.
+- **Updated Muse connection instructions (Prompt)**: Updated both English and Chinese connector instructions so Muse keeps polling `GET /agent/v1/exec/<job_id>?wait_ms=20000` continuously until a terminal state instead of stopping for a manual reply, with clear handling for `expired` / `denied` and bounded polling caps (existing users can re-copy and send the updated instructions to Muse).
+- **Prevent stale clicks at approval expiry**: Disables approval dialog buttons once the countdown reaches 0 seconds.
+- **Filterable log export & log folder shortcut**: Added an **Export logs** dialog and **Open log folder** button to the Logs page. Filter by log scope (All / Files / Command execution / All access / Runtime), result, time range, and keyword, then export chronologically as `JSONL` or `CSV` (with UTF-8 BOM and redundant token redaction) through the native save dialog, or jump straight to the rotated 10 MiB log files on disk.
+- **Start in system tray enabled by default**: New profiles default to **Settings → Start in the system tray** enabled (the main window still opens normally during first-time setup).
+
+### Fixes
+- **Fixed jobs hanging in `running` when a detached grandchild holds stdio pipes**: Terminates and drops the per-job Windows `JobObject` right after the primary command exits and before joining the stdout/stderr reader threads, preventing inherited pipe write handles from blocking EOF indefinitely.
+
 ## [v0.2.0] - 2026-11-25
 
 ### Added
