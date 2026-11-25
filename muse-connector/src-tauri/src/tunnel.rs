@@ -153,7 +153,7 @@ pub struct TunnelManager {
     child_output: Arc<RwLock<Option<String>>>,
     output_task: Option<tokio::task::JoinHandle<()>>,
     #[cfg(windows)]
-    child_job: Option<ChildJob>,
+    child_job: Option<crate::core::job::ChildJob>,
     owned: bool,
     port: u16,
     current: ProviderSettings,
@@ -236,7 +236,7 @@ impl TunnelManager {
                 #[cfg(windows)]
                 {
                     self.child_job = Some(
-                        ChildJob::attach(&child)
+                        crate::core::job::ChildJob::attach_tokio(&child)
                             .map_err(|_| "无法建立隧道子进程退出保护，已取消启动")?,
                     );
                 }
@@ -383,43 +383,6 @@ pub(crate) async fn observe_tailscale(port: u16) -> Result<TunnelObservation, St
     })
 }
 
-// The job contains only our own spawned tunnel. Windows closes it on a GUI crash.
-#[cfg(windows)]
-struct ChildJob {
-    _handle: std::os::windows::io::OwnedHandle,
-}
-#[cfg(windows)]
-impl ChildJob {
-    fn attach(child: &Child) -> std::io::Result<Self> {
-        use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
-        use windows_sys::Win32::System::JobObjects::*;
-        let process = child
-            .raw_handle()
-            .ok_or_else(|| std::io::Error::other("child already exited"))?;
-        // SAFETY: null attributes/name create an unnamed, non-inheritable job. OwnedHandle
-        // owns that valid handle; the limit structure lives through the synchronous call.
-        unsafe {
-            let raw = CreateJobObjectW(std::ptr::null(), std::ptr::null());
-            if raw.is_null() {
-                return Err(std::io::Error::last_os_error());
-            }
-            let handle = OwnedHandle::from_raw_handle(raw);
-            let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
-            info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-            if SetInformationJobObject(
-                handle.as_raw_handle(),
-                JobObjectExtendedLimitInformation,
-                &info as *const _ as *const _,
-                std::mem::size_of_val(&info) as u32,
-            ) == 0
-                || AssignProcessToJobObject(handle.as_raw_handle(), process) == 0
-            {
-                return Err(std::io::Error::last_os_error());
-            }
-            Ok(Self { _handle: handle })
-        }
-    }
-}
 pub fn validate_provider(settings: &ProviderSettings) -> Result<(), String> {
     if settings.kind == ProviderKind::CloudflareNamed {
         if settings.tunnel_id.is_empty()
@@ -529,7 +492,7 @@ mod tests {
             .stdout(std::process::Stdio::null())
             .spawn()
             .unwrap();
-        let job = ChildJob::attach(&child).unwrap();
+        let job = crate::core::job::ChildJob::attach_tokio(&child).unwrap();
         assert!(child.try_wait().unwrap().is_none());
         drop(job);
         // Windows may use exit code 0 when closing a kill-on-close job.

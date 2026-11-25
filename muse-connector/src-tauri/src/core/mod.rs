@@ -7,6 +7,8 @@ pub mod config;
 mod everything;
 mod handle;
 mod index_storage;
+#[cfg(windows)]
+pub(crate) mod job;
 pub mod path_guard;
 pub mod search;
 pub mod storage;

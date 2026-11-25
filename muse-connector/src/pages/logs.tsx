@@ -17,7 +17,18 @@ import { Notice } from "@/components/feedback";
 import { formatTime, type BridgeModel, type LogRecord, type LogBatch } from "@/lib/use-bridge";
 type LogKind = "audit" | "runtime";
 type LogScope = "files" | "audit" | "runtime";
-const fileEndpoints = new Set(["/api/list", "/api/read", "/api/write", "/api/mkdir"]);
+const fileEndpoints = new Set([
+  "/api/list",
+  "/api/read",
+  "/api/write",
+  "/api/mkdir",
+  "/agent/v1/list",
+  "/agent/v1/read",
+  "/agent/v1/write",
+  "/agent/v1/mkdir",
+  "/agent/v1/search",
+  "/agent/v1/locations/desktop",
+]);
 const kinds = ["audit", "runtime"] as const;
 const logLimit = 1000;
 const clock = { en: logClock("en"), "zh-CN": logClock("zh-CN") };

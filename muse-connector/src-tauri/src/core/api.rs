@@ -1578,11 +1578,18 @@ mod tests {
     static NONCE: AtomicU64 = AtomicU64::new(0);
 
     struct Env {
+        dir: PathBuf,
         app: Router,
         state: ApiState,
         root: PathBuf,
         token: String,
         token_path: PathBuf,
+    }
+
+    impl Drop for Env {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 
     fn setup(read_only: bool, options: ApiOptions) -> Env {
@@ -1613,6 +1620,7 @@ mod tests {
         let (state, _rx) = ApiState::new(cfg, tok.clone(), paths, options);
         let app = router(state.clone());
         Env {
+            dir,
             app,
             state,
             root,
