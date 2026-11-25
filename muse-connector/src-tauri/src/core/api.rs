@@ -1058,7 +1058,7 @@ async fn agent_exec_submit(State(state): State<ApiState>, request: Request) -> R
         return post_failure(&state, &parts, 403, "command execution unavailable", true).await;
     };
     let Some(exec) = state.inner.exec.get().cloned() else {
-        return post_failure(&state, &parts, 403, "command execution is disabled", true).await;
+        return post_failure(&state, &parts, 403, "exec_disabled", true).await;
     };
     let client = client_of(&parts);
     blocking_response(state.inner.file_jobs.clone(), move || {
@@ -1079,7 +1079,7 @@ async fn agent_exec_submit(State(state): State<ApiState>, request: Request) -> R
                 &state,
                 &parts,
                 403,
-                json!({"error": "command execution is disabled"}),
+                json!({"error": "exec_disabled", "message": "command execution is disabled"}),
                 true,
                 None,
                 None,
@@ -1136,7 +1136,7 @@ async fn agent_exec_status(
                 &state,
                 &parts,
                 403,
-                json!({"error": "command execution is disabled"}),
+                json!({"error": "exec_disabled", "message": "command execution is disabled"}),
                 true,
                 None,
                 None,
@@ -1186,7 +1186,7 @@ async fn agent_exec_cancel(
                 &state,
                 &parts,
                 403,
-                json!({"error": "command execution is disabled"}),
+                json!({"error": "exec_disabled", "message": "command execution is disabled"}),
                 true,
                 None,
                 None,

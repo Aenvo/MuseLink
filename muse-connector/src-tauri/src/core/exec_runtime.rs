@@ -557,6 +557,8 @@ impl ExecRuntime {
                 done_signal,
             };
             let job_view = record.view();
+            let audit_root = validated.root.clone();
+            let audit_cwd = validated.cwd_rel.clone();
             {
                 let mut state = self.state.lock().unwrap();
                 state.jobs.insert(job_id.clone(), record);
@@ -574,9 +576,12 @@ impl ExecRuntime {
             self.audit_exec(
                 client,
                 "/agent/v1/exec",
-                &job_view.job_id,
-                "",
-                &format!("awaiting_approval: {}", verdict.display_command),
+                &audit_root,
+                &audit_cwd,
+                &format!(
+                    "awaiting_approval ({}): {}",
+                    job_view.job_id, verdict.display_command
+                ),
                 202,
             );
             self.notify(ApprovalEvent::Requested);
@@ -979,18 +984,48 @@ fn run_process(
         }
     };
 
-    let mut proc = spawn(&SpawnConfig {
-        application,
-        command_line,
-        cwd: workspace_dir.to_path_buf(),
-        temp_dir: job_temp.to_path_buf(),
-        sandboxed: !req.unsandboxed,
-        limits: JobLimits {
-            memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
-            max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+    if cancel.load(Ordering::Acquire) {
+        return Ok(ProcessOutcome {
+            exit_code: None,
+            stdout: String::new(),
+            stderr: String::new(),
+            truncated: false,
+            timed_out: false,
+            cancelled: true,
+            display_cmd,
+        });
+    }
+
+    let write_workspace = !super::exec_policy::is_read_only_direct(req);
+    let mut proc = match spawn(
+        &SpawnConfig {
+            application,
+            command_line,
+            cwd: workspace_dir.to_path_buf(),
+            temp_dir: job_temp.to_path_buf(),
+            sandboxed: !req.unsandboxed,
+            write_workspace,
+            limits: JobLimits {
+                memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
+                max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+            },
         },
-    })
-    .map_err(|e| format!("failed to launch sandboxed command: {e}"))?;
+        Some(cancel),
+    ) {
+        Ok(proc) => proc,
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted || cancel.load(Ordering::Acquire) => {
+            return Ok(ProcessOutcome {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+                timed_out: false,
+                cancelled: true,
+                display_cmd,
+            });
+        }
+        Err(e) => return Err(format!("failed to launch sandboxed command: {e}")),
+    };
 
     let (mut stdout_file, mut stderr_file) = proc
         .take_pipes()

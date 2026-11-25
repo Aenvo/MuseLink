@@ -2,35 +2,43 @@
 //! 沙箱初始化失败直接返回错误，绝不静默降级为无隔离裸跑。
 #![cfg(windows)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::MetadataExt;
 use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::ptr::{null, null_mut};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_SUCCESS, GENERIC_ALL, GetLastError, HANDLE, HANDLE_FLAG_INHERIT, HLOCAL,
-    INVALID_HANDLE_VALUE, LocalFree, STILL_ACTIVE, SetHandleInformation, WAIT_OBJECT_0,
+    CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, GENERIC_ALL, GetLastError, HANDLE,
+    HANDLE_FLAG_INHERIT, HLOCAL, INVALID_HANDLE_VALUE, LocalFree, STILL_ACTIVE,
+    SetHandleInformation, WAIT_OBJECT_0,
 };
 use windows_sys::Win32::Security::Authorization::{
-    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, SE_FILE_OBJECT,
-    SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
+    ConvertStringSidToSidW, EXPLICIT_ACCESS_W, GRANT_ACCESS, SetEntriesInAclW, TRUSTEE_IS_SID,
+    TRUSTEE_IS_UNKNOWN, TRUSTEE_W,
 };
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_SIZE_INFORMATION, AclSizeInformation, CreateRestrictedToken,
     DACL_SECURITY_INFORMATION, DISABLE_MAX_PRIVILEGE, EqualSid, GetAce, GetAclInformation,
-    GetTokenInformation, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES, SID_AND_ATTRIBUTES,
+    GetKernelObjectSecurity, GetSecurityDescriptorDacl, GetTokenInformation,
+    InitializeSecurityDescriptor, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    SECURITY_DESCRIPTOR, SID_AND_ATTRIBUTES, SetKernelObjectSecurity, SetSecurityDescriptorDacl,
     SetTokenInformation, TOKEN_ADJUST_DEFAULT, TOKEN_ASSIGN_PRIMARY, TOKEN_DEFAULT_DACL,
     TOKEN_DUPLICATE, TOKEN_GROUPS, TOKEN_QUERY, TokenDefaultDacl, TokenGroups, TokenLogonSid,
     WRITE_RESTRICTED,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD,
-    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_READ, FILE_SHARE_WRITE,
-    OPEN_EXISTING,
+    CreateFileW, DELETE, FILE_ALL_ACCESS, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+    FILE_DELETE_CHILD, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_GENERIC_EXECUTE, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_EXISTING, READ_CONTROL, WRITE_DAC,
 };
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
@@ -57,6 +65,11 @@ const SANDBOX_WRITE_MASK: u32 =
 
 pub(crate) const DEFAULT_EXEC_MEMORY_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) const DEFAULT_EXEC_MAX_PROCESSES: u32 = 64;
+const SECURITY_DESCRIPTOR_REVISION: u32 = 1;
+const MAX_ACL_PREP_TIME: Duration = Duration::from_millis(800);
+const MAX_ACL_PREP_ENTRIES: usize = 1_500;
+
+static ACL_PREP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) struct SpawnConfig {
     pub(crate) application: PathBuf,
@@ -64,6 +77,7 @@ pub(crate) struct SpawnConfig {
     pub(crate) cwd: PathBuf,
     pub(crate) temp_dir: PathBuf,
     pub(crate) sandboxed: bool,
+    pub(crate) write_workspace: bool,
     pub(crate) limits: JobLimits,
 }
 
@@ -144,16 +158,24 @@ impl Drop for LocalSid {
     }
 }
 
-pub(crate) fn spawn(config: &SpawnConfig) -> io::Result<SpawnedProcess> {
+pub(crate) fn spawn(
+    config: &SpawnConfig,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<SpawnedProcess> {
     std::fs::create_dir_all(&config.temp_dir)?;
     let sandbox_sid = if config.sandboxed {
         let sid = LocalSid::sandbox()?;
-        ensure_sandbox_write_access(&config.cwd, sid.0)?;
-        ensure_sandbox_write_access(&config.temp_dir, sid.0)?;
+        if config.write_workspace {
+            ensure_sandbox_write_access(&config.cwd, sid.0, cancel)?;
+        }
+        apply_sandbox_ace_single(&config.temp_dir, sid.0, true)?;
         Some(sid)
     } else {
         None
     };
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
 
     let (stdout_read, stdout_write) = create_pipe_pair()?;
     let (stderr_read, stderr_write) = create_pipe_pair()?;
@@ -450,39 +472,182 @@ fn read_logon_sid(token: HANDLE) -> (Vec<u8>, Option<PSID>) {
     (Vec::new(), None)
 }
 
-/// 幂等检查并为目标目录授予沙箱 SID 的可继承读写删除权限，避免重复递归刷 ACL。
-fn ensure_sandbox_write_access(dir: &Path, sid: PSID) -> io::Result<()> {
-    let mut wide = to_wide(&strip_verbatim(dir));
-    let mut old_dacl: *mut ACL = null_mut();
-    let mut sd: PSECURITY_DESCRIPTOR = null_mut();
-    let status = unsafe {
-        GetNamedSecurityInfoW(
-            wide.as_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
-            null_mut(),
-            &mut old_dacl,
-            null_mut(),
-            &mut sd,
-        )
-    };
-    if status != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(status as i32));
+/// 非递归授予目录及（有界/可取消的）浅层项目文件沙箱写权限。
+/// 使用 SetKernelObjectSecurity 避免 SetNamedSecurityInfoW 在含 node_modules/桌面等大目录上同步递归阻塞数分钟。
+fn ensure_sandbox_write_access(
+    dir: &Path,
+    sid: PSID,
+    cancel: Option<&AtomicBool>,
+) -> io::Result<()> {
+    if check_sandbox_ace_single(dir, sid, true)? {
+        return Ok(());
+    }
+    let _guard = ACL_PREP_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+    if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+        return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+    }
+    if check_sandbox_ace_single(dir, sid, true)? {
+        return Ok(());
     }
 
-    let already_granted = unsafe { dacl_grants_sandbox_sid(old_dacl, sid) };
-    if already_granted {
-        if !sd.is_null() {
-            unsafe { LocalFree(sd as HLOCAL) };
+    // 1) 先以非递归方式给目标目录本身加上可继承 (OI)(CI) ACE（<1ms），新建文件与子目录即刻生效。
+    apply_sandbox_ace_single(dir, sid, true)?;
+
+    // 2) 在时间与条目预算内按层补齐现有项目子项的 ACE（跳过重解析点与巨型依赖/缓存目录），随时响应取消。
+    let deadline = Instant::now() + MAX_ACL_PREP_TIME;
+    let mut visited = 0usize;
+    let mut queue = VecDeque::new();
+    queue.push_back(dir.to_path_buf());
+
+    while let Some(current) = queue.pop_front() {
+        if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+            return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
         }
+        if visited >= MAX_ACL_PREP_ENTRIES || Instant::now() >= deadline {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&current) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if cancel.is_some_and(|c| c.load(Ordering::Acquire)) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "cancelled"));
+            }
+            if visited >= MAX_ACL_PREP_ENTRIES || Instant::now() >= deadline {
+                break;
+            }
+            let path = entry.path();
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            // 绝不跟随符号链接/联接点/重解析点
+            if (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
+                continue;
+            }
+            let is_dir = meta.is_dir();
+            if is_dir && is_heavy_skip_dir(&entry.file_name()) {
+                continue;
+            }
+            visited += 1;
+            let _ = apply_sandbox_ace_single(&path, sid, is_dir);
+            if is_dir {
+                queue.push_back(path);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn is_heavy_skip_dir(name: &OsStr) -> bool {
+    let Some(s) = name.to_str() else {
+        return false;
+    };
+    matches!(
+        s.to_ascii_lowercase().as_str(),
+        "node_modules"
+            | ".pnpm-store"
+            | ".venv"
+            | "venv"
+            | "__pycache__"
+            | ".cache"
+            | "appdata"
+            | "$recycle.bin"
+            | "system volume information"
+    )
+}
+
+fn open_for_acl(path: &Path, write: bool) -> io::Result<OwnedHandle> {
+    let wide = to_wide(&strip_verbatim(path));
+    let access = if write {
+        READ_CONTROL | WRITE_DAC
+    } else {
+        READ_CONTROL
+    };
+    let handle = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            access,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE || handle.is_null() {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(unsafe { OwnedHandle::from_raw_handle(handle) })
+}
+
+fn read_handle_dacl(handle: HANDLE) -> io::Result<(Vec<u8>, *mut ACL)> {
+    let mut needed: u32 = 0;
+    let ok = unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION,
+            null_mut(),
+            0,
+            &mut needed,
+        )
+    };
+    if ok == 0 {
+        let err = unsafe { GetLastError() };
+        if err != ERROR_INSUFFICIENT_BUFFER {
+            return Err(io::Error::from_raw_os_error(err as i32));
+        }
+    }
+    let mut sd_buf = vec![0u8; needed.max(1) as usize];
+    if unsafe {
+        GetKernelObjectSecurity(
+            handle,
+            DACL_SECURITY_INFORMATION,
+            sd_buf.as_mut_ptr().cast(),
+            sd_buf.len() as u32,
+            &mut needed,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    let mut dacl_present: i32 = 0;
+    let mut dacl_defaulted: i32 = 0;
+    let mut dacl: *mut ACL = null_mut();
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            sd_buf.as_mut_ptr().cast(),
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok((sd_buf, if dacl_present != 0 { dacl } else { null_mut() }))
+}
+
+fn check_sandbox_ace_single(path: &Path, sid: PSID, require_inherit: bool) -> io::Result<bool> {
+    let handle = open_for_acl(path, false)?;
+    let (_buf, dacl) = read_handle_dacl(handle.as_raw_handle())?;
+    Ok(unsafe { dacl_grants_sandbox_sid(dacl, sid, require_inherit) })
+}
+
+fn apply_sandbox_ace_single(path: &Path, sid: PSID, is_dir: bool) -> io::Result<()> {
+    let handle = open_for_acl(path, true)?;
+    let (_sd_buf, old_dacl) = read_handle_dacl(handle.as_raw_handle())?;
+    if unsafe { dacl_grants_sandbox_sid(old_dacl, sid, is_dir) } {
         return Ok(());
     }
 
     let ea = EXPLICIT_ACCESS_W {
         grfAccessPermissions: SANDBOX_WRITE_MASK,
         grfAccessMode: GRANT_ACCESS,
-        grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT_FLAG,
+        grfInheritance: if is_dir {
+            SUB_CONTAINERS_AND_OBJECTS_INHERIT_FLAG
+        } else {
+            0
+        },
         Trustee: TRUSTEE_W {
             pMultipleTrustee: null_mut(),
             MultipleTrusteeOperation: 0,
@@ -494,36 +659,31 @@ fn ensure_sandbox_write_access(dir: &Path, sid: PSID) -> io::Result<()> {
     let mut new_dacl: *mut ACL = null_mut();
     let set_acl_status = unsafe { SetEntriesInAclW(1, &ea, old_dacl, &mut new_dacl) };
     if set_acl_status != ERROR_SUCCESS {
-        if !sd.is_null() {
-            unsafe { LocalFree(sd as HLOCAL) };
-        }
         return Err(io::Error::from_raw_os_error(set_acl_status as i32));
     }
 
-    let apply_status = unsafe {
-        SetNamedSecurityInfoW(
-            wide.as_mut_ptr(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION,
-            null_mut(),
-            null_mut(),
-            new_dacl,
-            null_mut(),
-        )
+    let mut sd: SECURITY_DESCRIPTOR = unsafe { std::mem::zeroed() };
+    let sd_ptr: PSECURITY_DESCRIPTOR = (&mut sd as *mut SECURITY_DESCRIPTOR).cast();
+    let apply_res = unsafe {
+        if InitializeSecurityDescriptor(sd_ptr, SECURITY_DESCRIPTOR_REVISION) == 0 {
+            Err(io::Error::last_os_error())
+        } else if SetSecurityDescriptorDacl(sd_ptr, 1, new_dacl, 0) == 0 {
+            Err(io::Error::last_os_error())
+        } else if SetKernelObjectSecurity(handle.as_raw_handle(), DACL_SECURITY_INFORMATION, sd_ptr)
+            == 0
+        {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
     };
     if !new_dacl.is_null() {
         unsafe { LocalFree(new_dacl as HLOCAL) };
     }
-    if !sd.is_null() {
-        unsafe { LocalFree(sd as HLOCAL) };
-    }
-    if apply_status != ERROR_SUCCESS {
-        return Err(io::Error::from_raw_os_error(apply_status as i32));
-    }
-    Ok(())
+    apply_res
 }
 
-unsafe fn dacl_grants_sandbox_sid(dacl: *const ACL, sid: PSID) -> bool {
+unsafe fn dacl_grants_sandbox_sid(dacl: *const ACL, sid: PSID, require_inherit: bool) -> bool {
     if dacl.is_null() {
         return false;
     }
@@ -549,11 +709,13 @@ unsafe fn dacl_grants_sandbox_sid(dacl: *const ACL, sid: PSID) -> bool {
         if ace.Header.AceType != 0 {
             continue;
         }
-        let inherit = u32::from(ace.Header.AceFlags);
-        if inherit & SUB_CONTAINERS_AND_OBJECTS_INHERIT_FLAG
-            != SUB_CONTAINERS_AND_OBJECTS_INHERIT_FLAG
-        {
-            continue;
+        if require_inherit {
+            let inherit = u32::from(ace.Header.AceFlags);
+            if inherit & SUB_CONTAINERS_AND_OBJECTS_INHERIT_FLAG
+                != SUB_CONTAINERS_AND_OBJECTS_INHERIT_FLAG
+            {
+                continue;
+            }
         }
         let mask = ace.Mask;
         let has_write = (mask & FILE_ALL_ACCESS) == FILE_ALL_ACCESS
@@ -755,38 +917,76 @@ mod tests {
     use super::*;
     use std::io::Read;
 
+    struct Cleanup(PathBuf);
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
     fn write_restricted_sandbox_allows_workspace_and_blocks_outside_writes() {
         let base = std::env::temp_dir().join(format!(
             "muse-sandbox-test-{}",
             super::super::token::generate()
         ));
+        let _cleanup = Cleanup(base.clone());
         let workspace = base.join("workspace");
+        let nested = workspace.join("sub");
         let outside = base.join("outside");
         let temp_dir = base.join("job-tmp");
-        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::create_dir_all(&nested).unwrap();
         std::fs::create_dir_all(&outside).unwrap();
+        let existing_file = nested.join("existing.txt");
+        std::fs::write(&existing_file, "before\n").unwrap();
 
         let cmd_exe = system_executable(r"System32\cmd.exe").unwrap();
         let outside_file = outside.join("escape.txt");
         let inside_file = workspace.join("ok.txt");
 
-        // 1) 在写受限沙箱内写入工作区：必须成功
-        let inside_proc = spawn(&SpawnConfig {
-            application: cmd_exe.clone(),
-            command_line: format!(
-                "{} /d /s /c \"echo hello-sandbox> {}\"",
-                quote_windows_arg(&strip_verbatim(&cmd_exe)),
-                quote_windows_arg(&strip_verbatim(&inside_file))
-            ),
-            cwd: workspace.clone(),
-            temp_dir: temp_dir.clone(),
-            sandboxed: true,
-            limits: JobLimits {
-                memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
-                max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+        // 0) 只读快路径：无需触碰工作区 ACL 即可直接运行
+        let ro_proc = spawn(
+            &SpawnConfig {
+                application: cmd_exe.clone(),
+                command_line: format!(
+                    "{} /d /s /c \"echo fast-ro\"",
+                    quote_windows_arg(&strip_verbatim(&cmd_exe)),
+                ),
+                cwd: workspace.clone(),
+                temp_dir: temp_dir.clone(),
+                sandboxed: true,
+                write_workspace: false,
+                limits: JobLimits {
+                    memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
+                    max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+                },
             },
-        })
+            None,
+        )
+        .unwrap();
+        assert_eq!(ro_proc.wait_timeout(10_000).unwrap().unwrap(), 0);
+
+        // 1) 在写受限沙箱内新建与修改工作区已有文件：必须成功
+        let inside_proc = spawn(
+            &SpawnConfig {
+                application: cmd_exe.clone(),
+                command_line: format!(
+                    "{} /d /s /c \"echo hello-sandbox> {} && echo after>> {}\"",
+                    quote_windows_arg(&strip_verbatim(&cmd_exe)),
+                    quote_windows_arg(&strip_verbatim(&inside_file)),
+                    quote_windows_arg(&strip_verbatim(&existing_file)),
+                ),
+                cwd: workspace.clone(),
+                temp_dir: temp_dir.clone(),
+                sandboxed: true,
+                write_workspace: true,
+                limits: JobLimits {
+                    memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
+                    max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+                },
+            },
+            None,
+        )
         .unwrap();
         let code = inside_proc.wait_timeout(10_000).unwrap().unwrap();
         assert_eq!(code, 0);
@@ -795,23 +995,32 @@ mod tests {
                 .unwrap()
                 .contains("hello-sandbox")
         );
+        assert!(
+            std::fs::read_to_string(&existing_file)
+                .unwrap()
+                .contains("after")
+        );
 
         // 2) 在写受限沙箱内尝试通过 cmd.exe 写入工作区外部：必须被 Windows 内核拒绝
-        let mut outside_proc = spawn(&SpawnConfig {
-            application: cmd_exe.clone(),
-            command_line: format!(
-                "{} /d /s /c \"echo pwn> {}\"",
-                quote_windows_arg(&strip_verbatim(&cmd_exe)),
-                quote_windows_arg(&strip_verbatim(&outside_file))
-            ),
-            cwd: workspace.clone(),
-            temp_dir: temp_dir.clone(),
-            sandboxed: true,
-            limits: JobLimits {
-                memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
-                max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+        let mut outside_proc = spawn(
+            &SpawnConfig {
+                application: cmd_exe.clone(),
+                command_line: format!(
+                    "{} /d /s /c \"echo pwn> {}\"",
+                    quote_windows_arg(&strip_verbatim(&cmd_exe)),
+                    quote_windows_arg(&strip_verbatim(&outside_file))
+                ),
+                cwd: workspace.clone(),
+                temp_dir: temp_dir.clone(),
+                sandboxed: true,
+                write_workspace: true,
+                limits: JobLimits {
+                    memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
+                    max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+                },
             },
-        })
+            None,
+        )
         .unwrap();
         let code = outside_proc.wait_timeout(10_000).unwrap().unwrap();
         let mut err_buf = String::new();
@@ -831,25 +1040,29 @@ mod tests {
                 "Set-Content -LiteralPath '{}' -Value 'pwn' -ErrorAction Stop",
                 strip_verbatim(&ps_outside).replace('\'', "''")
             );
-            let ps_proc = spawn(&SpawnConfig {
-                application: ps_exe.clone(),
-                command_line: build_windows_cmdline(
-                    &strip_verbatim(&ps_exe),
-                    &[
-                        "-NoProfile".into(),
-                        "-NonInteractive".into(),
-                        "-Command".into(),
-                        ps_cmd,
-                    ],
-                ),
-                cwd: workspace.clone(),
-                temp_dir: temp_dir.clone(),
-                sandboxed: true,
-                limits: JobLimits {
-                    memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
-                    max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+            let ps_proc = spawn(
+                &SpawnConfig {
+                    application: ps_exe.clone(),
+                    command_line: build_windows_cmdline(
+                        &strip_verbatim(&ps_exe),
+                        &[
+                            "-NoProfile".into(),
+                            "-NonInteractive".into(),
+                            "-Command".into(),
+                            ps_cmd,
+                        ],
+                    ),
+                    cwd: workspace.clone(),
+                    temp_dir: temp_dir.clone(),
+                    sandboxed: true,
+                    write_workspace: true,
+                    limits: JobLimits {
+                        memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
+                        max_processes: Some(DEFAULT_EXEC_MAX_PROCESSES),
+                    },
                 },
-            })
+                None,
+            )
             .unwrap();
             let ps_code = ps_proc.wait_timeout(15_000).unwrap().unwrap();
             assert_ne!(ps_code, 0, "expected powershell outside write to fail");
@@ -858,7 +1071,5 @@ mod tests {
                 "sandboxed powershell.exe escaped workspace write boundary!"
             );
         }
-
-        let _ = std::fs::remove_dir_all(&base);
     }
 }

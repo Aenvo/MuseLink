@@ -222,6 +222,48 @@ pub(crate) fn evaluate(req: &ValidatedExec, sensitive_workspace: bool) -> Policy
     }
 }
 
+/// 纯只读直调命令无需向工作目录写 ACL，仅授予隔离临时目录写权限即可秒级启动。
+pub(crate) fn is_read_only_direct(req: &ValidatedExec) -> bool {
+    if req.mode != ExecMode::Direct {
+        return false;
+    }
+    let name = normalized_program(&req.program);
+    let args_lower: Vec<String> = req.args.iter().map(|a| a.to_ascii_lowercase()).collect();
+    if args_lower.len() == 1
+        && matches!(
+            args_lower[0].as_str(),
+            "--version" | "-v" | "-V" | "version"
+        )
+    {
+        return true;
+    }
+    match name.as_str() {
+        "where" | "whoami" | "rg" | "fd" => true,
+        "git" => {
+            let sub = args_lower
+                .iter()
+                .find(|a| !a.starts_with('-'))
+                .map(String::as_str)
+                .unwrap_or("");
+            match sub {
+                "status" | "diff" | "log" | "show" | "rev-parse" | "ls-files" | "describe"
+                | "blame" | "grep" | "shortlog" | "reflog" | "merge-base" => true,
+                "branch" => !args_lower.iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "-d" | "-D" | "--delete" | "-m" | "-M" | "-c" | "-C"
+                    )
+                }),
+                "remote" => !args_lower
+                    .iter()
+                    .any(|a| matches!(a.as_str(), "add" | "remove" | "rm" | "set-url")),
+                _ => false,
+            }
+        }
+        _ => false,
+    }
+}
+
 fn max_tier(a: RiskTier, b: RiskTier) -> RiskTier {
     match (a, b) {
         (RiskTier::Always, _) | (_, RiskTier::Always) => RiskTier::Always,

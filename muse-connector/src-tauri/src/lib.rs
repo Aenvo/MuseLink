@@ -698,6 +698,7 @@ pub fn run() {
         ))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.set_always_on_top(false);
                 if window.hide().is_ok() {
                     let _ = window.emit("desktop-visibility", false);
                 }
@@ -743,10 +744,12 @@ pub fn run() {
                 let handle = app.handle().clone();
                 let events = startup.clone();
                 let auto_shown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let approval_topmost = Arc::new(std::sync::atomic::AtomicBool::new(false));
                 startup.attach_approval_notifier(Arc::new(move |event| {
                     let main_handle = handle.clone();
                     let events = events.clone();
                     let auto_shown = auto_shown.clone();
+                    let approval_topmost = approval_topmost.clone();
                     let _ = handle.run_on_main_thread(move || {
                         let visible = main_handle
                             .get_webview_window("main")
@@ -757,14 +760,24 @@ pub fn run() {
                                 if !visible {
                                     auto_shown.store(true, Ordering::Release);
                                 }
-                                tray::show_main(&main_handle);
-                                if let Some(window) = main_handle.get_webview_window("main") {
+                                if let Ok(window) = tray::open_main(&main_handle) {
+                                    // Windows 后台窗口调用 SetForegroundWindow 会被系统拦截，临时置顶才能立即弹出到当前视口上方
+                                    let _ = window.set_always_on_top(true);
+                                    approval_topmost.store(true, Ordering::Release);
+                                    let _ = window.request_user_attention(Some(
+                                        tauri::UserAttentionType::Critical,
+                                    ));
+                                    let _ = window.set_focus();
                                     let _ = window.emit("bridge-snapshot", events.snapshot());
                                 }
                             }
                             ApprovalEvent::Drained => {
                                 if let Some(window) = main_handle.get_webview_window("main") {
                                     let _ = window.emit("bridge-snapshot", events.snapshot());
+                                    if approval_topmost.swap(false, Ordering::AcqRel) {
+                                        let _ = window.set_always_on_top(false);
+                                        let _ = window.request_user_attention(None);
+                                    }
                                     if auto_shown.swap(false, Ordering::AcqRel)
                                         && window.hide().is_ok()
                                     {
