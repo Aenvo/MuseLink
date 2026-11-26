@@ -4,6 +4,15 @@
 
 本文件记录 MuseLink / Muse连接器 的功能更新、安全加固与问题修复，随版本发布与推送同步维护。
 
+## [v0.2.2] - 2026-11-27
+
+### 优化与新增
+- **大幅提升 `/agent/v1/read` 读取上限并支持分片读取与原始二进制直传（解决 #4）**：
+  - **整文件 JSON 读取上限提升至 10 MiB**：原 2 MiB 上限提升至 10 MiB（与写入上限对齐），老连接器无需修改配置即可直接读取常见高分辨率图片；超限返回 HTTP `413` 并附带 `size`、`max_bytes`、`chunked_supported`、`recommended_limit`、`raw_supported` 与 `recommended_raw_limit` 引导分片重试；旧版 `/api/read` 仍保持 2 MiB 兼容。
+  - **支持 `offset` / `limit` 分片读取（无总文件大小硬上限）**：在同一已校验操作系统句柄上按字节偏移分段读取，JSON 分片默认 2 MiB、单片上限 4 MiB，返回 `offset`、`bytes_read`、`total_size`、`next_offset`、`has_more` 与 `etag`；支持 `if_match` 查询参数或 `If-Match` 请求头（兼容带引号的 `ETag`），若读取中途文件发生变更返回 HTTP `409`。
+  - **支持 `raw=1` 原始二进制直传**：直接返回对应 `Content-Type` 的原始字节流（无 Base64 33% 膨胀，实测经公网隧道提速约 40%，单次上限 32 MiB，支持与 `offset`/`limit` 组合分片），通过 `ETag` 与 `X-File-*` 响应头提供完整分片元信息。
+  - **更新 Muse 接入说明（Prompt）**：同步更新中英文接入说明，指导 Muse 读取图片/二进制文件时优先使用 `raw=1`、大文件按 4 MiB 分片（或 JSON 2 MiB 分片）读取并按片重试。
+
 ## [v0.2.1] - 2026-11-25
 
 ### 优化与新增

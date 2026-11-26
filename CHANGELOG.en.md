@@ -4,6 +4,15 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
+## [v0.2.2] - 2026-11-27
+
+### Improvements & Added
+- **Higher `/agent/v1/read` limit, chunked reading, and raw binary download (fixes #4)**:
+  - **Raised whole-file JSON read limit to 10 MiB**: Increased from 2 MiB to 10 MiB (matching the write limit) so existing connectors can read high-resolution photos without prompt updates; oversized requests return HTTP `413` with structured `size`, `max_bytes`, `chunked_supported`, `recommended_limit`, `raw_supported`, and `recommended_raw_limit` fields. Legacy `/api/read` keeps the 2 MiB v0.3 limit.
+  - **Added `offset` / `limit` chunked reads (no hard total file size limit)**: Seeks and reads directly from the verified OS file handle; JSON chunks default to 2 MiB (max 4 MiB) and return `offset`, `bytes_read`, `total_size`, `next_offset`, `has_more`, and `etag`. Supports `if_match` query param or `If-Match` header (accepting both quoted and unquoted `ETag` values) and returns HTTP `409` if the file changes mid-read.
+  - **Added `raw=1` raw binary streaming**: Streams raw bytes with detected `Content-Type` and no 33% Base64 overhead (~40% faster over tunnels, up to 32 MiB per request, combinable with `offset`/`limit`), exposing `ETag` and `X-File-*` metadata headers.
+  - **Updated Muse connection instructions (Prompt)**: Updated bilingual setup instructions to guide Muse to prefer `raw=1` for binary/image files, use 4 MiB raw chunks (or 2 MiB JSON chunks) for large files, pass `if_match`, and retry individual chunks on transient connection drops.
+
 ## [v0.2.1] - 2026-11-25
 
 ### Improvements & Added

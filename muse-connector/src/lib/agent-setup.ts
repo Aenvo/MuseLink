@@ -141,7 +141,7 @@ The API returns JSON. Send Content-Type: application/json for POST requests and 
 - POST /agent/v1/search accepts {"name":"part of the file name","limit":30}. Optional fields: root, extensions, modified_since_ms, modified_before_ms, and cursor. If you know the drive letter, pass its root alias first. Results include hits, complete, scanning, backend, scopes, and optional next_cursor and retry_after_ms. Each hit has root, path, kind, size, and modified_ms. When scanning is true, show the current results and scopes still being indexed, wait for retry_after_ms, and try again. If indexing is unfinished or complete is false, say that coverage is incomplete. To paginate, pass next_cursor as cursor and keep the other query parameters the same.
 - If search returns HTTP 409 with search_index_cleared, ask the user to open Settings → Data in MuseLink and select Rebuild index. Wait for the user before searching again.
 - GET /agent/v1/list?root=<alias>&path=<relative-folder> lists a folder. Use an empty path to list the root.
-- GET /agent/v1/read?root=<alias>&path=<relative-file> returns encoding and content. The encoding is text or base64.
+- GET /agent/v1/read?root=<alias>&path=<relative-file> returns encoding ("text" or "base64") and content for files up to 10 MiB. For images or binary files, prefer adding &raw=1 to receive raw bytes directly (no Base64 overhead; metadata in Content-Type, ETag, and X-File-* headers). For files larger than 4 MiB—or after HTTP 413—read in chunks using &offset=<bytes>&limit=<bytes> (recommended: &raw=1&limit=4194304, or JSON chunking with &limit=2097152, max 4 MiB per JSON chunk). Pass &if_match=<etag> on subsequent chunks to guard against concurrent edits, and if a chunk drops mid-transfer, retry only that chunk.
 - POST /agent/v1/write accepts {"root":"alias","path":"relative file","content":"file content","encoding":"text"}. Encoding may also be base64. Write files only at my explicit request.
 - POST /agent/v1/mkdir accepts {"root":"alias","path":"relative folder"}. Create folders only at my explicit request.${execSection}
 
@@ -164,7 +164,7 @@ Verify the connector once setup is complete. ${trialInstruction} If a request fa
 - POST /agent/v1/search 接收 {"name":"文件名的一部分","limit":30}。可选 root、extensions、modified_since_ms、modified_before_ms 和 cursor。知道盘符时优先传对应的 root。返回 hits、complete、scanning、backend、scopes 及可选 next_cursor、retry_after_ms。命中含 root、path、kind、size、modified_ms。若 scanning 为 true，按 retry_after_ms 等待后再查，先告知当前有哪些结果及未完成的范围。扫描未结束或 complete 为 false 时，标明覆盖还不完整。分页时把 next_cursor 作为下一次的 cursor，其余查询参数保持一致。
 - 若搜索返回 HTTP 409 且 error 为 search_index_cleared，告诉用户在桌面连接器的「设置 → 数据」中点「重新建立索引」。等待用户操作后再搜索。
 - GET /agent/v1/list?root=<目录别名>&path=<相对目录> 列出目录。列根目录时 path 填空字符串。
-- GET /agent/v1/read?root=<目录别名>&path=<相对文件> 返回 encoding 和 content，encoding 为 text 或 base64。
+- GET /agent/v1/read?root=<目录别名>&path=<相对文件> 返回 encoding（text 或 base64）和 content，整文件 JSON 读取上限为 10 MiB。读取图片或二进制文件时优先加 &raw=1 直接获取原始字节流（无 Base64 膨胀，元信息在 Content-Type、ETag 与 X-File-* 响应头中）。文件超过 4 MiB 或收到 HTTP 413 时，使用 &offset=<字节偏移>&limit=<分片字节数> 分片读取（优先 &raw=1&limit=4194304；若需 JSON 则用 &limit=2097152，JSON 单片上限 4 MiB）。后续分片携带 &if_match=<etag> 防止读取中途文件变更；若单个分片传输中断，只需重试该分片。
 - POST /agent/v1/write 接收 {"root":"目录别名","path":"相对文件","content":"文件内容","encoding":"text"}，encoding 也可以为 base64。写入仅按我的明确请求执行。
 - POST /agent/v1/mkdir 接收 {"root":"目录别名","path":"相对目录"}，仅按我的明确请求建目录。${execSection}
 
