@@ -113,6 +113,10 @@ pnpm -C muse-connector tauri build --bundles nsis
 
 The installer is written to `muse-connector/src-tauri/target/release/bundle/nsis/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just `muse-connector/src-tauri/target/release/muse-connector.exe`.
 
+## Community
+
+This project links to and recognizes the [LINUX DO](https://linux.do/) community, where it is shared and discussed. Public bug reports, compatibility feedback, and feature suggestions are welcome through GitHub Issues.
+
 ## License and acknowledgments
 
 MuseLink is open-sourced under the [MIT License](./LICENSE). The legacy file API is based on the [muse-file-bridge](https://github.com/TTNAN/muse-file-bridge) v0.3 protocol. See [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md) for third-party licenses and bundled binary notices.

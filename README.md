@@ -113,6 +113,10 @@ pnpm -C muse-connector tauri build --bundles nsis
 
 安装包输出在 `muse-connector/src-tauri/target/release/bundle/nsis/`。如只需 EXE，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector.exe`。
 
+## 社区
+
+本项目链接认可 [LINUX DO](https://linux.do/) 社区，并在社区分享与交流。欢迎通过 GitHub Issues 提交可公开的问题、兼容性反馈和功能建议。
+
 ## 许可证与致谢
 
 本项目采用 [MIT License](./LICENSE) 开源。旧版文件接口基于 [muse-file-bridge](https://github.com/TTNAN/muse-file-bridge) v0.3 协议；第三方许可与随包组件声明见 [THIRD_PARTY_NOTICES.md](./THIRD_PARTY_NOTICES.md)。
