@@ -6,13 +6,8 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 
 ## [Unreleased]
 
-### In progress
-- **Linux port (phase 1 start)**: Split `core/handle` into Windows / Unix backends; Unix uses `openat`/`mkdirat`/`renameat` for fd-relative file ops with the same authorization and symlink-escape semantics as Windows (sandboxed exec remains Windows-only).
-
-### Fixes
-- **Hardened Unix write/read paths**: Revalidate parent-directory containment around rename; preserve existing mode bits on atomic replace; open final entries nonblocking and reject FIFOs/non-regular files so permits cannot stall or publish outside the grant.
-- **Central executable-name normalization**: `discover_executable` strips `.exe` on non-Windows so GUI tool status and Cloudflare setup find Linux binaries.
-- **Documented Linux build and setup**: Both READMEs now cover dependencies, build commands, Tailscale operator setup, and the Windows-only exec limitation.
+### Added
+- **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
 
 ## [v0.2.1] - 2026-11-25
 

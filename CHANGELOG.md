@@ -6,13 +6,8 @@
 
 ## [Unreleased]
 
-### 开发中
-- **Linux 移植（第 1 段起步）**：将 `core/handle` 拆为 Windows / Unix 后端；Unix 侧以 `openat`/`mkdirat`/`renameat` 做 fd 相对文件操作，授权与 symlink 逃逸语义与 Windows 对齐（本机命令执行仍仅 Windows）。
-
-### 问题修复
-- **加固 Unix 写/读路径**：写入前后复核父目录仍在授权根内；原子替换保留原文件权限位；非阻塞打开并拒绝 FIFO 等非普通文件，避免阻塞与越权发布。
-- **统一可执行文件名规范化**：`discover_executable` 在非 Windows 上自动去掉 `.exe` 后缀，修复 GUI 工具状态与 Cloudflare 配置流程。
-- **补齐 Linux 源码构建与配置说明**：中英文 README 增加依赖、构建命令、Tailscale operator 配置与 exec 限制说明。
+### 新增功能
+- **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
 
 ## [v0.2.1] - 2026-11-25
 
