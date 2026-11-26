@@ -113,6 +113,30 @@ pnpm -C muse-connector tauri build --bundles nsis
 
 安装包输出在 `muse-connector/src-tauri/target/release/bundle/nsis/`。如只需 EXE，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector.exe`。
 
+### Linux
+
+需要 Rust 工具链、Node.js 22.12 或更新版本、pnpm，以及系统依赖包：`build-essential`、`pkg-config`、`libwebkit2gtk-4.1-dev`、`libgtk-3-dev`、`libayatana-appindicator3-dev`、`librsvg2-dev`、`libsoup-3.0-dev`、`libxdo-dev`、`libssl-dev`。在 Debian/Ubuntu 上可执行：
+
+```bash
+sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev \
+  libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libxdo-dev libssl-dev
+```
+
+在仓库根目录运行：
+
+```bash
+pnpm -C muse-connector install --frozen-lockfile
+pnpm -C muse-connector build
+cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+pnpm -C muse-connector tauri build --no-bundle
+```
+
+发布二进制位于 `muse-connector/src-tauri/target/release/muse-connector`。本地界面开发同样使用 `pnpm -C muse-connector tauri dev`（与 Windows 相同的隔离配置）。
+
+**配置：** 在 Linux 上安装 Tailscale 后，需执行一次 `sudo tailscale set --operator=$USER`，否则应用无法配置 Funnel（serve 配置会被拒绝）。
+
+**限制：** 沙箱命令执行（`exec`）目前仅支持 Windows；在 Linux 上保持关闭并以失败收口。
+
 ## 社区
 
 本项目链接认可 [LINUX DO](https://linux.do/) 社区，并在社区分享与交流。欢迎通过 GitHub Issues 提交可公开的问题、兼容性反馈和功能建议。
