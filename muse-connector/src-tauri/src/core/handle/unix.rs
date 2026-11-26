@@ -78,8 +78,51 @@ fn is_dir(mode: libc::mode_t) -> bool {
     mode & libc::S_IFMT == libc::S_IFDIR
 }
 
+fn is_reg(mode: libc::mode_t) -> bool {
+    mode & libc::S_IFMT == libc::S_IFREG
+}
+
 fn is_lnk(mode: libc::mode_t) -> bool {
     mode & libc::S_IFMT == libc::S_IFLNK
+}
+
+fn not_regular_file() -> Error {
+    Error::from(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "not a regular file",
+    ))
+}
+
+/// Read the process umask from `/proc/self/status` without changing it.
+fn current_umask() -> libc::mode_t {
+    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
+        return 0o022;
+    };
+    for line in status.lines() {
+        let Some(value) = line.strip_prefix("Umask:") else {
+            continue;
+        };
+        if let Ok(parsed) = libc::mode_t::from_str_radix(value.trim(), 8) {
+            return parsed;
+        }
+    }
+    0o022
+}
+
+fn fchmod(file: &File, mode: libc::mode_t) -> Result<(), Error> {
+    if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+        return Err(last_error());
+    }
+    Ok(())
+}
+
+fn fstatat_name(directory: &File, name: &OsStr) -> Result<libc::stat, Error> {
+    let c_name = cstring(name)?;
+    let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstatat(directory.as_raw_fd(), c_name.as_ptr(), &mut st, 0) } != 0 {
+        return Err(last_error());
+    }
+    Ok(st)
 }
 
 fn owned_file(fd: libc::c_int) -> File {
@@ -91,6 +134,9 @@ fn open_flags(directory: bool) -> libc::c_int {
     let mut flags = libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
     if directory {
         flags |= libc::O_DIRECTORY;
+    } else {
+        // Prevent FIFO/device opens from blocking forever when no peer is present.
+        flags |= libc::O_NONBLOCK;
     }
     flags
 }
@@ -198,8 +244,31 @@ fn traverse(root: &File, path: &Path, final_directory: bool) -> Result<File, Err
         if is_dir(st.st_mode) {
             return Err(Error::IsDirectory);
         }
+        if !is_reg(st.st_mode) {
+            return Err(not_regular_file());
+        }
     }
     Ok(current)
+}
+
+/// Confirm `directory` is still the same inode reached by walking `parent_path` from a fresh root.
+fn revalidate_directory(
+    target: &Resolved,
+    parent_path: &Path,
+    directory: &File,
+) -> Result<(), Error> {
+    let root = open_root(target)?;
+    let rewalked = match traverse(&root, parent_path, true) {
+        Ok(file) => file,
+        Err(Error::Missing | Error::NotDirectory | Error::Escape) => return Err(Error::Changed),
+        Err(error) => return Err(error),
+    };
+    let expected = fstat(directory)?;
+    let actual = fstat(&rewalked)?;
+    if expected.st_dev != actual.st_dev || expected.st_ino != actual.st_ino {
+        return Err(Error::Changed);
+    }
+    Ok(())
 }
 
 pub(crate) fn read(target: &Resolved) -> Result<File, Error> {
@@ -336,12 +405,19 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
     let name = path.file_name().ok_or(Error::IsDirectory)?;
     let parent_path = path.parent().ok_or(Error::Escape)?;
     let directory = ensure_directory(target, parent_path)?;
+    revalidate_directory(target, parent_path, &directory)?;
 
+    let mut existing_mode: Option<libc::mode_t> = None;
     match open_at(&directory, name, false) {
         Ok(existing) => {
-            if is_dir(fstat(&existing)?.st_mode) {
+            let mode = fstat(&existing)?.st_mode;
+            if is_dir(mode) {
                 return Err(Error::IsDirectory);
             }
+            if !is_reg(mode) {
+                return Err(not_regular_file());
+            }
+            existing_mode = Some(mode & 0o7777);
         }
         Err(Error::Missing) => (),
         Err(error) => return Err(error),
@@ -354,6 +430,7 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
                 Ok(value) => value,
                 Err(error) => return Some(Err(error)),
             };
+            // Mode 0o600 keeps the temp private while being written; fchmod defeats umask.
             let fd = unsafe {
                 libc::openat(
                     directory.as_raw_fd(),
@@ -363,7 +440,7 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
                         | libc::O_EXCL
                         | libc::O_NOFOLLOW
                         | libc::O_CLOEXEC,
-                    0o666,
+                    0o600,
                 )
             };
             if fd < 0 {
@@ -374,17 +451,25 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
                     Some(Err(err))
                 };
             }
-            Some(Ok((temp_name, owned_file(fd))))
+            let file = owned_file(fd);
+            if let Err(error) = fchmod(&file, 0o600) {
+                let _ = unlink_at(&directory, OsStr::new(&temp_name));
+                return Some(Err(error));
+            }
+            Some(Ok((temp_name, file)))
         })
         .ok_or(Error::Changed)??;
 
     let result = (|| {
         temp.write_all(bytes)?;
         temp.sync_all()?;
+        revalidate_directory(target, parent_path, &directory)?;
+
+        let final_mode = existing_mode.unwrap_or_else(|| 0o666 & !current_umask());
+        fchmod(&temp, final_mode)?;
+
         let c_temp = cstring(OsStr::new(&temp_name))?;
         let c_final = cstring(name)?;
-        // Drop the file handle before rename so no writable fd remains open on the path.
-        drop(temp);
         if unsafe {
             libc::renameat(
                 directory.as_raw_fd(),
@@ -396,6 +481,15 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
         {
             return Err(last_error());
         }
+
+        // Capture inode identity from the still-open temp fd, then confirm the final name.
+        let temp_st = fstat(&temp)?;
+        drop(temp);
+        let final_st = fstatat_name(&directory, name)?;
+        if temp_st.st_dev != final_st.st_dev || temp_st.st_ino != final_st.st_ino {
+            return Err(Error::Changed);
+        }
+        revalidate_directory(target, parent_path, &directory)?;
         Ok(())
     })();
 
@@ -408,8 +502,10 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
     use std::io::Read;
-    use std::os::unix::fs::symlink;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::PathBuf;
 
     struct Fixture(PathBuf);
@@ -434,6 +530,10 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    fn file_mode(path: &Path) -> u32 {
+        std::fs::metadata(path).unwrap().permissions().mode() & 0o7777
     }
 
     #[test]
@@ -497,5 +597,95 @@ mod tests {
             std::fs::read(target.path.join("note.txt")).unwrap(),
             b"original"
         );
+    }
+
+    #[test]
+    fn revalidate_directory_detects_moved_parent() {
+        let fixture = Fixture::new();
+        let outside =
+            std::env::temp_dir().join(format!("muse-outside-{}", crate::core::token::generate()));
+        std::fs::create_dir(&outside).unwrap();
+        let _cleanup = scopeguard_remove_dir(outside.clone());
+
+        let target = fixture.target("a/b/file.txt");
+        let path = relative(&target).unwrap();
+        let parent_path = path.parent().unwrap();
+        let directory = ensure_directory(&target, parent_path).unwrap();
+
+        assert!(revalidate_directory(&target, parent_path, &directory).is_ok());
+
+        std::fs::rename(fixture.0.join("a"), outside.join("a")).unwrap();
+        assert!(matches!(
+            revalidate_directory(&target, parent_path, &directory),
+            Err(Error::Changed)
+        ));
+    }
+
+    fn scopeguard_remove_dir(path: PathBuf) -> impl Drop {
+        struct Guard(PathBuf);
+        impl Drop for Guard {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        Guard(path)
+    }
+
+    #[test]
+    fn write_preserves_existing_mode_0600() {
+        let fixture = Fixture::new();
+        let target = fixture.target("secret.txt");
+        write(&target, b"first").unwrap();
+        std::fs::set_permissions(&target.path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(file_mode(&target.path), 0o600);
+
+        write(&target, b"second").unwrap();
+        assert_eq!(file_mode(&target.path), 0o600);
+        assert_eq!(std::fs::read(&target.path).unwrap(), b"second");
+    }
+
+    #[test]
+    fn write_preserves_existing_mode_0755() {
+        let fixture = Fixture::new();
+        let target = fixture.target("tool.sh");
+        write(&target, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&target.path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(file_mode(&target.path), 0o755);
+
+        write(&target, b"#!/bin/sh\necho ok\n").unwrap();
+        assert_eq!(file_mode(&target.path), 0o755);
+    }
+
+    #[test]
+    fn write_new_file_uses_umask_default_not_0666() {
+        let fixture = Fixture::new();
+        let target = fixture.target("fresh.txt");
+        write(&target, b"new").unwrap();
+        let mode = file_mode(&target.path);
+        assert_ne!(mode, 0o666);
+        assert_eq!(mode, 0o666 & !current_umask());
+    }
+
+    #[test]
+    fn read_rejects_fifo_promptly() {
+        let fixture = Fixture::new();
+        let fifo_path = fixture.0.join("pipe.fifo");
+        let c_path = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let target = fixture.target("pipe.fifo");
+        // Pre-fix this hung forever on a FIFO with no writer; must return promptly.
+        assert!(read(&target).is_err());
+    }
+
+    #[test]
+    fn write_rejects_fifo_target() {
+        let fixture = Fixture::new();
+        let fifo_path = fixture.0.join("pipe.fifo");
+        let c_path = CString::new(fifo_path.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) }, 0);
+
+        let target = fixture.target("pipe.fifo");
+        assert!(write(&target, b"nope").is_err());
     }
 }
