@@ -119,7 +119,15 @@ fn fchmod(file: &File, mode: libc::mode_t) -> Result<(), Error> {
 fn fstatat_name(directory: &File, name: &OsStr) -> Result<libc::stat, Error> {
     let c_name = cstring(name)?;
     let mut st = unsafe { std::mem::zeroed::<libc::stat>() };
-    if unsafe { libc::fstatat(directory.as_raw_fd(), c_name.as_ptr(), &mut st, 0) } != 0 {
+    if unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            c_name.as_ptr(),
+            &mut st,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
         return Err(last_error());
     }
     Ok(st)
@@ -338,7 +346,13 @@ pub(crate) fn list(target: &Resolved, mut visit: impl FnMut(Entry)) -> Result<()
                 )
             };
             if rc != 0 {
-                return Err(last_error());
+                let err = last_error();
+                // Entry deleted between readdir and fstatat: skip it instead
+                // of failing the whole listing.
+                if matches!(err, Error::Missing) {
+                    continue;
+                }
+                return Err(err);
             }
             let directory_entry = is_dir(st.st_mode);
             visit(Entry {
@@ -417,7 +431,7 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
             if !is_reg(mode) {
                 return Err(not_regular_file());
             }
-            existing_mode = Some(mode & 0o7777);
+            existing_mode = Some(mode & 0o0777);
         }
         Err(Error::Missing) => (),
         Err(error) => return Err(error),
@@ -651,6 +665,18 @@ mod tests {
         write(&target, b"#!/bin/sh\n").unwrap();
         std::fs::set_permissions(&target.path, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert_eq!(file_mode(&target.path), 0o755);
+
+        write(&target, b"#!/bin/sh\necho ok\n").unwrap();
+        assert_eq!(file_mode(&target.path), 0o755);
+    }
+
+    #[test]
+    fn write_drops_special_bits_on_replace() {
+        let fixture = Fixture::new();
+        let target = fixture.target("suid.sh");
+        write(&target, b"#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&target.path, std::fs::Permissions::from_mode(0o4755)).unwrap();
+        assert_eq!(file_mode(&target.path), 0o4755);
 
         write(&target, b"#!/bin/sh\necho ok\n").unwrap();
         assert_eq!(file_mode(&target.path), 0o755);
