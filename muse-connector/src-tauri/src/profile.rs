@@ -299,7 +299,12 @@ fn same_location(a: &Path, b: &Path) -> bool {
     };
     let a = normalize(a);
     let b = normalize(b);
-    a == b || a.starts_with(&(b.clone() + "\\")) || b.starts_with(&(a + "\\"))
+    // Accept both Windows (`\`) and Unix (`/`) separators so nested-home checks work on Linux.
+    a == b
+        || a.starts_with(&(b.clone() + "\\"))
+        || b.starts_with(&(a.clone() + "\\"))
+        || a.starts_with(&(b.clone() + "/"))
+        || b.starts_with(&(a + "/"))
 }
 
 #[cfg(test)]

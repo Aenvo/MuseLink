@@ -4,6 +4,11 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
+## [Unreleased]
+
+### In progress
+- **Linux port (phase 1 start)**: Split `core/handle` into Windows / Unix backends; Unix uses `openat`/`mkdirat`/`renameat` for fd-relative file ops with the same authorization and symlink-escape semantics as Windows (sandboxed exec remains Windows-only).
+
 ## [v0.2.1] - 2026-11-25
 
 ### Improvements & Added

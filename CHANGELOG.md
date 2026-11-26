@@ -4,6 +4,11 @@
 
 本文件记录 MuseLink / Muse连接器 的功能更新、安全加固与问题修复，随版本发布与推送同步维护。
 
+## [Unreleased]
+
+### 开发中
+- **Linux 移植（第 1 段起步）**：将 `core/handle` 拆为 Windows / Unix 后端；Unix 侧以 `openat`/`mkdirat`/`renameat` 做 fd 相对文件操作，授权与 symlink 逃逸语义与 Windows 对齐（本机命令执行仍仅 Windows）。
+
 ## [v0.2.1] - 2026-11-25
 
 ### 优化与新增

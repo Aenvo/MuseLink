@@ -32,7 +32,7 @@ use windows_sys::Win32::Storage::FileSystem::{
 };
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-use super::path_guard::Resolved;
+use crate::core::path_guard::Resolved;
 
 const SHARE_DIRECTORY: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
 const SHARE_FILE: u32 = SHARE_DIRECTORY | FILE_SHARE_DELETE;
@@ -412,7 +412,7 @@ pub(crate) fn write(target: &Resolved, bytes: &[u8]) -> Result<(), Error> {
 
     let temp = (0..4)
         .find_map(|_| {
-            let name = format!(".muse-{}.tmp", super::token::generate());
+            let name = format!(".muse-{}.tmp", crate::core::token::generate());
             match open_relative(
                 directory,
                 OsStr::new(&name),
@@ -492,14 +492,14 @@ mod tests {
     impl Fixture {
         fn new() -> Self {
             let root = std::env::temp_dir()
-                .join(format!("muse-handle-{}", super::super::token::generate()));
+                .join(format!("muse-handle-{}", crate::core::token::generate()));
             std::fs::create_dir(&root).unwrap();
             Self(root)
         }
 
         fn target(&self, path: &str) -> Resolved {
             let roots = [("root".to_owned(), self.0.clone())].into();
-            let mut target = super::super::path_guard::resolve(&roots, "root", path).unwrap();
+            let mut target = crate::core::path_guard::resolve(&roots, "root", path).unwrap();
             target.reject_reparse = true;
             target
         }
