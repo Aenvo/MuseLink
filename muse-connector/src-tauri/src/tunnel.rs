@@ -76,7 +76,18 @@ fn exe_file_name(base: &str) -> String {
     }
 }
 
+/// Normalize a caller-supplied executable name for the current platform.
+/// Call sites may pass Windows-style `*.exe` names; strip the suffix on Unix.
+fn platform_exe_name(name: &str) -> &str {
+    if cfg!(windows) {
+        name
+    } else {
+        name.strip_suffix(".exe").unwrap_or(name)
+    }
+}
+
 pub fn discover_executable(name: &str) -> Option<PathBuf> {
+    let name = platform_exe_name(name);
     if let Some(found) = std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p)
             .map(|d| d.join(name))
@@ -442,6 +453,14 @@ pub(crate) fn ensure_exclusive_mapping(cfg: &Value, port: u16) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn platform_exe_name_strips_exe_on_unix() {
+        if cfg!(not(windows)) {
+            assert_eq!(platform_exe_name("tailscale.exe"), "tailscale");
+            assert_eq!(platform_exe_name("tailscale"), "tailscale");
+            assert_eq!(platform_exe_name("cloudflared.exe"), "cloudflared");
+        }
+    }
     #[test]
     fn mapping_checks_target_and_rejects_foreign_handlers() {
         assert!(ensure_exclusive_mapping(&json!(null), 18790).is_err());
