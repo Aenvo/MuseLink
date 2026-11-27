@@ -13,7 +13,7 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
   - **Cross-platform signed draft release workflow**: Adds `.github/workflows/release.yml` and `generate-updater-manifest.ps1` to run tests and build signed Windows (portable ZIP + NSIS) and Linux (Ubuntu 22.04 AppImage + `.deb`) packages in parallel on `v*` tags, assembling a dual-platform `latest.json` and `SHA256SUMS.txt` onto a draft GitHub Release.
 - **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
 - **macOS support**: MuseLink now builds and runs on macOS, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup (discovers the Tailscale app bundle and Homebrew installs). Sandboxed command execution remains Windows-only; macOS builds are unsigned and not notarized.
-- **Japanese localization**: Added a Japanese (`ja`) locale covering the full UI (including updater and changelog modals), system tray, and Muse setup instructions, selectable under **Settings → General**.
+- **Japanese localization**: Added a Japanese (`ja`) locale covering the full UI (including updater and changelog modals), system tray, and Muse setup instructions, selectable under **Settings → General**, along with a Japanese README and preview screenshots.
 
 ## [v0.2.2] - 2026-11-27
 

@@ -13,7 +13,7 @@
   - **双平台自动签名发布流水线**：新增 `.github/workflows/release.yml` 与 `generate-updater-manifest.ps1`，推送 `v*` 标签后并行在 Windows 与 Ubuntu 22.04 上运行测试，自动打包 Windows 便携版、签名 NSIS 安装包与 Linux 签名 AppImage / `.deb`，统一生成双平台 `latest.json` 与 `SHA256SUMS.txt` 挂载至 Draft Release。
 - **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
 - **macOS 支持**：MuseLink 现已可在 macOS 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置（自动发现 Tailscale 应用包与 Homebrew 安装）。本机命令执行仍仅支持 Windows；macOS 构建未签名、未公证。
-- **日语本地化**：新增日语（`ja`）语言选项，界面全部文本（含自动更新与更新日志弹窗）、托盘与接入说明均支持日语显示，可在「设置 → 常规」中切换。
+- **日语本地化**：新增日语（`ja`）语言选项，界面全部文本（含自动更新与更新日志弹窗）、托盘与接入说明均支持日语显示，可在「设置 → 常规」中切换；并新增日语 README 与界面预览图。
 
 ## [v0.2.2] - 2026-11-27
 
