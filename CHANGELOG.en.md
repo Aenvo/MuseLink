@@ -4,7 +4,7 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
-## [Unreleased]
+## [v0.3.1] - 2026-11-27
 
 ### Fixes & Cross-Platform Adaptation
 - **Fixed "Copy dedicated token" always failing on macOS / Linux and transiently failing on Windows**:
