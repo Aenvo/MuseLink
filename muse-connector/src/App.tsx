@@ -209,7 +209,7 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
       </Button> : null}
     </header>
     <Tabs value={page} onValueChange={navigate} className="min-h-0 flex-1 gap-0">
-      <nav className="app-shell app-navigation shrink-0" aria-label={t("主导航")}><TabsList className="grid h-auto w-full grid-cols-6">{pages.map(([value, label]) => <TabsTrigger key={value} value={value} className="min-w-0 px-1 text-center text-xs leading-tight whitespace-normal sm:text-sm">{t(label)}</TabsTrigger>)}</TabsList></nav>
+      <nav className="app-shell app-navigation shrink-0" aria-label={t("主导航")}><TabsList className="grid h-10 w-full grid-cols-6">{pages.map(([value, label]) => <TabsTrigger key={value} value={value} title={t(label)} className="min-w-0 overflow-hidden px-1.5 text-center text-xs sm:text-sm"><span className="truncate">{t(label)}</span></TabsTrigger>)}</TabsList></nav>
       <ScrollArea ref={scroll} className="app-scroll min-h-0 flex-1" type="hover" scrollHideDelay={150}>
         <div className="app-shell app-page flex flex-col gap-4">
           {error && !confirmation && !(needsAttention && error === s?.status.note) ? <Notice title={t("操作未完成")} error><p>{diagnostic(error)}</p><Button variant="ghost" size="sm" onClick={() => bridge.setError(null)}><X data-icon="inline-start" />{t("收起提示")}</Button></Notice> : null}
