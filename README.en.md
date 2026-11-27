@@ -144,6 +144,23 @@ The release binary is written to `muse-connector/src-tauri/target/release/muse-c
 
 **Limitation:** sandboxed command execution (`exec`) is Windows-only; on Linux it stays disabled and fails closed.
 
+### macOS
+
+You'll need a Rust toolchain, Node.js 22.12 or later, pnpm, and the Xcode Command Line Tools (`xcode-select --install`). From the repository root:
+
+```bash
+pnpm -C muse-connector install --frozen-lockfile
+pnpm -C muse-connector build
+cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+pnpm -C muse-connector tauri build --bundles app
+```
+
+The app bundle is written to `muse-connector/src-tauri/target/release/bundle/macos/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just the binary at `muse-connector/src-tauri/target/release/muse-connector`. For local UI development, use `pnpm -C muse-connector tauri dev` (same isolated config as on Windows).
+
+**Setup:** install the Tailscale app from the website or the Mac App Store and sign in; the app discovers the CLI inside the app bundle (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) automatically, and Homebrew installs of `tailscale` / `cloudflared` (`/opt/homebrew/bin`) are discovered too.
+
+**Limitation:** sandboxed command execution (`exec`) is Windows-only; on macOS it stays disabled and fails closed. macOS builds are currently unsigned and not notarized, intended for local build-from-source use; a browser-downloaded bundle may be blocked by Gatekeeper.
+
 ## Community
 
 This project links to and recognizes the [LINUX DO](https://linux.do/) community, where it is shared and discussed. Public bug reports, compatibility feedback, and feature suggestions are welcome through GitHub Issues.

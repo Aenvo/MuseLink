@@ -144,6 +144,23 @@ pnpm -C muse-connector tauri build --no-bundle
 
 **限制：** 沙箱命令执行（`exec`）目前仅支持 Windows；在 Linux 上保持关闭并以失败收口。
 
+### macOS
+
+需要 Rust 工具链、Node.js 22.12 或更新版本、pnpm，以及 Xcode Command Line Tools（`xcode-select --install`）。在仓库根目录运行：
+
+```bash
+pnpm -C muse-connector install --frozen-lockfile
+pnpm -C muse-connector build
+cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+pnpm -C muse-connector tauri build --bundles app
+```
+
+应用包输出在 `muse-connector/src-tauri/target/release/bundle/macos/`。如只需二进制，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector`。本地界面开发同样使用 `pnpm -C muse-connector tauri dev`（与 Windows 相同的隔离配置）。
+
+**配置：** 从官网或 Mac App Store 安装 Tailscale 应用并登录即可；应用会自动发现应用包内的命令行工具（`/Applications/Tailscale.app/Contents/MacOS/Tailscale`），Homebrew 安装的 `tailscale` / `cloudflared`（`/opt/homebrew/bin`）同样会被发现。
+
+**限制：** 沙箱命令执行（`exec`）目前仅支持 Windows；在 macOS 上保持关闭并以失败收口。macOS 构建目前未签名、未公证，仅供本地从源码构建运行；从浏览器下载的应用包可能会被 Gatekeeper 拦截。
+
 ## 社区
 
 本项目链接认可 [LINUX DO](https://linux.do/) 社区，并在社区分享与交流。欢迎通过 GitHub Issues 提交可公开的问题、兼容性反馈和功能建议。

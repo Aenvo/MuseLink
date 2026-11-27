@@ -12,6 +12,7 @@
   - **内嵌更新日志与更新详情弹窗**：「关于」页按钮调整为纯文字「更新日志」、「GitHub」与「检查更新」；点击「更新日志」或右下角浮窗的「更新详情」均在应用内弹窗展示，随界面语言自动切换中英文、自动过滤未发布草稿与跨语言导航头，采用本地内嵌秒开 + 后台静默同步 GitHub 最新日志（并以 `latest.json` 更新说明兜底），标题栏附外链图标直达 GitHub。
   - **双平台自动签名发布流水线**：新增 `.github/workflows/release.yml` 与 `generate-updater-manifest.ps1`，推送 `v*` 标签后并行在 Windows 与 Ubuntu 22.04 上运行测试，自动打包 Windows 便携版、签名 NSIS 安装包与 Linux 签名 AppImage / `.deb`，统一生成双平台 `latest.json` 与 `SHA256SUMS.txt` 挂载至 Draft Release。
 - **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
+- **macOS 支持**：MuseLink 现已可在 macOS 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置（自动发现 Tailscale 应用包与 Homebrew 安装）。本机命令执行仍仅支持 Windows；macOS 构建未签名、未公证。
 
 ## [v0.2.2] - 2026-11-27
 

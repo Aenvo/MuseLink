@@ -450,8 +450,20 @@ async fn restore_legacy(state: tauri::State<'_, Services>) -> Result<(), String>
 #[tauri::command]
 fn open_tool_setup(tool: String, app: tauri::AppHandle) -> Result<(), String> {
     let url = match tool.as_str() {
-        "tailscale" => "https://tailscale.com/download/windows",
-        "tailscale_login" => "https://tailscale.com/docs/install/windows",
+        "tailscale" => {
+            if cfg!(target_os = "macos") {
+                "https://tailscale.com/download/mac"
+            } else {
+                "https://tailscale.com/download/windows"
+            }
+        }
+        "tailscale_login" => {
+            if cfg!(target_os = "macos") {
+                "https://tailscale.com/docs/install/mac"
+            } else {
+                "https://tailscale.com/docs/install/windows"
+            }
+        }
         "tailscale_funnel" => "https://tailscale.com/docs/features/tailscale-funnel#enable-funnel",
         "cloudflared" => {
             "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"

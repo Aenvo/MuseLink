@@ -287,6 +287,29 @@ pub(crate) fn canonicalize_direct(path: &Path) -> Option<PathBuf> {
     {
         return Some(canonical);
     }
+    #[cfg(target_os = "macos")]
+    if reject_reparse_ancestors(path).is_ok()
+        && macos_alias_spelling(path).is_some_and(|spelling| same(&spelling))
+    {
+        return Some(canonical);
+    }
+    None
+}
+
+/// The canonical spelling of a path that goes through one of macOS's
+/// root-owned alias symlinks (/etc, /tmp, /var all point into /private).
+/// Returns None for paths that do not start with one of those aliases.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_alias_spelling(path: &Path) -> Option<PathBuf> {
+    for (alias, real) in [
+        ("/etc", "/private/etc"),
+        ("/tmp", "/private/tmp"),
+        ("/var", "/private/var"),
+    ] {
+        if let Ok(rest) = path.strip_prefix(alias) {
+            return Some(PathBuf::from(real).join(rest));
+        }
+    }
     None
 }
 
@@ -396,6 +419,14 @@ pub(crate) fn is_drive_root(path: &Path) -> bool {
 
 pub(crate) fn reject_reparse_ancestors(path: &Path) -> Result<(), &'static str> {
     for ancestor in path.ancestors().take_while(|path| path.is_absolute()) {
+        // macOS keeps /etc, /tmp and /var as root-owned symlinks into
+        // /private, and almost every real path (the temp dir included)
+        // passes through one of them. Exempt exactly those OS aliases;
+        // any other symlink ancestor is still rejected.
+        #[cfg(target_os = "macos")]
+        if matches!(ancestor.to_str(), Some("/etc" | "/tmp" | "/var")) {
+            continue;
+        }
         match ancestor.symlink_metadata() {
             Ok(metadata) if is_reparse(&metadata) => return Err(ERR_REPARSE),
             Ok(_) => (),
