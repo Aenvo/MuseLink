@@ -6,11 +6,19 @@
 
 ## [Unreleased]
 
-### 新增功能
-- **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
-
 ### 安全与稳定性加固
-- **扩大默认读取保护范围**：`.npmrc`、`.pypirc` 由仅写保护升级为读 / 搜索 / 写全面保护；新增对 `.docker`、`.kube`、`.azure`、gcloud 凭证目录（含 Windows 的 `%APPDATA%\gcloud`）以及浏览器凭证库（Chrome / Edge 的 `User Data`、Firefox 的 `Profiles` 容器整体）的默认保护，避免磁盘授权或主目录授权时令牌与登录数据被读取。
+- **扩大默认读取保护范围**：`.npmrc`、`.pypirc` 由仅写保护升级为读 / 搜索 / 写全面保护；新增对 `.docker`、`.kube`、`.azure`、gcloud 凭证目录以及各平台浏览器凭证库的默认保护（Windows：Chrome / Edge 的 `User Data` 与 Firefox 的 `Profiles`；macOS：Application Support 下的 Chrome / Edge / Firefox 与 Keychains；Linux：`google-chrome` / `chromium` / `microsoft-edge` 与 `.mozilla/firefox`），避免磁盘授权或主目录授权时令牌与登录数据被读取。
+
+## [v0.3.0] - 2026-11-27
+
+### 新增功能
+- **应用内自动更新与同步更新日志**：
+  - **一键检查与重启更新（Windows 安装版 & Linux AppImage）**：支持启动静默检查与「关于 → 检查更新」手动检查，通过 GitHub Releases 静态 `latest.json` 与编译期固化的 Minisign 公钥验签（不走受限 REST API）；发现新版本时在右下角弹出可关闭的新版本提醒浮窗，下载与验签阶段保持现有连接不断流并展示绿色实时进度条，确认安装后安全停服（含释放 Windows 随包 `Everything.exe` 文件锁）并自动重启完成升级；Windows 免安装便携版、Linux `.deb` 与 macOS/源码构建统一通过静态 `latest.json` 比对版本号，正常提供新版本提醒、更新详情与直达 GitHub Releases 下载。
+  - **内嵌更新日志与更新详情弹窗**：「关于」页按钮调整为纯文字「更新日志」、「GitHub」与「检查更新」；点击「更新日志」或右下角浮窗的「更新详情」均在应用内弹窗展示，随界面语言自动切换（日语回退英文日志）、自动过滤未发布草稿与跨语言导航头，采用本地内嵌秒开 + 后台静默同步 GitHub 最新日志（并以 `latest.json` 更新说明兜底），标题栏附外链图标直达 GitHub。
+  - **三平台自动发布流水线**：新增 `.github/workflows/release.yml` 与 `generate-updater-manifest.ps1`，推送 `v*` 标签后并行在 Windows、Ubuntu 22.04 与 macOS 上运行测试，自动打包 Windows 便携版、签名 NSIS 安装包、Linux 签名 AppImage / `.deb` 与 macOS Universal `.dmg` / `.app.zip`，统一生成双平台自动更新清单 `latest.json` 与全产物 `SHA256SUMS.txt` 挂载至 Draft Release。
+- **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
+- **macOS 支持**：MuseLink 现已可在 macOS（Apple Silicon & Intel）上运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置（自动发现 Tailscale 应用包与 Homebrew 安装），并提供 Universal `.dmg` 与 `.app.zip` 预构建包。本机命令执行仍仅支持 Windows；macOS 包未做 Apple 签名/公证，首次打开需在「系统设置 → 隐私与安全性」中放行。
+- **日语本地化**：新增日语（`ja`）语言选项，界面全部文本（含自动更新与更新日志弹窗）、托盘与接入说明均支持日语显示，可在「设置 → 常规」中切换；并新增日语 README 与界面预览图。
 
 ## [v0.2.2] - 2026-11-27
 
