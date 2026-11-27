@@ -68,6 +68,8 @@
 
 可用同一 Release 中的 `SHA256SUMS.txt` 校验下载文件。MuseLink 主程序及安装包尚未进行代码签名，Windows 可能提示未知发布者。
 
+Linux 用户目前可参考下方 [从源码构建 → Linux](#linux) 自行编译运行。
+
 ## 使用指南
 
 默认连接方式需要安装 [Tailscale for Windows](https://tailscale.com/download/windows) 并登录。
@@ -96,6 +98,8 @@
 - **文件大小限制与大文件读取**：新版 `/agent/v1/read` 整文件 JSON 读取上限为 **10 MiB**；同时支持 `offset`/`limit` 分片读取（对文件总大小**无硬上限**，JSON 单片默认 2 MiB、上限 4 MiB，配合 `if_match` / `ETag` 防止中途变更）以及 `raw=1` 原始二进制直传（无 Base64 膨胀，单次上限 32 MiB，超过 4 MiB 推荐按 4 MiB 分片，兼顾速度与隧道稳定性）。单文件写入上限为 **10 MiB**，旧版 `/api/read` 保持 **2 MiB** 以兼容 v0.3 协议。
 
 ## 从源码构建
+
+### Windows
 
 准备 Windows、WebView2、Node.js 22.12 或更新版本、pnpm、Rust MSVC 工具链与 Visual Studio C++ Build Tools。在仓库根目录运行下面的命令启动开发环境。
 

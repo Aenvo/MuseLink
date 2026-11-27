@@ -68,6 +68,8 @@ Choose a Windows x64 build from [GitHub Releases](https://github.com/Aenvo/MuseL
 
 Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executable and installer are unsigned, so Windows may show an unknown publisher prompt.
 
+Linux users can currently build and run MuseLink from source — see [Build from source → Linux](#linux) below.
+
 ## Quick start
 
 For the default connection method, install [Tailscale for Windows](https://tailscale.com/download/windows) and sign in.
@@ -96,6 +98,8 @@ File indexing starts in the background after you first save permissions. Manage 
 - **File size limits & large-file reads**: `/agent/v1/read` supports whole-file JSON reads up to **10 MiB**, plus `offset`/`limit` chunked reading with **no hard total-file-size limit** (2 MiB default / 4 MiB max per JSON chunk, with `if_match` / `ETag` consistency checks) and `raw=1` raw binary streaming (no Base64 overhead, up to 32 MiB per request; 4 MiB chunks are recommended above 4 MiB for tunnel reliability). Single-file writes are limited to **10 MiB**, and legacy `/api/read` remains at **2 MiB** for v0.3 compatibility.
 
 ## Build from source
+
+### Windows
 
 You'll need Windows, WebView2, Node.js 22.12 or later, pnpm, the Rust MSVC toolchain, and Visual Studio C++ Build Tools. Run these commands from the repository root to start development.
 
