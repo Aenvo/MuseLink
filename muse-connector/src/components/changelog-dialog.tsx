@@ -41,6 +41,7 @@ interface ReleaseNode {
 const fallbackRemoteUrls = {
   "zh-CN": "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.md",
   en: "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.en.md",
+  ja: "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.en.md",
 } as const;
 
 function normalizeVersion(version: string) {
