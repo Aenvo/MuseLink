@@ -252,7 +252,7 @@ fn changelog_urls(language: Language) -> (&'static str, &'static str, &'static s
             CHANGELOG_RAW_ZH_URL,
             CHANGELOG_WEB_ZH_URL,
         ),
-        Language::English => (
+        Language::English | Language::Japanese => (
             "en",
             BUNDLED_CHANGELOG_EN,
             CHANGELOG_RAW_EN_URL,
