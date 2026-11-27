@@ -44,6 +44,10 @@ use super::token;
 
 pub const VERSION: &str = "0.3"; // 协议版本，与 Python 版对齐
 pub const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_AGENT_READ_BYTES: u64 = 10 * 1024 * 1024;
+pub const DEFAULT_CHUNK_READ_BYTES: u64 = 2 * 1024 * 1024;
+pub const MAX_CHUNK_READ_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_RAW_READ_BYTES: u64 = 32 * 1024 * 1024;
 pub const MAX_WRITE_BYTES: u64 = 10 * 1024 * 1024;
 pub const LIST_MAX_ENTRIES: usize = 5000;
 pub const RATE_LIMIT: u64 = 1000;
@@ -78,6 +82,10 @@ pub struct ApiOptions {
     pub rate_limit: u64,
     pub rate_window_secs: u64,
     pub max_read: u64,
+    pub max_agent_read: u64,
+    pub default_chunk_read: u64,
+    pub max_chunk_read: u64,
+    pub max_raw_read: u64,
     pub max_write: u64,
     pub list_max: usize,
 }
@@ -88,6 +96,10 @@ impl Default for ApiOptions {
             rate_limit: RATE_LIMIT,
             rate_window_secs: RATE_WINDOW_SECS,
             max_read: MAX_READ_BYTES,
+            max_agent_read: MAX_AGENT_READ_BYTES,
+            default_chunk_read: DEFAULT_CHUNK_READ_BYTES,
+            max_chunk_read: MAX_CHUNK_READ_BYTES,
+            max_raw_read: MAX_RAW_READ_BYTES,
             max_write: MAX_WRITE_BYTES,
             list_max: LIST_MAX_ENTRIES,
         }
@@ -522,17 +534,16 @@ fn respond(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn respond_with_search(
+fn record_response(
     state: &ApiState,
     parts: &axum::http::request::Parts,
     code: u16,
-    body: impl Serialize,
     authed: bool,
     root: Option<&str>,
     path: Option<&str>,
     bytes: Option<u64>,
     search: Option<(&'static str, u64)>,
-) -> Response {
+) {
     let endpoint = parts
         .extensions
         .get::<OriginalUri>()
@@ -569,6 +580,21 @@ fn respond_with_search(
         search_backend: search.map(|(backend, _)| backend),
         search_ms: search.map(|(_, elapsed)| elapsed),
     });
+}
+
+#[allow(clippy::too_many_arguments)]
+fn respond_with_search(
+    state: &ApiState,
+    parts: &axum::http::request::Parts,
+    code: u16,
+    body: impl Serialize,
+    authed: bool,
+    root: Option<&str>,
+    path: Option<&str>,
+    bytes: Option<u64>,
+    search: Option<(&'static str, u64)>,
+) -> Response {
+    record_response(state, parts, code, authed, root, path, bytes, search);
     let mut response = json_resp(code, &body);
     if state.agent {
         response.headers_mut().insert(
@@ -858,7 +884,111 @@ async fn read(State(s): State<ApiState>, req: Request) -> Response {
     blocking_response(s.inner.file_jobs.clone(), move || read_sync(s, parts)).await
 }
 
+fn file_etag(metadata: &std::fs::Metadata) -> String {
+    let mtime_ns = metadata
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{}-{mtime_ns}", metadata.len())
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(|s| s.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("png") => "image/png",
+        Some("jpg" | "jpeg") => "image/jpeg",
+        Some("webp") => "image/webp",
+        Some("gif") => "image/gif",
+        Some("bmp") => "image/bmp",
+        Some("svg") => "image/svg+xml",
+        Some("pdf") => "application/pdf",
+        Some("txt" | "md" | "log") => "text/plain; charset=utf-8",
+        Some("json" | "jsonl") => "application/json; charset=utf-8",
+        Some("csv") => "text/csv; charset=utf-8",
+        Some("zip") => "application/zip",
+        _ => "application/octet-stream",
+    }
+}
+
+fn parse_raw_flag(q: &HashMap<String, String>) -> Result<bool, &'static str> {
+    match q.get("raw").map(String::as_str) {
+        None => Ok(false),
+        Some("1" | "true" | "TRUE" | "True") => Ok(true),
+        Some("0" | "false" | "FALSE" | "False") => Ok(false),
+        _ => Err("raw must be 1, true, 0, or false"),
+    }
+}
+
+fn parse_optional_u64(
+    q: &HashMap<String, String>,
+    key: &str,
+    min: u64,
+    err: &'static str,
+) -> Result<Option<u64>, &'static str> {
+    match q.get(key) {
+        None => Ok(None),
+        Some(raw) => match raw.parse::<u64>() {
+            Ok(v) if v >= min => Ok(Some(v)),
+            _ => Err(err),
+        },
+    }
+}
+
+fn normalize_etag(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let without_weak = trimmed
+        .strip_prefix("W/")
+        .or_else(|| trimmed.strip_prefix("w/"))
+        .unwrap_or(trimmed);
+    without_weak.trim().trim_matches('"')
+}
+
+fn read_too_large_response(
+    s: &ApiState,
+    parts: &axum::http::request::Parts,
+    root_name: &str,
+    rel: &str,
+    size: Option<u64>,
+    max_bytes: u64,
+) -> Response {
+    let body = if s.agent {
+        let msg = match size {
+            Some(bytes) => format!(
+                "file too large ({bytes} bytes); max whole-file read is {max_bytes} bytes; retry with offset and limit"
+            ),
+            None => format!(
+                "file too large; max whole-file read is {max_bytes} bytes; retry with offset and limit"
+            ),
+        };
+        let mut obj = json!({
+            "error": msg,
+            "max_bytes": max_bytes,
+            "chunked_supported": true,
+            "recommended_limit": s.options().default_chunk_read,
+            "raw_supported": true,
+            "recommended_raw_limit": s.options().max_chunk_read,
+        });
+        if let Some(bytes) = size {
+            obj["size"] = json!(bytes);
+        }
+        obj
+    } else {
+        let msg = match size {
+            Some(bytes) => format!("file too large ({bytes} bytes)"),
+            None => "file too large".to_string(),
+        };
+        json!({"error": msg})
+    };
+    respond(s, parts, 413, body, true, Some(root_name), Some(rel), None)
+}
+
 fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
+    use std::io::{Read, Seek, SeekFrom};
+
     let _guard = s.access_guard();
     if let Some(response) = get_auth_failure(&s, &parts) {
         return response;
@@ -867,17 +997,82 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
     let root_name = q.get("root").cloned().unwrap_or_default();
     let rel = q.get("path").cloned().unwrap_or_default();
 
+    let (offset_param, limit_param, raw_mode, if_match) = if s.agent {
+        let offset =
+            match parse_optional_u64(&q, "offset", 0, "offset must be a non-negative integer") {
+                Ok(v) => v,
+                Err(msg) => {
+                    return respond(
+                        &s,
+                        &parts,
+                        400,
+                        json!({"error": msg}),
+                        true,
+                        Some(&root_name),
+                        Some(&rel),
+                        None,
+                    );
+                }
+            };
+        let limit = match parse_optional_u64(&q, "limit", 1, "limit must be a positive integer") {
+            Ok(v) => v,
+            Err(msg) => {
+                return respond(
+                    &s,
+                    &parts,
+                    400,
+                    json!({"error": msg}),
+                    true,
+                    Some(&root_name),
+                    Some(&rel),
+                    None,
+                );
+            }
+        };
+        let raw = match parse_raw_flag(&q) {
+            Ok(v) => v,
+            Err(msg) => {
+                return respond(
+                    &s,
+                    &parts,
+                    400,
+                    json!({"error": msg}),
+                    true,
+                    Some(&root_name),
+                    Some(&rel),
+                    None,
+                );
+            }
+        };
+        let if_match = q
+            .get("if_match")
+            .filter(|v| !v.is_empty())
+            .cloned()
+            .or_else(|| {
+                parts
+                    .headers
+                    .get(header::IF_MATCH)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::trim)
+                    .filter(|v| !v.is_empty())
+                    .map(str::to_string)
+            });
+        (offset, limit, raw, if_match)
+    } else {
+        (None, None, false, None)
+    };
+
     let resolved = match resolve_file_request(&s, &parts, &root_name, &rel, Operation::Read) {
         Ok(resolved) => resolved,
         Err(response) => return response,
     };
 
-    let file = match handle::read(&resolved) {
+    let mut file = match handle::read(&resolved) {
         Ok(file) => file,
         Err(error) => return file_error(&s, &parts, &root_name, &rel, error, Some("not a file")),
     };
-    let size = match file.metadata() {
-        Ok(metadata) => metadata.len(),
+    let metadata = match file.metadata() {
+        Ok(metadata) => metadata,
         Err(error) => {
             return respond(
                 &s,
@@ -891,23 +1086,170 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
             );
         }
     };
-    if size > s.options().max_read {
-        let msg = format!("file too large ({size} bytes)");
+    let size = metadata.len();
+    let etag = file_etag(&metadata);
+
+    if let Some(expected) = if_match.as_deref()
+        && normalize_etag(expected) != etag
+    {
         return respond(
             &s,
             &parts,
-            413,
-            json!({"error": msg}),
+            409,
+            json!({
+                "error": "file changed; retry",
+                "etag": etag,
+                "total_size": size,
+            }),
             true,
             Some(&root_name),
             Some(&rel),
             None,
         );
     }
+
+    let chunked = s.agent && (offset_param.is_some() || limit_param.is_some());
+
+    if s.agent && (chunked || raw_mode) {
+        let chunk_offset = offset_param.unwrap_or(0);
+        if chunk_offset > size {
+            return respond(
+                &s,
+                &parts,
+                416,
+                json!({
+                    "error": "offset exceeds file size",
+                    "offset": chunk_offset,
+                    "total_size": size,
+                }),
+                true,
+                Some(&root_name),
+                Some(&rel),
+                None,
+            );
+        }
+        let max_allowed = if raw_mode {
+            s.options().max_raw_read
+        } else {
+            s.options().max_chunk_read
+        };
+        if raw_mode && !chunked && size > max_allowed {
+            return read_too_large_response(&s, &parts, &root_name, &rel, Some(size), max_allowed);
+        }
+        let to_read = if chunked {
+            limit_param
+                .unwrap_or(s.options().default_chunk_read)
+                .min(max_allowed)
+        } else {
+            max_allowed.saturating_add(1)
+        };
+        let remaining = size.saturating_sub(chunk_offset);
+        let prealloc = remaining.min(to_read).min(max_allowed) as usize;
+        let data = match (|| -> std::io::Result<Vec<u8>> {
+            if chunk_offset > 0 {
+                file.seek(SeekFrom::Start(chunk_offset))?;
+            }
+            let mut data = Vec::with_capacity(prealloc);
+            (&file).take(to_read).read_to_end(&mut data)?;
+            Ok(data)
+        })() {
+            Ok(d) => d,
+            Err(e) => {
+                return respond(
+                    &s,
+                    &parts,
+                    500,
+                    json!({"error": e.to_string()}),
+                    true,
+                    Some(&root_name),
+                    Some(&rel),
+                    None,
+                );
+            }
+        };
+        if !chunked && data.len() as u64 > max_allowed {
+            return read_too_large_response(&s, &parts, &root_name, &rel, None, max_allowed);
+        }
+        if let Ok(after) = file.metadata() {
+            let after_etag = file_etag(&after);
+            if after_etag != etag {
+                return respond(
+                    &s,
+                    &parts,
+                    409,
+                    json!({
+                        "error": "file changed; retry",
+                        "etag": after_etag,
+                        "total_size": after.len(),
+                    }),
+                    true,
+                    Some(&root_name),
+                    Some(&rel),
+                    None,
+                );
+            }
+        }
+        let bytes_read = data.len() as u64;
+        let next_offset = chunk_offset.saturating_add(bytes_read);
+        let has_more = next_offset < size;
+        if raw_mode {
+            record_response(
+                &s,
+                &parts,
+                200,
+                true,
+                Some(&root_name),
+                Some(&rel),
+                Some(bytes_read),
+                None,
+            );
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, content_type_for_path(&rel))
+                .header(header::CACHE_CONTROL, "no-store")
+                .header(header::ETAG, format!("\"{etag}\""))
+                .header("x-file-total-size", size.to_string())
+                .header("x-file-offset", chunk_offset.to_string())
+                .header("x-file-bytes-read", bytes_read.to_string())
+                .header("x-file-next-offset", next_offset.to_string())
+                .header("x-file-has-more", if has_more { "true" } else { "false" })
+                .body(Body::from(data))
+                .unwrap();
+        }
+        let encoded = B64.encode(&data);
+        drop(data);
+        return respond(
+            &s,
+            &parts,
+            200,
+            json!({
+                "encoding": "base64",
+                "content": encoded,
+                "offset": chunk_offset,
+                "bytes_read": bytes_read,
+                "total_size": size,
+                "next_offset": next_offset,
+                "has_more": has_more,
+                "etag": etag,
+            }),
+            true,
+            Some(&root_name),
+            Some(&rel),
+            Some(bytes_read),
+        );
+    }
+
+    let max_read = if s.agent {
+        s.options().max_agent_read
+    } else {
+        s.options().max_read
+    };
+    if size > max_read {
+        return read_too_large_response(&s, &parts, &root_name, &rel, Some(size), max_read);
+    }
     let data = match (|| -> std::io::Result<Vec<u8>> {
-        use std::io::Read;
-        let mut data = Vec::new();
-        file.take(s.options().max_read.saturating_add(1))
+        let mut data = Vec::with_capacity(size as usize);
+        file.take(max_read.saturating_add(1))
             .read_to_end(&mut data)?;
         Ok(data)
     })() {
@@ -926,21 +1268,17 @@ fn read_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
         }
     };
     let n = data.len() as u64;
-    if n > s.options().max_read {
-        return respond(
-            &s,
-            &parts,
-            413,
-            json!({"error":"file too large"}),
-            true,
-            Some(&root_name),
-            Some(&rel),
-            None,
-        );
+    if n > max_read {
+        return read_too_large_response(&s, &parts, &root_name, &rel, None, max_read);
     }
     let body = match String::from_utf8(data) {
         Ok(text) => json!({"encoding": "text", "content": text}),
-        Err(e) => json!({"encoding": "base64", "content": B64.encode(e.into_bytes())}),
+        Err(e) => {
+            let bytes = e.into_bytes();
+            let encoded = B64.encode(&bytes);
+            drop(bytes);
+            json!({"encoding": "base64", "content": encoded})
+        }
     };
     respond(
         &s,
@@ -1924,9 +2262,7 @@ mod tests {
         ApiOptions {
             rate_limit: 1000,
             rate_window_secs: 60,
-            max_read: MAX_READ_BYTES,
-            max_write: MAX_WRITE_BYTES,
-            list_max: LIST_MAX_ENTRIES,
+            ..ApiOptions::default()
         }
     }
 
@@ -2960,6 +3296,279 @@ mod tests {
         let cfg = serde_json::to_string(&e.state.config_snapshot()).unwrap();
         std::fs::write(&path, format!("\u{feff}{cfg}")).unwrap();
         assert!(BridgeConfig::load_from(&path).is_ok());
+    }
+
+    #[tokio::test]
+    async fn agent_read_whole_chunked_and_raw_modes() {
+        use super::super::access::{AccessPolicy, GrantScope, ScopeMode};
+        use crate::profile::{ProfileKind, RuntimeProfile};
+
+        let opts = ApiOptions {
+            max_read: 1024,
+            max_agent_read: 4096,
+            default_chunk_read: 1024,
+            max_chunk_read: 2048,
+            max_raw_read: 6000,
+            ..default_opts()
+        };
+        let e = setup(false, opts);
+        let profile = RuntimeProfile {
+            kind: ProfileKind::Development,
+            home: e.root.parent().unwrap().join("agent-read-exp"),
+            onboarding_qa: false,
+        };
+        let fixture = profile.home.join("files");
+        std::fs::create_dir_all(&fixture).unwrap();
+
+        // 3000-byte binary file: exceeds legacy max_read (1024), fits agent whole-file read (4096)
+        let mid_blob: Vec<u8> = (0..3000).map(|i| ((i * 31 + 7) % 256) as u8).collect();
+        std::fs::write(e.root.join("mid.bin"), &mid_blob).unwrap();
+        std::fs::write(fixture.join("mid.bin"), &mid_blob).unwrap();
+
+        // 5000-byte binary PNG-named file: exceeds agent whole-file read (4096), fits raw whole read (6000)
+        let big_blob: Vec<u8> = (0..5000).map(|i| ((i * 17 + 13) % 256) as u8).collect();
+        std::fs::write(fixture.join("photo.png"), &big_blob).unwrap();
+
+        // 7000-byte binary file: exceeds raw whole-file read (6000)
+        let huge_blob = vec![0xABu8; 7000];
+        std::fs::write(fixture.join("huge.bin"), &huge_blob).unwrap();
+
+        let (access, error) = AccessRuntime::open(&profile);
+        assert!(error.is_none());
+        e.state.attach_access(access.clone());
+        let policy = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: [("fixture".into(), fixture.clone())].into(),
+            search: GrantScope::Folders,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..Default::default()
+        };
+        access.validate(&policy).unwrap();
+        access.save(policy, false).unwrap();
+        access
+            .issue_agent_token(|key| e.state.audit().protect_secret(key))
+            .unwrap();
+        let agent_token = access.agent_token().unwrap();
+
+        // 1. Legacy /api/read still enforces max_read (1024)
+        let (code, body, _) = call(
+            &e.app,
+            "GET",
+            "/api/read?root=fixture&path=mid.bin",
+            Some(&e.token),
+            "",
+        )
+        .await;
+        assert_eq!(code, 413);
+        assert_eq!(body["error"], "file too large (3000 bytes)");
+        assert!(body.get("chunked_supported").is_none());
+
+        // 2. Agent /agent/v1/read whole-file succeeds for 3000 bytes
+        let (code, body, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=mid.bin",
+            Some(&agent_token),
+            "",
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(body["encoding"], "base64");
+        assert_eq!(
+            B64.decode(body["content"].as_str().unwrap()).unwrap(),
+            mid_blob
+        );
+
+        // 3. Agent /agent/v1/read whole-file returns structured 413 for 5000 bytes
+        let (code, body, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=photo.png",
+            Some(&agent_token),
+            "",
+        )
+        .await;
+        assert_eq!(code, 413);
+        assert_eq!(body["size"], 5000);
+        assert_eq!(body["max_bytes"], 4096);
+        assert_eq!(body["chunked_supported"], true);
+        assert_eq!(body["recommended_limit"], 1024);
+
+        // 4. Chunked JSON read reassembles 5000 bytes, caps oversized limit to max_chunk_read (2048),
+        //    and enforces if_match consistency
+        let mut assembled = Vec::new();
+        let mut offset = 0u64;
+        let mut etag = String::new();
+        let mut chunks = 0;
+        loop {
+            let uri = if etag.is_empty() {
+                // Deliberately request limit=9999 to verify capping to max_chunk_read (2048)
+                format!("/agent/v1/read?root=fixture&path=photo.png&offset={offset}&limit=9999")
+            } else {
+                format!(
+                    "/agent/v1/read?root=fixture&path=photo.png&offset={offset}&limit=2048&if_match={}",
+                    urlencode(&etag)
+                )
+            };
+            let (code, body, _) = call(&e.app, "GET", &uri, Some(&agent_token), "").await;
+            assert_eq!(code, 200);
+            assert_eq!(body["encoding"], "base64");
+            assert_eq!(body["offset"], offset);
+            assert_eq!(body["total_size"], 5000);
+            let bytes_read = body["bytes_read"].as_u64().unwrap();
+            assert!(bytes_read <= 2048);
+            if etag.is_empty() {
+                etag = body["etag"].as_str().unwrap().to_string();
+                assert!(!etag.is_empty());
+            } else {
+                assert_eq!(body["etag"].as_str().unwrap(), etag);
+            }
+            let chunk = B64.decode(body["content"].as_str().unwrap()).unwrap();
+            assert_eq!(chunk.len() as u64, bytes_read);
+            assembled.extend_from_slice(&chunk);
+            offset = body["next_offset"].as_u64().unwrap();
+            chunks += 1;
+            if !body["has_more"].as_bool().unwrap() {
+                break;
+            }
+        }
+        assert_eq!(chunks, 3); // 2048 + 2048 + 904
+        assert_eq!(assembled, big_blob);
+
+        // 5. Boundary checks: offset == size (empty tail), offset > size (416), bad params (400)
+        let (code, body, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=photo.png&offset=5000&limit=1024",
+            Some(&agent_token),
+            "",
+        )
+        .await;
+        assert_eq!(code, 200);
+        assert_eq!(body["bytes_read"], 0);
+        assert_eq!(body["has_more"], false);
+        assert_eq!(body["content"], "");
+
+        let (code, _, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=photo.png&offset=5001",
+            Some(&agent_token),
+            "",
+        )
+        .await;
+        assert_eq!(code, 416);
+
+        for bad in [
+            "/agent/v1/read?root=fixture&path=photo.png&offset=-1",
+            "/agent/v1/read?root=fixture&path=photo.png&limit=0",
+            "/agent/v1/read?root=fixture&path=photo.png&limit=abc",
+            "/agent/v1/read?root=fixture&path=photo.png&raw=maybe",
+        ] {
+            let (code, _, _) = call(&e.app, "GET", bad, Some(&agent_token), "").await;
+            assert_eq!(code, 400, "expected 400 for {bad}");
+        }
+
+        // 6. Stale if_match returns 409 after file modification
+        std::fs::write(fixture.join("photo.png"), b"modified-now").unwrap();
+        let (code, body, _) = call(
+            &e.app,
+            "GET",
+            &format!(
+                "/agent/v1/read?root=fixture&path=photo.png&offset=0&limit=1024&if_match={}",
+                urlencode(&etag)
+            ),
+            Some(&agent_token),
+            "",
+        )
+        .await;
+        assert_eq!(code, 409);
+        assert_eq!(body["error"], "file changed; retry");
+        // Restore photo.png for raw tests
+        std::fs::write(fixture.join("photo.png"), &big_blob).unwrap();
+
+        // 7. Raw binary control group: whole-file, ranged, and quoted ETag / If-Match compatibility
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agent/v1/read?root=fixture&path=photo.png&raw=1")
+            .header("authorization", format!("Bearer {agent_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = e.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap(),
+            "image/png"
+        );
+        let quoted_etag = resp
+            .headers()
+            .get(header::ETAG)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(quoted_etag.starts_with('"') && quoted_etag.ends_with('"'));
+        assert_eq!(resp.headers().get("x-file-total-size").unwrap(), "5000");
+        assert_eq!(resp.headers().get("x-file-has-more").unwrap(), "false");
+        let raw_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(raw_bytes.as_ref(), big_blob.as_slice());
+
+        // Passing the quoted ETag verbatim via if_match query param succeeds
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!(
+                "/agent/v1/read?root=fixture&path=photo.png&raw=1&offset=1000&limit=1500&if_match={}",
+                urlencode(&quoted_etag)
+            ))
+            .header("authorization", format!("Bearer {agent_token}"))
+            .body(Body::empty())
+            .unwrap();
+        let resp = e.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        assert_eq!(resp.headers().get("x-file-offset").unwrap(), "1000");
+        assert_eq!(resp.headers().get("x-file-bytes-read").unwrap(), "1500");
+        assert_eq!(resp.headers().get("x-file-next-offset").unwrap(), "2500");
+        assert_eq!(resp.headers().get("x-file-has-more").unwrap(), "true");
+        let slice_bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(slice_bytes.as_ref(), &big_blob[1000..2500]);
+
+        // Passing the quoted ETag via standard HTTP If-Match header also succeeds (and mismatches return 409)
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agent/v1/read?root=fixture&path=photo.png&raw=1&offset=0&limit=512")
+            .header("authorization", format!("Bearer {agent_token}"))
+            .header(header::IF_MATCH, &quoted_etag)
+            .body(Body::empty())
+            .unwrap();
+        let resp = e.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri("/agent/v1/read?root=fixture&path=photo.png&raw=1&offset=0&limit=512")
+            .header("authorization", format!("Bearer {agent_token}"))
+            .header(header::IF_MATCH, "\"stale-etag\"")
+            .body(Body::empty())
+            .unwrap();
+        let resp = e.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 409);
+
+        // 8. Raw whole-file > max_raw_read (6000) returns structured 413
+        let (code, body, _) = call(
+            &e.app,
+            "GET",
+            "/agent/v1/read?root=fixture&path=huge.bin&raw=1",
+            Some(&agent_token),
+            "",
+        )
+        .await;
+        assert_eq!(code, 413);
+        assert_eq!(body["size"], 7000);
+        assert_eq!(body["max_bytes"], 6000);
+        assert_eq!(body["chunked_supported"], true);
+        assert_eq!(body["raw_supported"], true);
+        assert_eq!(body["recommended_raw_limit"], 2048);
     }
 
     fn urlencode(s: &str) -> String {
