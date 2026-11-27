@@ -9,6 +9,9 @@
 ### 新增功能
 - **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
 
+### 安全与稳定性加固
+- **扩大默认读取保护范围**：`.npmrc`、`.pypirc` 由仅写保护升级为读 / 搜索 / 写全面保护；新增对 `.docker`、`.kube`、`.azure`、gcloud 凭证目录（含 Windows 的 `%APPDATA%\gcloud`）以及浏览器凭证库（Chrome / Edge 的 `User Data`、Firefox 的 `Profiles` 容器整体）的默认保护，避免磁盘授权或主目录授权时令牌与登录数据被读取。
+
 ## [v0.2.2] - 2026-11-27
 
 ### 优化与新增

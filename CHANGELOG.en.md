@@ -9,6 +9,9 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ### Added
 - **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
 
+### Security & Stability
+- **Expanded default read protection**: `.npmrc` and `.pypirc` are promoted from write-only protection to full protection (read / search / write). Added default protection for `.docker`, `.kube`, `.azure`, gcloud credential directories (including `%APPDATA%\gcloud` on Windows), and browser credential stores (the whole Chrome / Edge `User Data` and Firefox `Profiles` containers), so tokens and login data cannot be read even under disk-wide or home-folder grants.
+
 ## [v0.2.2] - 2026-11-27
 
 ### Improvements & Added
