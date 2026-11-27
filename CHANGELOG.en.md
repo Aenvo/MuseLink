@@ -8,6 +8,7 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 
 ### Added
 - **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
+- **macOS support**: MuseLink now builds and runs on macOS, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup (discovers the Tailscale app bundle and Homebrew installs). Sandboxed command execution remains Windows-only; macOS builds are unsigned and not notarized.
 
 ## [v0.2.2] - 2026-11-27
 

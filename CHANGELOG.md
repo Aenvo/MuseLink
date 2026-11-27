@@ -8,6 +8,7 @@
 
 ### 新增功能
 - **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
+- **macOS 支持**：MuseLink 现已可在 macOS 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置（自动发现 Tailscale 应用包与 Homebrew 安装）。本机命令执行仍仅支持 Windows；macOS 构建未签名、未公证。
 
 ## [v0.2.2] - 2026-11-27
 
