@@ -64,7 +64,7 @@
 | 配布形式 | ダウンロードと起動 |
 | --- | --- |
 | Windows ポータブル版 | `MuseLink-<version>-windows-x64-portable.zip` をダウンロードし、アーカイブ全体を展開して `muse-connector.exe` を起動します（新バージョン通知とダウンロードページへの直接リンクに対応）。 |
-| Windows インストーラー版 | `MuseLink-<version>-windows-x64-setup.exe` をダウンロードしてインストールします（「アプリ情報 → アップデートを確認」から Minisign 署名検証付きのアプリ内更新・自動再起動に対応）。 |
+| Windows インストーラー版 | `MuseLink-<version>-windows-x64-setup.exe` をダウンロードしてインストールします（「アプリ情報 → 更新を確認」から Minisign 署名検証付きのアプリ内更新・自動再起動に対応）。 |
 | Linux AppImage | `MuseLink-<version>-linux-x64.AppImage` をダウンロードし、実行権限を付与してそのまま起動します（Minisign 署名検証付きのアプリ内更新・自動再起動に対応）。 |
 | Linux deb | `MuseLink-<version>-linux-x64.deb` をダウンロードし、パッケージマネージャーでインストールします（新バージョン通知・リリースノート表示・ダウンロードリンクに対応）。 |
 
