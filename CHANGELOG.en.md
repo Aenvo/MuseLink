@@ -4,6 +4,19 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
+## [v0.3.1] - 2026-11-27
+
+### Fixes & Cross-Platform Adaptation
+- **Fixed "Copy dedicated token" always failing on macOS / Linux and transiently failing on Windows**:
+  - **Native macOS secret pasteboard**: Implemented token copying via AppKit `NSPasteboard` with `org.nspasteboard.ConcealedType`, `org.nspasteboard.TransientType`, and `CurrentHostOnly` to keep credentials out of clipboard managers and Universal Clipboard sync.
+  - **Linux clipboard support**: Added stdin-based clipboard writing via `wl-copy`, `xclip`, or `xsel` (never passing tokens on the command line and detaching stdio so background clipboard daemons never hang).
+  - **Windows clipboard retry & privacy flags**: Added short backoff retries around `OpenClipboard` to handle brief contention from Clipboard History or third-party monitors right after copying setup instructions, and standardized 4-byte `DWORD(0)` markers for `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory`, and `CanUploadClipboardData`.
+  - **Actionable failure diagnostics**: Surfaced localized failure reasons (ZH/EN/JA) in both the setup guide and connection card while keeping the **Locate token file** fallback.
+- **Fixed macOS / Linux "Manage local drives (full access)" returning HTTP 403 for Desktop and all requests**:
+  - **Unix local root discovery & validation**: Implemented `fixed_local_roots()` on macOS and Linux to expose the system root (`root` -> `/`), updated disk alias validation and the disk picker UI (`System root (/)`), and failed closed when no local roots exist—fixing empty `/agent/v1/roots` and HTTP 403 responses from `/agent/v1/locations/desktop` and file operations.
+  - **macOS / Linux sensitive-path protection & safe search exclusions**: Added read/search/write protection for macOS `~/Library/Keychains`, default write protection for macOS/Linux system directories, login/autostart paths (`~/Library/LaunchAgents`, `~/.config/autostart`), login shell profiles (`.zprofile`, `.zshenv`, `.bash_profile`), and `.app` bundles; excluded macOS `/System`, `/Library`, `/Applications`, `/usr`, `/bin`, `/sbin`, `/private`, `~/Library` (preventing delayed iCloud Drive / app-container TCC prompt storms), the Photos library, `/dev`, and non-local `/Volumes/*` mounts (and Linux `/proc`, `/sys`, `/dev`, `/run`) from background filename scanning without blocking explicit direct reads.
+  - **macOS privacy permission (TCC) UX & API error clarity**: Primed Desktop, Documents, and Downloads upfront before recursive indexing so permission prompts appear immediately rather than straggling; added a one-click **Open Full Disk Access settings** button in full-access mode on macOS; made Desktop/search wording platform-neutral in trilingual connector instructions; and mapped OS `PermissionDenied` errors to actionable HTTP 403 responses.
+
 ## [v0.3.0] - 2026-11-27
 
 ### Added

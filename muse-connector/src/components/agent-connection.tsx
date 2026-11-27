@@ -23,9 +23,9 @@ export default function AgentConnection({
   onEditDeviceName: () => void;
   confirm: (value: Confirmation) => void;
 }) {
-  const { language, t } = useLanguage();
+  const { language, t, diagnostic } = useLanguage();
   const [clipboard, setClipboard] = useState<{ instructions: string; version: string | null; copied: boolean } | null>(null);
-  const [tokenCopyFailure, setTokenCopyFailure] = useState<{ version: string | null } | null>(null);
+  const [tokenCopyFailure, setTokenCopyFailure] = useState<{ version: string | null; message: string } | null>(null);
   const { file_access: policy, agent_ready: ready, agent_enabled: enabled, agent_token_version: tokenVersion, exec_enabled: execEnabled } = snapshot;
   const hasPermission = hasFileGrant(policy);
   const canIssue = hasPermission && !snapshot.setup_error;
@@ -69,7 +69,7 @@ export default function AgentConnection({
   const copyToken = async () => {
     setTokenCopyFailure(null);
     const result = await bridge.run(t("正在复制专用令牌"), "copy_agent_token", undefined, t("令牌已复制，请粘贴到 Muse 安全卡片"), false);
-    if (!result.ok) setTokenCopyFailure({ version });
+    if (!result.ok) setTokenCopyFailure({ version, message: result.error });
   };
 
   const description = !enabled
@@ -127,7 +127,9 @@ export default function AgentConnection({
             </div>
             {tokenCopyFailure?.version === version ? (
               <p className="text-caption" role="alert">
-                {t("复制令牌失败。请重试，或在「设置 → 数据」打开本机令牌目录后手动复制。")}
+                {tokenCopyFailure.message
+                  ? diagnostic(tokenCopyFailure.message)
+                  : t("复制令牌失败。请重试，或在「设置 → 数据」打开本机令牌目录后手动复制。")}
               </p>
             ) : null}
             {copyResult?.copied ? (

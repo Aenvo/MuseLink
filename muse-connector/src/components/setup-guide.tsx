@@ -55,7 +55,7 @@ export default function SetupGuide({
   const [selectedAlias, setSelectedAlias] = useState<string | null>(verification?.alias ?? null);
   const [copied, setCopied] = useState<{ text: string; scope: string | null; ok: boolean } | null>(null);
   const [actionError, setActionError] = useState<{ step: number; message: string } | null>(null);
-  const [credentialErrorScope, setCredentialErrorScope] = useState<string | null>(null);
+  const [credentialError, setCredentialError] = useState<{ scope: string | null; message: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [showTailscaleHelp, setShowTailscaleHelp] = useState(false);
   const { desktop, status, file_access: policy, agent_token_version: tokenVersion } = snapshot;
@@ -181,9 +181,9 @@ export default function SetupGuide({
       execute: async () => (await bridge.run(issue.busy, "set_agent_access", { enabled: true }, issue.done)).ok });
   };
   const copyToken = async () => {
-    setCredentialErrorScope(null);
+    setCredentialError(null);
     const result = await bridge.run(t("正在复制专用令牌"), "copy_agent_token", undefined, t("令牌已复制，请粘贴到 Muse 安全卡片"), false);
-    if (!result.ok) setCredentialErrorScope(scope);
+    if (!result.ok) setCredentialError({ scope, message: result.error });
   };
   const next = (read: boolean) => {
     if (!address || !scope || busy || (read ? !handedOff : !publicReady || !instructions)) return;
@@ -348,8 +348,8 @@ export default function SetupGuide({
         </ol>
       </ScrollArea>
       {action ? <CardFooter ref={footer} className="setup-guide-footer flex-wrap justify-end gap-2 border-t">
-        {active === 2 && scope && credentialErrorScope === scope ? <div className="flex w-full flex-wrap items-center gap-x-2 text-caption">
-          <p role="alert">{t("复制令牌失败，请重试。")}</p>
+        {active === 2 && scope && credentialError?.scope === scope ? <div className="flex w-full flex-wrap items-center gap-x-2 text-caption">
+          <p role="alert">{credentialError.message ? diagnostic(credentialError.message) : t("复制令牌失败，请重试。")}</p>
           <Button variant="link" size="sm" className="px-0" disabled={busy} onClick={() => void run(t("正在定位令牌文件"), "open_agent_token")}>{t("定位令牌文件")}</Button>
         </div> : null}
         {action}

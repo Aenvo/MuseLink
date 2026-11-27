@@ -77,6 +77,7 @@ export interface Snapshot {
   dependencies: { tailscale: boolean; cloudflared: boolean; simulated: boolean };
   capabilities: { enabled: boolean; tools: string[] }; version: string;
   autostart: boolean | null; update_configured: boolean;
+  platform?: "windows" | "macos" | "linux" | string;
   in_app_update_supported?: boolean;
   install_kind?: string;
   log_bytes: number;
