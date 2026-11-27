@@ -169,6 +169,7 @@ impl ServiceController {
             ApiOptions::default(),
         );
         api.attach_access(access.clone());
+        api.set_legacy_api_enabled(desktop.legacy_api_enabled);
         let exec = ExecRuntime::new(&profile.home, desktop.exec_enabled);
         exec.attach_audit(Arc::new(ApiAuditSink(api.clone())));
         api.attach_exec(exec.clone());
@@ -552,9 +553,18 @@ impl ServiceController {
             }
         });
     }
+    /// 归属探针与当前启用的表面对齐：有 Agent 令牌时探 /agent/v1/roots，
+    /// 否则探旧版 /api/health。旧接口关闭后健康检查不再依赖旧表面存活。
+    async fn probe_owned(&self, port: u16) -> bool {
+        if let Some(agent_token) = self.access.agent_token() {
+            probe_owned_agent_api(port, &agent_token).await
+        } else {
+            probe_owned_api(port, &self.api.token()).await
+        }
+    }
     async fn supervise(&self) {
         self.supervise_with(|port| async move {
-            if !probe_owned_api(port, &self.api.token()).await {
+            if !self.probe_owned(port).await {
                 return None;
             }
             Some(if self.profile.is_development() {
@@ -688,7 +698,7 @@ impl ServiceController {
             }));
             runtime.shutdown = Some(tx);
         }
-        if !probe_owned_api(runtime.actual_port, &self.api.token()).await {
+        if !self.probe_owned(runtime.actual_port).await {
             self.stop_api(runtime).await;
             self.publish(
                 Health::Down,
@@ -859,13 +869,16 @@ impl ServiceController {
             return Err(e);
         }
         if !self.initialized.load(Ordering::Relaxed) {
-            if !self.profile.token_path().exists() {
-                token::save(&self.profile.token_path(), &token::generate())
-                    .map_err(|_| "初始化令牌失败，请重试")?;
+            // 旧令牌是旧版 /api 的凭证：仅在显式开启兼容接口时才生成与加载。
+            if self.desktop.read().unwrap().legacy_api_enabled {
+                if !self.profile.token_path().exists() {
+                    token::save(&self.profile.token_path(), &token::generate())
+                        .map_err(|_| "初始化令牌失败，请重试")?;
+                }
+                self.api.set_token(
+                    token::load(&self.profile.token_path()).map_err(|_| "无法读取本机令牌")?,
+                );
             }
-            self.api.set_token(
-                token::load(&self.profile.token_path()).map_err(|_| "无法读取本机令牌")?,
-            );
             self.initialized.store(true, Ordering::Relaxed);
             *self.setup_error.write().unwrap() = None;
         }
@@ -1025,6 +1038,25 @@ impl ServiceController {
         Ok(())
     }
 
+    pub async fn set_legacy_api_enabled(&self, enabled: bool) -> Result<(), String> {
+        let _operation = self.runtime.lock().await;
+        self.update_desktop(|state| {
+            state.legacy_api_enabled = enabled;
+            Ok(true)
+        })?;
+        self.api.set_legacy_api_enabled(enabled);
+        self.logs.runtime_entry(
+            "info",
+            if enabled {
+                "旧版 /api 兼容接口已开启（使用独立文件令牌）"
+            } else {
+                "旧版 /api 兼容接口已关闭"
+            },
+        );
+        self.status.send_modify(|_| {});
+        Ok(())
+    }
+
     pub fn resolve_exec_approval(
         &self,
         id: &str,
@@ -1145,6 +1177,16 @@ async fn probe_owned_api(port: u16, token: &str) -> bool {
         let body=response.split_once("\r\n\r\n").map(|(_,b)|b).unwrap_or("");
         let valid=serde_json::from_str::<Value>(body).ok().is_some_and(|v|v["ok"]==true&&v["version"]=="0.3");
         Ok::<bool,std::io::Error>(response.starts_with("HTTP/1.1 200")&&valid)
+    }).await.ok().and_then(Result::ok).unwrap_or(false)
+}
+
+async fn probe_owned_agent_api(port: u16, token: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(3),async{
+        let mut connection=tokio::net::TcpStream::connect(("127.0.0.1",port)).await?;
+        connection.write_all(format!("GET /agent/v1/roots HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n").as_bytes()).await?;
+        let mut bytes=Vec::new();connection.take(16384).read_to_end(&mut bytes).await?;
+        let response=String::from_utf8_lossy(&bytes);
+        Ok::<bool,std::io::Error>(response.starts_with("HTTP/1.1 200"))
     }).await.ok().and_then(Result::ok).unwrap_or(false)
 }
 
@@ -1298,6 +1340,7 @@ mod tests {
 
         let mut config = first.config;
         config.roots.insert("qa".into(), profile.home.join("files"));
+        controller.set_legacy_api_enabled(true).await.unwrap();
         controller.configure(config).await.unwrap();
         let saved = controller.snapshot();
         assert!(saved.initialized && !saved.fresh_setup);
@@ -1664,6 +1707,7 @@ mod tests {
         let mut profile = profile();
         profile.onboarding_qa = true;
         let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        controller.set_legacy_api_enabled(true).await.unwrap();
         let input = profile.home.join("files/input");
         let output = profile.home.join("files/output");
         std::fs::create_dir(&input).unwrap();
@@ -1742,6 +1786,7 @@ mod tests {
             let profile = profile();
             let home = profile.home.clone();
             let controller = ServiceController::open_inner(profile, Some(0));
+            controller.set_legacy_api_enabled(true).await.unwrap();
             let mut config = controller.api.config_snapshot();
             config.read_only = false;
             let (root, path) = config.roots.first_key_value().unwrap();
@@ -1817,6 +1862,7 @@ mod tests {
         let profile = profile();
         let home = profile.home.clone();
         let controller = ServiceController::open_inner(profile, Some(0));
+        controller.set_legacy_api_enabled(true).await.unwrap();
 
         for action in ["pause", "switch", "exit"] {
             controller
@@ -1989,6 +2035,7 @@ mod tests {
         let profile = profile();
         let home = profile.home.clone();
         let controller = ServiceController::open_inner(profile, Some(0));
+        controller.set_legacy_api_enabled(true).await.unwrap();
         controller.toggle(true).await.unwrap();
         controller.suspend_for_update().await.unwrap();
         assert!(!controller.status().api_up);
@@ -2006,6 +2053,7 @@ mod tests {
         let profile = profile();
         let home = profile.home.clone();
         let controller = ServiceController::open_inner(profile.clone(), Some(0));
+        controller.set_legacy_api_enabled(true).await.unwrap();
         controller.toggle(true).await.unwrap();
         let port = controller.status().api_port;
         assert!(port > 0);
@@ -2031,6 +2079,7 @@ mod tests {
         let profile = profile();
         let home = profile.home.clone();
         let controller = ServiceController::open_inner(profile, Some(0));
+        controller.set_legacy_api_enabled(true).await.unwrap();
         controller.toggle(true).await.unwrap();
         let port = controller.status().api_port;
         let status_before = controller.status().last_check;
@@ -2079,6 +2128,7 @@ mod tests {
         let profile = profile();
         let home = profile.home.clone();
         let controller = ServiceController::open_inner(profile, Some(0));
+        controller.set_legacy_api_enabled(true).await.unwrap();
         controller.toggle(true).await.unwrap();
         {
             let mut runtime = controller.runtime.lock().await;

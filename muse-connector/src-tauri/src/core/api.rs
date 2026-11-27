@@ -15,7 +15,7 @@
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
@@ -185,6 +185,7 @@ struct Inner {
     token: RwLock<String>,
     config: RwLock<BridgeConfig>,
     token_update: RwLock<()>,
+    legacy_enabled: AtomicBool,
     audit: Audit,
     options: ApiOptions,
     rate: Mutex<HashMap<String, (Instant, u64)>>,
@@ -218,6 +219,7 @@ impl ApiState {
                     token: RwLock::new(tok),
                     config: RwLock::new(cfg),
                     token_update: RwLock::new(()),
+                    legacy_enabled: AtomicBool::new(false),
                     audit,
                     options: ApiOptions::default(),
                     rate: Mutex::new(HashMap::new()),
@@ -251,6 +253,7 @@ impl ApiState {
                     token: RwLock::new(tok),
                     config: RwLock::new(cfg),
                     token_update: RwLock::new(()),
+                    legacy_enabled: AtomicBool::new(false),
                     audit,
                     options,
                     rate: Mutex::new(HashMap::new()),
@@ -273,6 +276,12 @@ impl ApiState {
     pub(crate) fn set_token(&self, t: String) {
         let _guard = self.inner.token_update.write().unwrap();
         *self.inner.token.write().unwrap() = t;
+    }
+    pub(crate) fn legacy_api_enabled(&self) -> bool {
+        self.inner.legacy_enabled.load(Ordering::Relaxed)
+    }
+    pub(crate) fn set_legacy_api_enabled(&self, enabled: bool) {
+        self.inner.legacy_enabled.store(enabled, Ordering::Relaxed);
     }
     pub fn read_only(&self) -> bool {
         self.inner.config.read().unwrap().read_only
@@ -416,9 +425,15 @@ enum Gate {
     Ok,
     Unauth,
     RateLimited,
+    NotFound,
 }
 
 fn gate(state: &ApiState, parts: &axum::http::request::Parts) -> Gate {
+    // 旧版 /api 兼容接口默认关闭：未显式开启时整个旧表面按不存在处理，
+    // 且不消耗未鉴权限流配额。Agent 表面（state.agent）不受影响。
+    if !state.agent && !state.legacy_api_enabled() {
+        return Gate::NotFound;
+    }
     if state.check_auth(auth_header(parts)) {
         return Gate::Ok;
     }
@@ -721,6 +736,16 @@ fn health_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
                 None,
             )
         }
+        Gate::NotFound => respond(
+            &s,
+            &parts,
+            404,
+            json!({"error": "not found"}),
+            false,
+            None,
+            None,
+            None,
+        ),
     }
 }
 
@@ -781,6 +806,18 @@ fn get_auth_failure(state: &ApiState, parts: &axum::http::request::Parts) -> Opt
         Gate::Ok => {
             state.hit(true);
             return None;
+        }
+        Gate::NotFound => {
+            return Some(respond(
+                state,
+                parts,
+                404,
+                json!({"error": "not found"}),
+                false,
+                None,
+                None,
+                None,
+            ));
         }
         Gate::Unauth => (401, "unauthorized"),
         Gate::RateLimited => (429, "rate limit exceeded"),
@@ -1360,6 +1397,9 @@ async fn post_gate_limited(
         Gate::RateLimited => {
             s.hit(false);
             return Err(post_failure(s, parts, 429, "rate limit exceeded", false).await);
+        }
+        Gate::NotFound => {
+            return Err(post_failure(s, parts, 404, "not found", false).await);
         }
     }
     s.hit(true);
@@ -2163,6 +2203,16 @@ fn not_found_sync(s: ApiState, parts: axum::http::request::Parts) -> Response {
                 None,
             )
         }
+        Gate::NotFound => respond(
+            &s,
+            &parts,
+            404,
+            json!({"error": "not found"}),
+            false,
+            None,
+            None,
+            None,
+        ),
     }
 }
 
@@ -2219,6 +2269,8 @@ mod tests {
             audit: audit_path,
         };
         let (state, _rx) = ApiState::new(cfg, tok.clone(), paths, options);
+        // 攻击矩阵针对旧版 /api 契约：按新前提显式开启兼容接口。
+        state.set_legacy_api_enabled(true);
         let app = router(state.clone());
         Env {
             dir,
@@ -2264,6 +2316,23 @@ mod tests {
             rate_window_secs: 60,
             ..ApiOptions::default()
         }
+    }
+
+    #[tokio::test]
+    async fn legacy_routes_are_not_found_until_explicitly_enabled() {
+        let e = setup(false, default_opts());
+        e.state.set_legacy_api_enabled(false);
+        // 即使持有旧令牌，旧表面在未开启时也按不存在处理。
+        let (code, _, _) = call(&e.app, "GET", "/api/health", Some(&e.token), "").await;
+        assert_eq!(code, 404);
+        let (code, _, _) = call(&e.app, "GET", "/api/list", Some(&e.token), "").await;
+        assert_eq!(code, 404);
+        // Agent 表面不受影响：仍按自身鉴权返回 401。
+        let (code, _, _) = call(&e.app, "GET", "/agent/v1/roots", Some(&e.token), "").await;
+        assert_eq!(code, 401);
+        e.state.set_legacy_api_enabled(true);
+        let (code, _, _) = call(&e.app, "GET", "/api/health", Some(&e.token), "").await;
+        assert_eq!(code, 200);
     }
 
     #[tokio::test]

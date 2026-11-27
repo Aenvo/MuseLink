@@ -9,6 +9,9 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ### Added
 - **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
 
+### Security & Stability
+- **Legacy `/api` surface is now opt-in**: new desktop setting `legacy_api_enabled` (default off). While off, the legacy file token is no longer generated or saved automatically and every `/api/*` route is treated as nonexistent (404), leaving `/agent/v1` as the only public surface; explicitly enabling the setting restores the previous v0.3-compatible behavior. The built-in ownership probe follows whichever surface is active (it probes `/agent/v1/roots` when an agent token exists), so startup and supervision are unaffected.
+
 ## [v0.2.2] - 2026-11-27
 
 ### Improvements & Added

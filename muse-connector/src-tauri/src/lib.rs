@@ -112,6 +112,13 @@ async fn set_exec_enabled(enabled: bool, state: tauri::State<'_, Services>) -> R
     state.set_exec_enabled(enabled).await
 }
 #[tauri::command]
+async fn set_legacy_api_enabled(
+    enabled: bool,
+    state: tauri::State<'_, Services>,
+) -> Result<(), String> {
+    state.set_legacy_api_enabled(enabled).await
+}
+#[tauri::command]
 fn resolve_exec_approval(
     id: String,
     decision: core::exec_runtime::ApprovalDecision,
@@ -925,6 +932,7 @@ pub fn run() {
             rebuild_search_index,
             set_agent_access,
             set_exec_enabled,
+            set_legacy_api_enabled,
             resolve_exec_approval,
             revoke_exec_sessions,
             open_agent_token,
