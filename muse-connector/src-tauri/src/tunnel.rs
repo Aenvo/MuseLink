@@ -86,6 +86,12 @@ fn platform_exe_name(name: &str) -> &str {
     }
 }
 
+/// CLI shipped inside the macOS Tailscale app bundle.
+#[cfg(target_os = "macos")]
+fn tailscale_app_bundle_exe() -> PathBuf {
+    PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
+}
+
 pub fn discover_executable(name: &str) -> Option<PathBuf> {
     let name = platform_exe_name(name);
     if let Some(found) = std::env::var_os("PATH").and_then(|p| {
@@ -127,7 +133,18 @@ pub fn discover_executable(name: &str) -> Option<PathBuf> {
     }
     if cfg!(unix) {
         candidates.push(PathBuf::from("/usr/local/bin").join(name));
+        // Apple Silicon Homebrew lives here; GUI apps start with a minimal
+        // PATH that does not include it, so PATH lookup alone misses brew
+        // installs of tailscale / cloudflared.
+        candidates.push(PathBuf::from("/opt/homebrew/bin").join(name));
         candidates.push(PathBuf::from("/usr/bin").join(name));
+    }
+    // The macOS Tailscale app keeps its CLI inside the bundle under a
+    // capitalised file name; treat it like the Windows Program Files
+    // special case above.
+    #[cfg(target_os = "macos")]
+    if name == "tailscale" {
+        candidates.push(tailscale_app_bundle_exe());
     }
     candidates.into_iter().find(|p| p.is_file())
 }
@@ -453,6 +470,14 @@ pub(crate) fn ensure_exclusive_mapping(cfg: &Value, port: u16) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn tailscale_bundle_path_points_into_the_app() {
+        assert_eq!(
+            tailscale_app_bundle_exe(),
+            PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
+        );
+    }
     #[test]
     fn platform_exe_name_strips_exe_on_unix() {
         if cfg!(not(windows)) {
