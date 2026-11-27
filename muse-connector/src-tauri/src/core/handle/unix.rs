@@ -93,20 +93,54 @@ fn not_regular_file() -> Error {
     ))
 }
 
-/// Read the process umask from `/proc/self/status` without changing it.
+/// Pointer to this thread's errno cell.
+///
+/// glibc exposes it as `__errno_location()`; macOS (and the BSDs) call the
+/// same cell `__error()`. Keeping the split in one helper leaves the
+/// readdir clear/check sequence below platform-neutral.
+fn errno_location() -> *mut libc::c_int {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::__errno_location()
+    }
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        libc::__error()
+    }
+}
+
+/// Read the process umask without permanently changing it.
 fn current_umask() -> libc::mode_t {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return 0o022;
-    };
-    for line in status.lines() {
-        let Some(value) = line.strip_prefix("Umask:") else {
-            continue;
-        };
-        if let Ok(parsed) = libc::mode_t::from_str_radix(value.trim(), 8) {
-            return parsed;
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                let Some(value) = line.strip_prefix("Umask:") else {
+                    continue;
+                };
+                if let Ok(parsed) = libc::mode_t::from_str_radix(value.trim(), 8) {
+                    return parsed;
+                }
+            }
+        }
+        0o022
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No /proc on macOS: read the mask by swapping it to 0 and restoring
+        // it immediately (the only portable query POSIX offers). The window
+        // between the two calls is two syscalls; a file created by another
+        // thread of this process inside that window could briefly get a
+        // wider mode, but this backend always fchmod()s the files it creates
+        // to their final mode, so its own outputs are unaffected. The
+        // alternative (assuming 0o022) silently produces wrong modes for
+        // every user whose umask differs.
+        unsafe {
+            let current = libc::umask(0);
+            libc::umask(current);
+            current
         }
     }
-    0o022
 }
 
 fn fchmod(file: &File, mode: libc::mode_t) -> Result<(), Error> {
@@ -211,8 +245,18 @@ fn verify_root(file: &File, canonical_root: &Path) -> Result<(), Error> {
 }
 
 fn open_root(target: &Resolved) -> Result<File, Error> {
+    // On macOS the requested (lexical) root can cross the OS alias symlinks
+    // (/var -> /private/var etc.), which a nofollow walk must reject, so the
+    // strict walk uses the canonical root instead. Its components are real
+    // directories by construction, verify_root() below still pins the
+    // opened fd to the canonical root's device/inode, and traversal below
+    // the root stays nofollow, so a swapped component still fails closed.
+    #[cfg(target_os = "macos")]
+    let strict_root = &target.root;
+    #[cfg(not(target_os = "macos"))]
+    let strict_root = &target.requested_root;
     let file = if target.reject_reparse {
-        open_from_root(&target.requested_root)?
+        open_from_root(strict_root)?
     } else {
         open_path_absolute(&target.root, true)?
     };
@@ -319,11 +363,11 @@ pub(crate) fn list(target: &Resolved, mut visit: impl FnMut(Entry)) -> Result<()
         loop {
             // readdir uses errno: clear before call, then distinguish end vs error.
             unsafe {
-                *libc::__errno_location() = 0;
+                *errno_location() = 0;
             }
             let entry = unsafe { libc::readdir(dir) };
             if entry.is_null() {
-                let errno = unsafe { *libc::__errno_location() };
+                let errno = unsafe { *errno_location() };
                 if errno == 0 {
                     return Ok(());
                 }
@@ -689,7 +733,7 @@ mod tests {
         write(&target, b"new").unwrap();
         let mode = file_mode(&target.path);
         assert_ne!(mode, 0o666);
-        assert_eq!(mode, 0o666 & !current_umask());
+        assert_eq!(mode, u32::from(0o666 & !current_umask()));
     }
 
     #[test]
