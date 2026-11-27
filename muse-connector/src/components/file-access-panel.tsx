@@ -1,6 +1,6 @@
 import { useLanguage, type Translate } from "@/lib/i18n";
 import { useId, useRef, useState } from "react";
-import { Check, ChevronDown, FolderOpen, Trash2 } from "lucide-react";
+import { Check, ChevronDown, ExternalLink, FolderOpen, Trash2 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { DropdownMenu } from "radix-ui";
 import { Button } from "@/components/ui/button";
@@ -32,7 +32,10 @@ function folderAlias(path: string, roots: Record<string, string>) {
 }
 
 function diskLabel(t: Translate, alias: string) {
-  return alias === "test-disk" ? t("测试磁盘") : alias.slice("drive-".length).toUpperCase() + ":";
+  if (alias === "test-disk") return t("测试磁盘");
+  if (alias === "root") return t("系统根目录（/）");
+  if (alias.startsWith("drive-")) return alias.slice("drive-".length).toUpperCase() + ":";
+  return alias;
 }
 
 function DiskPicker({ selected, onChange, disabled }: { selected: string[] | null; onChange: (value: string[] | null) => void; disabled: boolean }) {
@@ -96,13 +99,14 @@ export default function FileAccessPanel({ bridge, snapshot, guided = false, onSa
   const saved = snapshot.file_access;
   const initialRoots = saved?.roots ?? snapshot.config.roots;
   const savedKey = saved ? accessPolicyKey(saved) : JSON.stringify(Object.entries(initialRoots).sort());
-  return <AccessEditor key={savedKey} bridge={bridge} saved={saved} initialRoots={initialRoots} guided={guided} onSaved={onSaved} />;
+  return <AccessEditor key={savedKey} bridge={bridge} saved={saved} initialRoots={initialRoots} platform={snapshot.platform} guided={guided} onSaved={onSaved} />;
 }
 
-function AccessEditor({ bridge, saved, initialRoots, guided, onSaved }: {
+function AccessEditor({ bridge, saved, initialRoots, platform, guided, onSaved }: {
   bridge: BridgeModel;
   saved: FileAccessPolicy | null;
   initialRoots: FileAccessPolicy["roots"];
+  platform?: string;
   guided: boolean;
   onSaved: () => void;
 }) {
@@ -196,10 +200,32 @@ function AccessEditor({ bridge, saved, initialRoots, guided, onSaved }: {
                 : canEnableAll && !enableAllOperations
                   ? t("调整范围时会保留当前的搜索、读取和写入权限。")
                   : mode === "full"
-                    ? t("Muse 可搜索、读取和写入所选磁盘中当前 Windows 账户可访问的文件。")
+                    ? t("Muse 可搜索、读取和写入所选磁盘中当前系统账户可访问的文件。")
                     : t("Muse 可搜索、读取和写入所选文件夹及其子文件夹。")}
           </p>
           {showDisks ? <DiskPicker selected={disks} disabled={busy} onChange={selection => { setDisks(selection); setError(null); }} /> : null}
+          {showDisks && platform === "macos" ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-caption text-muted-foreground">
+                {t("在 macOS 上访问桌面、文稿或下载等目录时，请在系统弹窗中允许访问，或在「系统设置 → 隐私与安全性」为 MuseLink 开启对应权限或「完全磁盘访问权限」。")}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="self-start"
+                disabled={busy}
+                onClick={async () => {
+                  setError(null);
+                  const result = await bridge.run(t("正在打开系统隐私设置"), "open_tool_setup", { tool: "macos_full_disk_access" }, undefined, false);
+                  if (!result.ok) setError(result.error);
+                }}
+              >
+                {t("打开完全磁盘访问权限设置")}
+                <ExternalLink data-icon="inline-end" />
+              </Button>
+            </div>
+          ) : null}
           {showFolders ? (
             <div className="flex min-w-0 flex-col gap-2">
               <Button id={guided ? undefined : "add-directory"} type="button" variant="outline" size="sm" className="self-start" disabled={busy} onClick={() => void selectFolder()}>

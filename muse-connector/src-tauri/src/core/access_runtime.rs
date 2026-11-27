@@ -92,6 +92,7 @@ pub(crate) struct AccessRuntime {
     agent_token_path: PathBuf,
     protected: Vec<PathBuf>,
     write_protected: Vec<PathBuf>,
+    search_excluded: Vec<PathBuf>,
     development_home: Option<PathBuf>,
     active: RwLock<ActiveAccess>,
     index: Arc<SearchIndex>,
@@ -128,7 +129,7 @@ impl AccessRuntime {
         let agent_token_path = profile.home.join(AGENT_TOKEN_FILE);
         let agent_token = load_agent_token(&agent_token_path);
         let development_home = profile.is_development().then(|| profile.home.clone());
-        let (protected, write_protected) = if development_home.is_some() {
+        let (protected, write_protected, search_excluded) = if development_home.is_some() {
             let protected: Vec<PathBuf> = [
                 "config.json",
                 "token",
@@ -146,9 +147,15 @@ impl AccessRuntime {
             .map(|item| profile.home.join(item))
             .map(normalize_protected)
             .collect();
-            (protected.clone(), protected)
+            (protected.clone(), protected, Vec::new())
         } else {
-            production_protection(&SensitiveRoots::from_host(&profile.home))
+            let sensitive = SensitiveRoots::from_host(&profile.home);
+            let (protected, write_protected) = production_protection(&sensitive);
+            (
+                protected,
+                write_protected,
+                production_search_excluded(sensitive.user_home.as_deref()),
+            )
         };
         let (policy, preserve_legacy_read_only, error) = match Self::load_settings(&settings_path) {
             Ok(settings) => match settings
@@ -171,6 +178,7 @@ impl AccessRuntime {
                 agent_token_path,
                 protected,
                 write_protected,
+                search_excluded,
                 development_home,
                 active: RwLock::new(ActiveAccess {
                     policy,
@@ -388,9 +396,16 @@ impl AccessRuntime {
                 }
             }
         }
-        if let Some(disks) = &policy.disks {
+        let uses_all_local =
+            [policy.search, policy.read, policy.write].contains(&GrantScope::AllLocal);
+        if uses_all_local {
             let local = self.local_roots();
-            if disks.iter().any(|alias| !local.contains_key(alias)) {
+            if local.is_empty() {
+                return Err("当前没有可用的本机磁盘".into());
+            }
+            if let Some(disks) = &policy.disks
+                && disks.iter().any(|alias| !local.contains_key(alias))
+            {
                 return Err("所选磁盘当前不可用，请重新选择".into());
             }
         }
@@ -452,6 +467,10 @@ impl AccessRuntime {
             (roots, lifecycle.prewarm_cancel.clone())
         };
         let authorized: Vec<_> = roots.values().cloned().collect();
+        #[cfg(target_os = "macos")]
+        if self.development_home.is_none() {
+            prime_macos_priority_folders(&authorized, &cancel);
+        }
         let request = SearchRequest {
             name: format!("MuseIndex-{}", token::generate()),
             limit: Some(1),
@@ -935,6 +954,33 @@ impl AccessRuntime {
         .map_err(|_| AgentSearchError::WorkerFailed)?
     }
 
+    fn search_exclusions_for(&self, roots: &BTreeMap<String, PathBuf>) -> Vec<PathBuf> {
+        let mut excluded = self.protected.clone();
+        if self.development_home.is_some() {
+            return excluded;
+        }
+        let canonical_roots: Vec<_> = roots
+            .values()
+            .map(|path| super::access::canonicalize_direct(path).unwrap_or_else(|| path.clone()))
+            .collect();
+        for path in self
+            .search_excluded
+            .iter()
+            .cloned()
+            .chain(dynamic_search_excluded())
+        {
+            // Only skip OS virtual/duplicate subtrees underneath the searched roots; never hide
+            // an ancestor of an explicitly granted folder root.
+            let covers_root = canonical_roots
+                .iter()
+                .any(|root| protected_path(root, std::slice::from_ref(&path)));
+            if !covers_root {
+                push_unique(&mut excluded, path);
+            }
+        }
+        excluded
+    }
+
     fn run_index_search(
         &self,
         index: &SearchIndex,
@@ -944,13 +990,14 @@ impl AccessRuntime {
         cancel: &AtomicBool,
         allows: &impl Fn(&str, &str) -> bool,
     ) -> Result<SearchResponse, SearchError> {
+        let excluded = self.search_exclusions_for(roots);
         #[cfg(windows)]
         if let Some(engine) = &self.everything
             && let Some(response) = index.search_everything(
                 engine,
                 roots,
                 _authorized_roots,
-                &self.protected,
+                &excluded,
                 request,
                 cancel,
                 allows,
@@ -958,12 +1005,142 @@ impl AccessRuntime {
         {
             return Ok(response);
         }
-        index.search(roots, &self.protected, request, cancel, allows)
+        index.search(roots, &excluded, request, cancel, allows)
     }
 }
 
 fn normalize_protected(path: PathBuf) -> PathBuf {
     super::path_guard::canonical_non_strict(&path).unwrap_or(path)
+}
+
+fn production_search_excluded(user_home: Option<&Path>) -> Vec<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        // Avoid crawling APFS duplicate mounts (/System/Volumes/Data), OS/app bundles,
+        // virtual device filesystems, and macOS hidden Library/TCC-protected containers
+        // (iCloud Drive Mobile Documents, CloudStorage, Containers, Photos library, Caches).
+        // Direct read/list requests into non-protected paths still work when requested explicitly.
+        let mut excluded = Vec::new();
+        for path in [
+            "/System",
+            "/Library",
+            "/Applications",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/private",
+            "/dev",
+            "/cores",
+            "/.vol",
+            "/.nofollow",
+            "/.resolve",
+        ] {
+            push_unique(&mut excluded, PathBuf::from(path));
+        }
+        if let Some(home) = user_home {
+            push_unique(&mut excluded, home.join("Library"));
+            push_unique(
+                &mut excluded,
+                home.join("Pictures/Photos Library.photoslibrary"),
+            );
+        }
+        excluded
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = user_home;
+        let mut excluded = Vec::new();
+        for path in ["/proc", "/sys", "/dev", "/run", "/lost+found"] {
+            push_unique(&mut excluded, PathBuf::from(path));
+        }
+        excluded
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = user_home;
+        Vec::new()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn prime_macos_priority_folders(authorized: &[PathBuf], cancel: &AtomicBool) {
+    // Touch Desktop, Documents, and Downloads upfront before recursive scanning so any
+    // macOS TCC folder prompts appear immediately and back-to-back instead of straggling
+    // behind full directory tree scans. When Full Disk Access is granted, this takes <1ms.
+    for dir in [
+        dirs::desktop_dir(),
+        dirs::document_dir(),
+        dirs::download_dir(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if cancel.load(Ordering::Acquire) {
+            return;
+        }
+        if protected_path(&dir, authorized)
+            && reject_reparse_ancestors(&dir).is_ok()
+            && dir.is_dir()
+        {
+            let _ = std::fs::read_dir(&dir);
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn dynamic_search_excluded() -> Vec<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: passing null/0 queries the number of mounted filesystems.
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count <= 0 {
+        return Vec::new();
+    }
+    let capacity = count as usize + 4;
+    let mut stats = vec![unsafe { std::mem::zeroed::<libc::statfs>() }; capacity];
+    let bytes = match i32::try_from(stats.len() * std::mem::size_of::<libc::statfs>()) {
+        Ok(value) => value,
+        Err(_) => return Vec::new(),
+    };
+    // SAFETY: `stats` holds `bytes` bytes of writable `statfs` storage.
+    let written = unsafe { libc::getfsstat(stats.as_mut_ptr(), bytes, libc::MNT_NOWAIT) };
+    if written <= 0 {
+        return Vec::new();
+    }
+    let mut excluded = Vec::new();
+    for stat in &stats[..(written as usize).min(stats.len())] {
+        // SAFETY: `f_mntonname` is a NUL-terminated buffer populated by the kernel.
+        let mount = unsafe { CStr::from_ptr(stat.f_mntonname.as_ptr()) };
+        let path = PathBuf::from(OsStr::from_bytes(mount.to_bytes()));
+        if path.parent() != Some(Path::new("/Volumes")) {
+            continue;
+        }
+        let is_local = (stat.f_flags & (libc::MNT_LOCAL as u32)) != 0;
+        let is_hidden = (stat.f_flags & (libc::MNT_DONTBROWSE as u32)) != 0;
+        if !is_local || is_hidden {
+            push_unique(&mut excluded, path);
+        }
+    }
+    excluded
+}
+
+#[cfg(not(target_os = "macos"))]
+fn dynamic_search_excluded() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+fn macos_app_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos_dir = exe.parent()?;
+    if macos_dir.file_name()? != "MacOS" {
+        return None;
+    }
+    let contents_dir = macos_dir.parent()?;
+    if contents_dir.file_name()? != "Contents" {
+        return None;
+    }
+    let bundle = contents_dir.parent()?;
+    (bundle.extension().and_then(|ext| ext.to_str()) == Some("app")).then(|| bundle.to_path_buf())
 }
 
 struct SensitiveRoots {
@@ -1021,6 +1198,8 @@ fn production_protection(env: &SensitiveRoots) -> (Vec<PathBuf>, Vec<PathBuf>) {
         for dir in [".ssh", ".aws", ".gnupg"] {
             push_unique(&mut protected, home.join(dir));
         }
+        #[cfg(target_os = "macos")]
+        push_unique(&mut protected, home.join("Library/Keychains"));
     }
 
     let mut write_protected = protected.clone();
@@ -1054,33 +1233,71 @@ fn production_protection(env: &SensitiveRoots) -> (Vec<PathBuf>, Vec<PathBuf>) {
         for file in [
             ".gitconfig",
             ".bashrc",
+            ".bash_profile",
             ".zshrc",
+            ".zprofile",
+            ".zshenv",
             ".profile",
             ".npmrc",
             ".pypirc",
         ] {
             push_unique(&mut write_protected, home.join(file));
         }
+        #[cfg(target_os = "macos")]
+        push_unique(&mut write_protected, home.join("Library/LaunchAgents"));
+        #[cfg(target_os = "linux")]
+        {
+            push_unique(&mut write_protected, home.join(".config/autostart"));
+            push_unique(&mut write_protected, home.join(".config/systemd/user"));
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        for dir in [
+            "/System",
+            "/Library",
+            "/Applications",
+            "/usr",
+            "/bin",
+            "/sbin",
+            "/etc",
+            "/private/etc",
+            "/private/var/db",
+        ] {
+            push_unique(&mut write_protected, PathBuf::from(dir));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        for dir in [
+            "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/boot", "/sys", "/proc", "/dev",
+        ] {
+            push_unique(&mut write_protected, PathBuf::from(dir));
+        }
     }
     if let Some(exe) = &env.current_exe
         && let Some(exe_dir) = exe.parent()
     {
-        let shared_roots = [
-            env.user_home.as_deref(),
-            env.desktop.as_deref(),
-            env.downloads.as_deref(),
-            env.documents.as_deref(),
-        ];
-        let is_shared_dir = super::access::is_drive_root(exe_dir)
-            || shared_roots
-                .into_iter()
-                .flatten()
-                .any(|shared| same_path(exe_dir, shared));
-        if is_shared_dir {
-            push_unique(&mut write_protected, exe.clone());
-            push_unique(&mut write_protected, exe_dir.join("everything"));
+        if let Some(bundle) = macos_app_bundle(exe) {
+            push_unique(&mut write_protected, bundle);
         } else {
-            push_unique(&mut write_protected, exe_dir.to_path_buf());
+            let shared_roots = [
+                env.user_home.as_deref(),
+                env.desktop.as_deref(),
+                env.downloads.as_deref(),
+                env.documents.as_deref(),
+            ];
+            let is_shared_dir = super::access::is_drive_root(exe_dir)
+                || shared_roots
+                    .into_iter()
+                    .flatten()
+                    .any(|shared| same_path(exe_dir, shared));
+            if is_shared_dir {
+                push_unique(&mut write_protected, exe.clone());
+                push_unique(&mut write_protected, exe_dir.join("everything"));
+            } else {
+                push_unique(&mut write_protected, exe_dir.to_path_buf());
+            }
         }
     }
 
@@ -1448,6 +1665,189 @@ mod tests {
             &desktop.join("everything/Everything.exe"),
             &loose_write_protected
         ));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn production_full_mode_exposes_unix_root_and_operates_via_handle() {
+        use std::io::Read;
+
+        let base = std::env::temp_dir().join(format!("muse-prod-full-{}", token::generate()));
+        let profile_home = base.join("profile");
+        let work_dir = base.join("work");
+        std::fs::create_dir_all(&profile_home).unwrap();
+        std::fs::create_dir_all(&work_dir).unwrap();
+        std::fs::write(work_dir.join("hello.txt"), b"hello mac").unwrap();
+
+        let profile = RuntimeProfile {
+            kind: ProfileKind::Production,
+            home: profile_home,
+            onboarding_qa: false,
+        };
+        let (runtime, error) = AccessRuntime::open(&profile);
+        assert!(error.is_none());
+        assert_eq!(runtime.local_disk_aliases(), vec!["root".to_owned()]);
+
+        let wrong_disk = AccessPolicy {
+            mode: ScopeMode::Full,
+            disks: Some(["drive-c".into()].into()),
+            search: GrantScope::AllLocal,
+            read: GrantScope::AllLocal,
+            write: GrantScope::AllLocal,
+            ..Default::default()
+        };
+        assert!(runtime.validate(&wrong_disk).is_err());
+
+        let policy = AccessPolicy {
+            mode: ScopeMode::Full,
+            disks: None,
+            search: GrantScope::AllLocal,
+            read: GrantScope::AllLocal,
+            write: GrantScope::AllLocal,
+            ..Default::default()
+        };
+        runtime.validate(&policy).unwrap();
+        runtime.save(policy, false).unwrap();
+
+        assert_eq!(
+            runtime.agent_roots(Operation::Read),
+            Some(BTreeMap::from([("root".to_owned(), PathBuf::from("/"))]))
+        );
+
+        let canonical_work = std::fs::canonicalize(&work_dir).unwrap();
+        let rel_dir = canonical_work
+            .strip_prefix("/")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        let read_target = runtime
+            .resolve_agent_file(Operation::Read, "root", &format!("{rel_dir}/hello.txt"))
+            .unwrap();
+        let mut content = String::new();
+        super::super::handle::read(&read_target)
+            .unwrap()
+            .read_to_string(&mut content)
+            .unwrap();
+        assert_eq!(content, "hello mac");
+
+        let write_target = runtime
+            .resolve_agent_file(Operation::Write, "root", &format!("{rel_dir}/written.txt"))
+            .unwrap();
+        super::super::handle::write(&write_target, b"ok").unwrap();
+        assert_eq!(std::fs::read(work_dir.join("written.txt")).unwrap(), b"ok");
+
+        let mut listed = Vec::new();
+        let dir_target = runtime
+            .resolve_agent_file(Operation::Read, "root", &rel_dir)
+            .unwrap();
+        super::super::handle::list(&dir_target, |entry| listed.push(entry.name)).unwrap();
+        assert!(listed.iter().any(|name| name == "hello.txt"));
+
+        if let Some(desktop_dir) = dirs::desktop_dir()
+            && reject_reparse_ancestors(&desktop_dir).is_ok()
+            && std::fs::canonicalize(&desktop_dir).is_ok_and(|path| path.is_dir())
+        {
+            let desktop = runtime
+                .agent_desktop()
+                .expect("desktop should resolve under unix root in full mode");
+            assert_eq!(desktop.root, "root");
+            assert!(!desktop.path.is_empty());
+        }
+
+        let root_exclusions =
+            runtime.search_exclusions_for(&BTreeMap::from([("root".into(), PathBuf::from("/"))]));
+        #[cfg(target_os = "macos")]
+        {
+            assert!(root_exclusions.contains(&PathBuf::from("/System")));
+            assert!(root_exclusions.contains(&PathBuf::from("/Library")));
+            assert!(root_exclusions.contains(&PathBuf::from("/Applications")));
+            assert!(root_exclusions.contains(&PathBuf::from("/dev")));
+            if let Some(home) = dirs::home_dir() {
+                assert!(root_exclusions.contains(&normalize_protected(home.join("Library"))));
+            }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            assert!(root_exclusions.contains(&PathBuf::from("/proc")));
+            assert!(root_exclusions.contains(&PathBuf::from("/sys")));
+        }
+
+        let folder_exclusions = runtime
+            .search_exclusions_for(&BTreeMap::from([("work".into(), canonical_work.clone())]));
+        assert!(
+            !folder_exclusions
+                .iter()
+                .any(|excluded| protected_path(&canonical_work, std::slice::from_ref(excluded)))
+        );
+
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_production_protection_guards_keychains_system_and_app_bundle() {
+        let raw_root =
+            std::env::temp_dir().join(format!("muse-macos-sensitive-{}", token::generate()));
+        std::fs::create_dir_all(&raw_root).unwrap();
+        let root = std::fs::canonicalize(&raw_root).unwrap();
+        let home = root.join("Users/Alice");
+        let desktop = home.join("Desktop");
+        let keychains = home.join("Library/Keychains");
+        let launch_agents = home.join("Library/LaunchAgents");
+        let bundle = root.join("Apps/MuseLink.app");
+        let exe = bundle.join("Contents/MacOS/muse-connector");
+        let project = desktop.join("MyProject");
+        for dir in [
+            &desktop,
+            &keychains,
+            &launch_agents,
+            exe.parent().unwrap(),
+            &project,
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(&exe, b"bin").unwrap();
+
+        let env = SensitiveRoots {
+            profile_home: home.join(".muse-connector"),
+            user_home: Some(home.clone()),
+            roaming_app_data: None,
+            local_app_data: None,
+            documents: Some(home.join("Documents")),
+            desktop: Some(desktop.clone()),
+            downloads: Some(home.join("Downloads")),
+            program_data: None,
+            system_root: None,
+            program_files: Vec::new(),
+            current_exe: Some(exe),
+        };
+        let (protected, write_protected) = production_protection(&env);
+
+        assert!(protected_path(
+            &keychains.join("login.keychain-db"),
+            &protected
+        ));
+        assert!(protected_path(
+            &keychains.join("login.keychain-db"),
+            &write_protected
+        ));
+
+        for target in [
+            PathBuf::from("/System/Library/CoreServices/Finder.app"),
+            PathBuf::from("/Applications/Safari.app"),
+            launch_agents.join("com.evil.agent.plist"),
+            home.join(".zprofile"),
+            bundle.join("Contents/Info.plist"),
+        ] {
+            assert!(!protected_path(&target, &protected));
+            assert!(protected_path(&target, &write_protected));
+        }
+
+        assert!(!protected_path(&project.join("main.rs"), &protected));
+        assert!(!protected_path(&project.join("main.rs"), &write_protected));
 
         std::fs::remove_dir_all(root).unwrap();
     }

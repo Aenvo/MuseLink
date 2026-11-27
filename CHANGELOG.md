@@ -4,6 +4,19 @@
 
 本文件记录 MuseLink / Muse连接器 的功能更新、安全加固与问题修复，随版本发布与推送同步维护。
 
+## [Unreleased]
+
+### 问题修复与跨平台适配
+- **修复 macOS / Linux「复制专用令牌」必定失败以及 Windows 剪贴板短暂占用导致复制失败的问题**：
+  - **macOS 原生隐私剪贴板**：通过 AppKit `NSPasteboard` 实现令牌复制，写入 `org.nspasteboard.ConcealedType`、`org.nspasteboard.TransientType` 标记并启用 `CurrentHostOnly` 选项，防止令牌被剪贴板历史工具记录或通过通用剪贴板跨设备同步。
+  - **Linux 剪贴板支持**：支持通过 `wl-copy` / `xclip` / `xsel` 标准输入安全写入系统剪贴板（不经命令行参数传递令牌，并隔离后台守护进程输出管道）。
+  - **Windows 剪贴板稳定性与隐私加固**：为 `OpenClipboard` 增加短退避重试（缓解刚复制完接入说明后剪贴板被系统剪贴板历史/第三方工具瞬时占用的竞态失败），并补全 4 字节 `DWORD(0)` 的 `CanIncludeInClipboardHistory` 与 `CanUploadClipboardData` 隐私标记。
+  - **透出真实错误诊断**：新手指引与接入说明卡片复制令牌失败时展示具体失败原因（同步中/英/日三语），同时保留「定位令牌文件」兜底入口。
+- **修复 macOS / Linux「管理本机磁盘（整机授权）」全部返回 403 且无法读取桌面的问题**：
+  - **实现 Unix 本地根目录发现与校验**：`fixed_local_roots()` 在 macOS 与 Linux 上返回本机系统根目录 `root`（`/`），更新磁盘别名校验与前端磁盘选择器显示（「系统根目录（/）」），并在后端校验中拒绝空的整机根映射，彻底修复 `/agent/v1/roots` 为空与 `/agent/v1/locations/desktop` 返回 403 的问题。
+  - **补齐 macOS / Linux 安全保护与搜索索引边界**：新增 macOS `~/Library/Keychains` 读写搜全保护，以及 macOS/Linux 系统目录、开机自启项（`~/Library/LaunchAgents`、`.config/autostart`）、登录 Shell 脚本（`.zprofile` / `.zshenv` / `.bash_profile`）与 `.app` 应用包的默认写保护；后台搜索索引自动跳过 macOS `/System`（避免重复扫描 `/System/Volumes/Data`）、`/Library`、`/Applications`、`/usr`、`/bin`、`/sbin`、`/private`、`~/Library`（避免触发 iCloud 云盘与第三方 App 容器等延迟隐私弹窗）、照片图库、`/dev`、虚拟目录及非本地挂载卷，以及 Linux `/proc`、`/sys`、`/dev`、`/run`（均不影响直接按路径读取）。
+  - **优化 macOS 隐私权限（TCC）体验与接口报错**：预热索引前主动探测桌面/文稿/下载以消除弹窗间的长时间等待；在 macOS 整机授权界面新增「打开完全磁盘访问权限设置」一键直达按钮；更新三语接入说明中的跨平台桌面表述，并在操作系统拒绝目录访问（`PermissionDenied`）时返回带操作引导的 HTTP 403 响应。
+
 ## [v0.3.0] - 2026-11-27
 
 ### 新增功能

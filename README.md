@@ -98,7 +98,7 @@
 
 ## 权限与连接边界
 
-- **文件与敏感路径保护**：Muse 的操作受已保存的授权范围和当前系统账户权限约束。默认排除凭证私钥目录（如 `~/.muse-bridge`、`~/.ssh`、`~/.aws`、`~/.gnupg`），并对系统目录、启动项、Shell Profile、`.gitconfig` 与程序自身目录启用默认写保护；文件读取与原子写入通过已校验的内核句柄完成。
+- **文件与敏感路径保护**：Muse 的操作受已保存的授权范围和当前系统账户权限约束。默认排除凭证私钥目录（如 `~/.muse-bridge`、`~/.ssh`、`~/.aws`、`~/.gnupg` 与 macOS `~/Library/Keychains`），并对系统目录、启动项、Shell Profile、`.gitconfig` 与程序自身目录（含 macOS `.app` 包）启用默认写保护；文件读取与原子写入通过已校验的内核句柄完成。
 - **每工作区独立写受限沙箱**：命令执行默认关闭，可在「文件权限」按需开启（开启后请重新复制接入说明发给 Muse）。命令默认运行在 Windows 写受限沙箱（`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` 内存/进程数硬限制；执行超时由运行时轮询强制，并非 JobObject 的时间限制）中，按工作区路径派生独立 SID，写入范围限于当次指定的具体项目子目录与单任务隔离临时目录（禁止直接对盘符根目录执行，不同项目与父子目录之间互不可写）；但需注意，受限令牌同时包含 `Everyone`（S-1-1-0）与 `RESTRICTED`（S-1-5-12）SID，凡对这些 SID 开放写权限的位置（例如对 `Everyone` 可写的共享文件夹或自定义目录）同样可写。沙箱仅限制写入、不隔离读取，读取以当前执行用户的权限进行；同时剥离内部环境变量、失败即拒（绝不静默降级无沙箱）。
 - **三档风险分流与本机置顶审批**：
   - **自动放行**：项目内常见只读与标准开发构建/测试命令（如 `git status`/`diff`/`log`、`cargo test`/`check`、`pnpm build`、`pytest` 等），快速命令在短等待内直接返回 HTTP 200 与完整输出；纯只读直调命令不触碰工作区写权限。
@@ -167,7 +167,7 @@ pnpm -C muse-connector tauri build --bundles app --config '{"bundle":{"createUpd
 
 应用包输出在 `muse-connector/src-tauri/target/release/bundle/macos/`。如只需二进制，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector`。本地界面开发同样使用 `pnpm -C muse-connector tauri dev`（与 Windows 相同的隔离配置）。
 
-**配置：** 从官网或 Mac App Store 安装 Tailscale 应用并登录即可；应用会自动发现应用包内的命令行工具（`/Applications/Tailscale.app/Contents/MacOS/Tailscale`），Homebrew 安装的 `tailscale` / `cloudflared`（`/opt/homebrew/bin`）同样会被发现。
+**配置：** 从官网或 Mac App Store 安装 Tailscale 应用并登录即可；应用会自动发现应用包内的命令行工具（`/Applications/Tailscale.app/Contents/MacOS/Tailscale`），Homebrew 安装的 `tailscale` / `cloudflared`（`/opt/homebrew/bin`）同样会被发现。使用「管理本机磁盘（整机授权）」访问桌面、文稿或下载等受保护目录时，请在系统弹窗中点击允许，或在「系统设置 → 隐私与安全性」为 `MuseLink` 授予对应权限或「完全磁盘访问权限」。
 
 **限制：** 沙箱命令执行（`exec`）目前仅支持 Windows；在 macOS 上保持关闭并以失败收口。macOS 构建目前未签名、未公证，仅供本地从源码构建运行；从浏览器下载的应用包可能会被 Gatekeeper 拦截。
 

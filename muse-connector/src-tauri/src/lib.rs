@@ -1,6 +1,5 @@
 //! Muse 连接器桌面壳：所有生命周期操作委托给同一服务监督层。
 pub mod capabilities;
-#[cfg(windows)]
 mod clipboard;
 pub mod core;
 mod legacy;
@@ -39,6 +38,7 @@ fn get_snapshot(
             .unwrap_or(Value::Null)
     };
     let install_kind = updater::install_kind(&state.profile);
+    result["platform"] = json!(std::env::consts::OS);
     result["update_configured"] = json!(updater::is_configured());
     result["in_app_update_supported"] = json!(install_kind.can_install_in_app());
     result["install_kind"] = json!(install_kind.as_str());
@@ -140,15 +140,16 @@ fn copy_agent_token(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Services>,
 ) -> Result<(), String> {
+    let secret = state.current_agent_token()?;
     #[cfg(windows)]
     {
         let owner = window.hwnd().map_err(|_| "无法读取连接器窗口")?;
-        clipboard::copy_secret(owner.0, &state.current_agent_token()?).map_err(str::to_owned)
+        clipboard::copy_secret(owner.0, &secret).map_err(str::to_owned)
     }
     #[cfg(not(windows))]
     {
-        let _ = (window, state);
-        Err("请从令牌文件手动复制".into())
+        let _ = window;
+        clipboard::copy_secret(&secret).map_err(str::to_owned)
     }
 }
 #[tauri::command]
@@ -471,6 +472,9 @@ fn open_tool_setup(tool: String, app: tauri::AppHandle) -> Result<(), String> {
         }
         "domains" => "https://dash.cloudflare.com/",
         "everything" => "https://www.voidtools.com/support/everything/installing_everything/",
+        "macos_full_disk_access" if cfg!(target_os = "macos") => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        }
         _ => return Err("未知帮助入口".into()),
     };
     app.opener()
