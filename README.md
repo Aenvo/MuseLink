@@ -5,7 +5,7 @@
 <h1 align="center">MuseLink · Muse连接器</h1>
 
 <p align="center">
-  让 Muse 在你授权的文件夹和磁盘中搜索、读取、写入 Windows 本机文件，并按需在写受限沙箱与本机审批保护下执行项目命令。
+  让 Muse 在 Windows、Linux 与 macOS 上搜索、读取、写入你授权的本机文件，并可在 Windows 上按需于写受限沙箱与本机审批保护下执行项目命令。
 </p>
 
 <p align="center">
@@ -16,7 +16,9 @@
 </p>
 
 <p align="center">
-  <img alt="Windows 桌面应用" src="https://img.shields.io/badge/Windows-Desktop-0078D4?logo=windows&amp;logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D4">
+  <img alt="Linux x64" src="https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&amp;logoColor=black">
+  <img alt="macOS Universal" src="https://img.shields.io/badge/macOS-Universal-181717?logo=apple&amp;logoColor=white">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>
@@ -82,7 +84,7 @@
 
 ## 使用指南
 
-默认连接方式需要安装 [Tailscale for Windows](https://tailscale.com/download/windows) 并登录。
+默认连接方式需要安装 [Tailscale](https://tailscale.com/download) 并登录。
 
 1. 在「概览」或「连接」点击「开始指引」。
 2. 选择要授权的文件夹或磁盘。磁盘模式默认选中所有可用的本机固定磁盘，展开下拉框即可调整。
@@ -96,7 +98,7 @@
 
 ## 权限与连接边界
 
-- **文件与敏感路径保护**：Muse 的操作受已保存的授权范围和当前 Windows 账户权限约束。默认排除凭证私钥目录（如 `~/.muse-bridge`、`~/.ssh`、`~/.aws`、`~/.gnupg`），并对系统目录、启动项、Shell Profile、`.gitconfig` 与程序自身目录启用默认写保护；文件读取与原子写入通过已校验的内核句柄完成。
+- **文件与敏感路径保护**：Muse 的操作受已保存的授权范围和当前系统账户权限约束。默认排除凭证私钥目录（如 `~/.muse-bridge`、`~/.ssh`、`~/.aws`、`~/.gnupg`），并对系统目录、启动项、Shell Profile、`.gitconfig` 与程序自身目录启用默认写保护；文件读取与原子写入通过已校验的内核句柄完成。
 - **每工作区独立写受限沙箱**：命令执行默认关闭，可在「文件权限」按需开启（开启后请重新复制接入说明发给 Muse）。命令默认运行在 Windows 写受限沙箱（`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` 内存/进程数硬限制；执行超时由运行时轮询强制，并非 JobObject 的时间限制）中，按工作区路径派生独立 SID，写入范围限于当次指定的具体项目子目录与单任务隔离临时目录（禁止直接对盘符根目录执行，不同项目与父子目录之间互不可写）；但需注意，受限令牌同时包含 `Everyone`（S-1-1-0）与 `RESTRICTED`（S-1-5-12）SID，凡对这些 SID 开放写权限的位置（例如对 `Everyone` 可写的共享文件夹或自定义目录）同样可写。沙箱仅限制写入、不隔离读取，读取以当前执行用户的权限进行；同时剥离内部环境变量、失败即拒（绝不静默降级无沙箱）。
 - **三档风险分流与本机置顶审批**：
   - **自动放行**：项目内常见只读与标准开发构建/测试命令（如 `git status`/`diff`/`log`、`cargo test`/`check`、`pnpm build`、`pytest` 等），快速命令在短等待内直接返回 HTTP 200 与完整输出；纯只读直调命令不触碰工作区写权限。

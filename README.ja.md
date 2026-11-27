@@ -5,7 +5,7 @@
 <h1 align="center">MuseLink — Muse ローカルファイルコネクタ</h1>
 
 <p align="center">
-  許可したフォルダーやドライブ内で Muse にローカルファイルの検索・読み取り・書き込みを任せ、必要に応じて Windows の書き込み制限付きサンドボックスとローカル承認ダイアログのもとでプロジェクトコマンドも実行できます。
+  Windows・Linux・macOS で許可したローカルファイルの検索・読み取り・書き込みを Muse に任せ、Windows では必要に応じて書き込み制限付きサンドボックスとローカル承認ダイアログのもとでプロジェクトコマンドも実行できます。
 </p>
 
 <p align="center">
@@ -16,7 +16,9 @@
 </p>
 
 <p align="center">
-  <img alt="Windows デスクトップアプリ" src="https://img.shields.io/badge/Windows-Desktop-0078D4?logo=windows&amp;logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D4">
+  <img alt="Linux x64" src="https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&amp;logoColor=black">
+  <img alt="macOS Universal" src="https://img.shields.io/badge/macOS-Universal-181717?logo=apple&amp;logoColor=white">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>

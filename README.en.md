@@ -2,10 +2,10 @@
   <img src="assets/muselink-logo.png" alt="MuseLink app icon" width="128">
 </p>
 
-<h1 align="center">MuseLink — Windows File Connector for Muse</h1>
+<h1 align="center">MuseLink — Local File Connector for Muse</h1>
 
 <p align="center">
-  Let Muse search, read, and write files in authorized Windows folders and drives, and optionally run project commands inside a write-restricted sandbox with local approval.
+  Let Muse search, read, and write authorized local files on Windows, Linux, and macOS, and optionally run project commands on Windows inside a write-restricted sandbox with local approval.
 </p>
 
 <p align="center">
@@ -16,7 +16,9 @@
 </p>
 
 <p align="center">
-  <img alt="Windows desktop app" src="https://img.shields.io/badge/Windows-Desktop-0078D4?logo=windows&amp;logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D4">
+  <img alt="Linux x64" src="https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&amp;logoColor=black">
+  <img alt="macOS Universal" src="https://img.shields.io/badge/macOS-Universal-181717?logo=apple&amp;logoColor=white">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>
@@ -82,7 +84,7 @@ Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink
 
 ## Quick start
 
-For the default connection method, install [Tailscale for Windows](https://tailscale.com/download/windows) and sign in.
+For the default connection method, install [Tailscale](https://tailscale.com/download) and sign in.
 
 1. On **Overview** or **Connection**, select **Start guide**.
 2. Choose the folders or drives to authorize. All available local fixed drives are selected by default in drive mode. Open the menu to narrow the selection.
@@ -96,7 +98,7 @@ File indexing starts in the background after you first save permissions. Manage 
 
 ## Access and connection boundaries
 
-- **File & sensitive-path protection**: Muse's file operations follow the saved access scope and the current Windows account's permissions. Credential directories (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg`) are excluded by default, and system folders, Startup folders, shell profiles, `.gitconfig`, and the app directory are write-protected by default. Reads and atomic writes are verified through open OS handles.
+- **File & sensitive-path protection**: Muse's file operations follow the saved access scope and the current OS account's permissions. Credential directories (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg`) are excluded by default, and system folders, Startup folders, shell profiles, `.gitconfig`, and the app directory are write-protected by default. Reads and atomic writes are verified through open OS handles.
 - **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory and process-count hard limits; the execution timeout is enforced by runtime polling, not by a Job Object time limit) with a unique SHA-256-derived SID per workspace. Writes are restricted to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Note, however, that the restricting token also includes the `Everyone` (S-1-1-0) and `RESTRICTED` (S-1-5-12) SIDs, so any location granting write access to those SIDs (such as world-writable shared folders or custom-ACL directories) remains writable too. The sandbox restricts writes only; reads are not isolated and run with the executing user's permissions. Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution.
 - **3-tier risk model & auto-elevated approval dialog**:
   - **Auto-allowed**: Standard read-only and project build/test commands (such as `git status`/`diff`/`log`, `cargo test`/`check`, `pnpm build`, `pytest`) run without interrupting you and return HTTP 200 directly when they finish quickly; pure read-only direct commands skip workspace write ACLs entirely.
