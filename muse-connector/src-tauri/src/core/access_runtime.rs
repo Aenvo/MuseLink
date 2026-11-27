@@ -1195,11 +1195,65 @@ fn production_protection(env: &SensitiveRoots) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut protected = Vec::new();
     push_unique(&mut protected, env.profile_home.clone());
     if let Some(home) = &env.user_home {
-        for dir in [".ssh", ".aws", ".gnupg"] {
+        for dir in [".ssh", ".aws", ".gnupg", ".docker", ".kube", ".azure"] {
             push_unique(&mut protected, home.join(dir));
         }
+        // gcloud credentials (standard location; Windows also uses Roaming, see below).
+        push_unique(&mut protected, home.join(".config").join("gcloud"));
+        // Package-manager config files can embed auth tokens: block reads and
+        // searches too, not just writes.
+        for file in [".npmrc", ".pypirc"] {
+            push_unique(&mut protected, home.join(file));
+        }
+        // Firefox credentials on Linux (logins.json / key4.db in the profile store).
+        #[cfg(target_os = "linux")]
+        push_unique(&mut protected, home.join(".mozilla").join("firefox"));
+        // macOS Keychain store.
         #[cfg(target_os = "macos")]
-        push_unique(&mut protected, home.join("Library/Keychains"));
+        push_unique(&mut protected, home.join("Library").join("Keychains"));
+    }
+    // Browser credential stores follow each platform's config / local-data
+    // layout (dirs::config_dir / dirs::data_local_dir), so non-Windows hosts
+    // never carry Windows-only paths.
+    #[cfg(windows)]
+    if let Some(roaming) = &env.roaming_app_data {
+        // gcloud credentials on Windows live under %APPDATA%\gcloud.
+        push_unique(&mut protected, roaming.join("gcloud"));
+        // Firefox credentials (logins.json / key4.db inside each profile).
+        // Profile directory names are arbitrary, so protect the container.
+        push_unique(
+            &mut protected,
+            roaming.join("Mozilla").join("Firefox").join("Profiles"),
+        );
+    }
+    #[cfg(windows)]
+    if let Some(local) = &env.local_app_data {
+        // Chromium credential stores: the Local State encryption key plus each
+        // profile's Login Data / Web Data / Network\Cookies. Profile directory
+        // names are arbitrary, so protect the whole User Data container.
+        push_unique(
+            &mut protected,
+            local.join("Google").join("Chrome").join("User Data"),
+        );
+        push_unique(
+            &mut protected,
+            local.join("Microsoft").join("Edge").join("User Data"),
+        );
+    }
+    #[cfg(target_os = "macos")]
+    if let Some(roaming) = &env.roaming_app_data {
+        // roaming_app_data resolves to ~/Library/Application Support on macOS,
+        // where Chromium profiles have no "User Data" level.
+        push_unique(&mut protected, roaming.join("Google").join("Chrome"));
+        push_unique(&mut protected, roaming.join("Microsoft Edge"));
+        push_unique(&mut protected, roaming.join("Firefox").join("Profiles"));
+    }
+    #[cfg(target_os = "linux")]
+    if let Some(roaming) = &env.roaming_app_data {
+        // roaming_app_data resolves to ~/.config on Linux.
+        for dir in ["google-chrome", "chromium", "microsoft-edge"] {
+            push_unique(&mut protected, roaming.join(dir));
+        }
     }
 
     let mut write_protected = protected.clone();
@@ -1238,8 +1292,6 @@ fn production_protection(env: &SensitiveRoots) -> (Vec<PathBuf>, Vec<PathBuf>) {
             ".zprofile",
             ".zshenv",
             ".profile",
-            ".npmrc",
-            ".pypirc",
         ] {
             push_unique(&mut write_protected, home.join(file));
         }
@@ -1629,6 +1681,123 @@ mod tests {
         // 凭证私钥目录：读写搜全部保护
         assert!(protected_path(&ssh.join("id_ed25519"), &protected));
         assert!(protected_path(&ssh.join("id_ed25519"), &write_protected));
+
+        // 云与包管理凭证：目录型（.docker/.kube/.azure/gcloud）与文件型（.npmrc/.pypirc）读写搜全部保护
+        for target in [
+            home.join(".docker").join("config.json"),
+            home.join(".kube").join("config"),
+            home.join(".azure").join("accessTokens.json"),
+            home.join(".config").join("gcloud").join("credentials.db"),
+            home.join(".npmrc"),
+            home.join(".pypirc"),
+        ] {
+            assert!(protected_path(&target, &protected));
+            assert!(protected_path(&target, &write_protected));
+        }
+
+        // 浏览器凭证库（Windows）：gcloud 的 Roaming 位置、Chromium 的 User Data 容器与 Firefox 的 Profiles 容器整体保护
+        #[cfg(windows)]
+        for target in [
+            roaming.join("gcloud").join("credentials.db"),
+            local
+                .join("Google")
+                .join("Chrome")
+                .join("User Data")
+                .join("Local State"),
+            local
+                .join("Google")
+                .join("Chrome")
+                .join("User Data")
+                .join("Default")
+                .join("Login Data"),
+            local
+                .join("Microsoft")
+                .join("Edge")
+                .join("User Data")
+                .join("Default")
+                .join("Login Data"),
+            roaming
+                .join("Mozilla")
+                .join("Firefox")
+                .join("Profiles")
+                .join("abcd1234.default-release")
+                .join("logins.json"),
+            roaming
+                .join("Mozilla")
+                .join("Firefox")
+                .join("Profiles")
+                .join("abcd1234.default-release")
+                .join("key4.db"),
+        ] {
+            assert!(protected_path(&target, &protected));
+            assert!(protected_path(&target, &write_protected));
+        }
+
+        // 浏览器凭证库（macOS）：Application Support 下的 Chrome / Edge / Firefox 容器与 Keychains 整体保护
+        #[cfg(target_os = "macos")]
+        for target in [
+            roaming.join("Google").join("Chrome").join("Local State"),
+            roaming
+                .join("Google")
+                .join("Chrome")
+                .join("Default")
+                .join("Login Data"),
+            roaming
+                .join("Microsoft Edge")
+                .join("Default")
+                .join("Login Data"),
+            roaming
+                .join("Firefox")
+                .join("Profiles")
+                .join("abcd1234.default-release")
+                .join("logins.json"),
+            home.join("Library")
+                .join("Keychains")
+                .join("login.keychain-db"),
+        ] {
+            assert!(protected_path(&target, &protected));
+            assert!(protected_path(&target, &write_protected));
+        }
+
+        // 浏览器凭证库（Linux）：~/.config 下的 Chrome / Chromium / Edge 容器与 ~/.mozilla/firefox 整体保护
+        #[cfg(target_os = "linux")]
+        for target in [
+            roaming
+                .join("google-chrome")
+                .join("Default")
+                .join("Login Data"),
+            roaming.join("chromium").join("Default").join("Login Data"),
+            roaming
+                .join("microsoft-edge")
+                .join("Default")
+                .join("Login Data"),
+            home.join(".mozilla")
+                .join("firefox")
+                .join("abcd1234.default-release")
+                .join("logins.json"),
+        ] {
+            assert!(protected_path(&target, &protected));
+            assert!(protected_path(&target, &write_protected));
+        }
+
+        // 保护范围外的相邻路径不误伤：.config 下的普通应用配置可正常读写
+        let target = home.join(".config").join("someapp").join("settings.json");
+        assert!(!protected_path(&target, &protected));
+        assert!(!protected_path(&target, &write_protected));
+
+        // Firefox 的 profiles.ini 位于 Profiles 容器之外，不误伤
+        #[cfg(windows)]
+        {
+            let target = roaming.join("Mozilla").join("Firefox").join("profiles.ini");
+            assert!(!protected_path(&target, &protected));
+            assert!(!protected_path(&target, &write_protected));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            let target = roaming.join("Firefox").join("profiles.ini");
+            assert!(!protected_path(&target, &protected));
+            assert!(!protected_path(&target, &write_protected));
+        }
 
         // 启动项、PowerShell Profile、.gitconfig 与程序目录：允许读，但禁止写
         for target in [

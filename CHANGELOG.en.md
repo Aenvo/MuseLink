@@ -4,6 +4,11 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
+## [Unreleased]
+
+### Security & Stability
+- **Expanded default read protection**: `.npmrc` and `.pypirc` are promoted from write-only protection to full protection (read / search / write). Added default protection for `.docker`, `.kube`, `.azure`, gcloud credential directories, and per-platform browser credential stores (Windows: Chrome / Edge `User Data` and Firefox `Profiles`; macOS: Chrome / Edge / Firefox under Application Support alongside existing `~/Library/Keychains` protection; Linux: `google-chrome` / `chromium` / `microsoft-edge` and `.mozilla/firefox`), so tokens and login data cannot be read even under disk-wide or home-folder grants.
+
 ## [v0.3.1] - 2026-11-27
 
 ### Fixes & Cross-Platform Adaptation
