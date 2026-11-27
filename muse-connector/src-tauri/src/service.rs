@@ -1058,20 +1058,27 @@ impl ServiceController {
         tauri::async_runtime::spawn_blocking(move || access.prewarm_search());
     }
     pub async fn suspend_for_update(&self) -> Result<(), String> {
-        let mut runtime = self.runtime.lock().await;
-        self.maintenance.store(true, Ordering::Relaxed);
-        if let Err(error) = self.stop_locked(&mut runtime).await {
-            self.maintenance.store(false, Ordering::Relaxed);
-            return Err(error);
+        {
+            let mut runtime = self.runtime.lock().await;
+            self.maintenance.store(true, Ordering::Relaxed);
+            if let Err(error) = self.stop_locked(&mut runtime).await {
+                self.maintenance.store(false, Ordering::Relaxed);
+                return Err(error);
+            }
         }
+        let access = self.access.clone();
+        let _ = tokio::task::spawn_blocking(move || access.suspend_index_for_update()).await;
         Ok(())
     }
     pub async fn resume_after_update_failure(&self) {
-        let mut runtime = self.runtime.lock().await;
-        self.maintenance.store(false, Ordering::Relaxed);
-        if self.desktop.read().unwrap().desired_enabled {
-            let _ = self.start_locked(&mut runtime).await;
+        {
+            let mut runtime = self.runtime.lock().await;
+            self.maintenance.store(false, Ordering::Relaxed);
+            if self.desktop.read().unwrap().desired_enabled {
+                let _ = self.start_locked(&mut runtime).await;
+            }
         }
+        self.prewarm_file_search();
     }
     pub fn mark_public_result(
         &self,

@@ -7,6 +7,10 @@
 ## [Unreleased]
 
 ### 新增功能
+- **应用内自动更新与同步更新日志**：
+  - **一键检查与重启更新（Windows 安装版 & Linux AppImage）**：支持启动静默检查与「关于 → 检查更新」手动检查，通过 GitHub Releases 静态 `latest.json` 与编译期固化的 Minisign 公钥验签（不走受限 REST API）；发现新版本时在右下角弹出可关闭的新版本提醒浮窗，下载与验签阶段保持现有连接不断流并展示绿色实时进度条，确认安装后安全停服（含释放 Windows 随包 `Everything.exe` 文件锁）并自动重启完成升级；Windows 免安装便携版与 Linux `.deb`/源码构建统一通过静态 `latest.json` 比对版本号，正常提供新版本提醒、更新详情与直达 GitHub Releases 下载。
+  - **内嵌更新日志与更新详情弹窗**：「关于」页按钮调整为纯文字「更新日志」、「GitHub」与「检查更新」；点击「更新日志」或右下角浮窗的「更新详情」均在应用内弹窗展示，随界面语言自动切换中英文、自动过滤未发布草稿与跨语言导航头，采用本地内嵌秒开 + 后台静默同步 GitHub 最新日志（并以 `latest.json` 更新说明兜底），标题栏附外链图标直达 GitHub。
+  - **双平台自动签名发布流水线**：新增 `.github/workflows/release.yml` 与 `generate-updater-manifest.ps1`，推送 `v*` 标签后并行在 Windows 与 Ubuntu 22.04 上运行测试，自动打包 Windows 便携版、签名 NSIS 安装包与 Linux 签名 AppImage / `.deb`，统一生成双平台 `latest.json` 与 `SHA256SUMS.txt` 挂载至 Draft Release。
 - **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
 
 ## [v0.2.2] - 2026-11-27

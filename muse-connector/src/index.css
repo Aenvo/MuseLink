@@ -135,6 +135,7 @@ html:hover::-webkit-scrollbar-thumb:hover, html:hover *::-webkit-scrollbar-thumb
 .status-badge[data-tone="neutral"] { color: var(--muted-foreground); }
 .log-row { content-visibility: auto; contain-intrinsic-size: auto 60px; }
 .setup-guide { position: fixed; inset-inline-end: 24px; inset-block-end: 16px; z-index: 30; }
+.update-notice { position: fixed; inset-inline-end: 24px; inset-block-end: calc(16px + var(--setup-guide-space, 0px)); z-index: 31; width: min(20rem, calc(100vw - 2rem)); }
 .setup-guide-expanded { width: min(21rem, calc(100vw - 2rem)); }
 .setup-guide-panel {
   display: grid;
@@ -166,6 +167,7 @@ html:hover::-webkit-scrollbar-thumb:hover, html:hover *::-webkit-scrollbar-thumb
 @media (max-width: 600px) { .app-shell { --app-gutter: 16px; } .detail-grid { grid-template-columns: minmax(0,1fr); } .metric-grid { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 @media (max-width: 600px), (max-height: 480px) {
   .setup-guide { inset-inline-end: 16px; }
+  .update-notice { inset-inline-end: 16px; width: min(19rem, calc(100vw - 2rem)); }
   .setup-guide-expanded { width: min(19rem, calc(100vw - 2rem)); }
   .setup-guide-panel { max-height: min(24rem, calc(100dvh - 10rem)); }
 }

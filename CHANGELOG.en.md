@@ -7,6 +7,10 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ## [Unreleased]
 
 ### Added
+- **In-app auto-updater & synced changelog dialog**:
+  - **Check & restart-to-update (Windows installer & Linux AppImage)**: Adds silent startup update checks and a manual **Check for updates** button on the **About** page backed by static GitHub Releases `latest.json` manifests and a compile-time pinned Minisign public key (avoiding anonymous REST API rate limits). New versions surface in a dismissible bottom-right card; downloads display a live green progress bar while keeping active connections uninterrupted; installing cleanly stops services (including managed `Everything.exe` on Windows) and restarts into the new build automatically. Portable Windows builds and Linux `.deb`/source builds check the same static `latest.json` via SemVer so they still receive update alerts, release notes, and direct download links.
+  - **In-app synced changelog & release notes modals**: Updates **About** actions to ghost-style **Changelog**, **GitHub**, and **Check for updates**. Both **Changelog** and **Release notes** open in-app modals that follow the UI language, hide `[Unreleased]` and header chrome, render instantly from the bundled copy, silently sync from GitHub (with `latest.json` notes fallback), and include a header link icon to GitHub.
+  - **Cross-platform signed draft release workflow**: Adds `.github/workflows/release.yml` and `generate-updater-manifest.ps1` to run tests and build signed Windows (portable ZIP + NSIS) and Linux (Ubuntu 22.04 AppImage + `.deb`) packages in parallel on `v*` tags, assembling a dual-platform `latest.json` and `SHA256SUMS.txt` onto a draft GitHub Release.
 - **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
 
 ## [v0.2.2] - 2026-11-27

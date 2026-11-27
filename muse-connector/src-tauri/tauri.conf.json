@@ -28,6 +28,7 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
       "nsis"
     ],
@@ -39,8 +40,10 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "allowDowngrades": false,
       "nsis": {
         "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh",
         "languages": [
           "SimpChinese",
           "English"
@@ -50,9 +53,13 @@
   },
   "plugins": {
     "updater": {
-      "requireSignedVersion": true,
-      "pubkey": "",
-      "endpoints": []
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ4QTU1NTI1QUFGOUFENzUKUldSMXJmbXFKVldsU0xpaW9OakRwVm1GZzZ5Y0p4alVBZ3A0VnFWblBHWkJDMFArdnJhMmV3VS8K",
+      "endpoints": [
+        "https://github.com/Aenvo/MuseLink/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

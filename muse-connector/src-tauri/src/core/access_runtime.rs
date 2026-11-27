@@ -549,6 +549,14 @@ impl AccessRuntime {
         self.stop_search_engine();
     }
 
+    /// 供应用内更新前临时停止托管索引进程（释放 Everything.exe 文件锁），
+    /// 不将索引生命周期永久标记为 stopped，以便安装失败时可恢复预热。
+    pub(crate) fn suspend_index_for_update(&self) {
+        let lifecycle = self.index_lifecycle.lock().unwrap();
+        lifecycle.prewarm_cancel.store(true, Ordering::Release);
+        self.stop_search_engine();
+    }
+
     pub(crate) fn ntfs_search_service(&self) -> Option<bool> {
         #[cfg(windows)]
         if self.everything.is_some() {

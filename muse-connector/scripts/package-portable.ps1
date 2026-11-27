@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory)][string]$ConnectorExe,
     [Parameter(Mandatory)][string]$Destination,
     [string]$DownloadDirectory,
-    [string]$NsisDestination
+    [string]$NsisDestination,
+    [string]$SignatureDestination
 )
 
 $ErrorActionPreference = 'Stop'
@@ -21,6 +22,12 @@ if ($NsisDestination) {
     $nsisPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($NsisDestination)
     if ([IO.Path]::GetExtension($nsisPath) -ne '.exe') { throw 'NSIS destination must end in .exe.' }
     if (Test-Path -LiteralPath $nsisPath) { throw 'NSIS destination already exists.' }
+}
+if ($SignatureDestination) {
+    if (-not $NsisDestination) { throw 'SignatureDestination requires NsisDestination.' }
+    $sigPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($SignatureDestination)
+    if ([IO.Path]::GetExtension($sigPath) -ne '.sig') { throw 'Signature destination must end in .sig.' }
+    if (Test-Path -LiteralPath $sigPath) { throw 'Signature destination already exists.' }
 }
 $cleanupDownload = $false
 if (-not $DownloadDirectory) {
@@ -92,6 +99,15 @@ try {
             if (Test-Path -LiteralPath $nsisPath) { throw 'NSIS destination already exists.' }
             $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $nsisPath))
             Copy-Item -LiteralPath $installer[0].FullName -Destination $nsisPath
+            if ($SignatureDestination) {
+                $signatureFile = "$($installer[0].FullName).sig"
+                if (-not (Test-Path -LiteralPath $signatureFile -PathType Leaf)) {
+                    throw "Updater signature missing: $signatureFile (set TAURI_SIGNING_PRIVATE_KEY before bundling)."
+                }
+                if (Test-Path -LiteralPath $sigPath) { throw 'Signature destination already exists.' }
+                $null = [IO.Directory]::CreateDirectory((Split-Path -Parent $sigPath))
+                Copy-Item -LiteralPath $signatureFile -Destination $sigPath
+            }
         } finally {
             $env:CARGO_TARGET_DIR = $previousTarget
             $env:Path = $previousPath

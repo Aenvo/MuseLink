@@ -55,20 +55,22 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. |
 | Public connection | Use Tailscale Funnel by default, or choose a Cloudflare named tunnel with your own domain. |
 | Dedicated token | Generate and copy Muse connection instructions and the dedicated token under **Connection**; rotate, revoke, or locate the token under **Settings → Data**, with automatic token redaction in logs. |
-| Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and English / Simplified Chinese UI. |
+| Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports in-app update checks, dismissible update notices, synced in-app changelog/release-notes modals, silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and English / Simplified Chinese UI. |
 
 ## Download and install
 
-Choose a Windows x64 build from [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest). Both builds require WebView2.
+Choose a Windows x64 or Linux x64 build from [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) (Windows builds require WebView2).
 
 | Build | Download and launch |
 | --- | --- |
-| Portable | Download `MuseLink-<version>-windows-x64-portable.zip`, extract the entire archive, and run `muse-connector.exe`. |
-| Installer | Download `MuseLink-<version>-windows-x64-setup.exe` and run the installer. |
+| Windows Portable | Download `MuseLink-<version>-windows-x64-portable.zip`, extract the entire archive, and run `muse-connector.exe` (supports update alerts with a direct download link). |
+| Windows Installer | Download `MuseLink-<version>-windows-x64-setup.exe` and run the installer (supports Minisign-verified in-app updates with automatic restart under **About → Check for updates**). |
+| Linux AppImage | Download `MuseLink-<version>-linux-x64.AppImage`, make it executable, and run it directly (supports Minisign-verified in-app updates with automatic restart). |
+| Linux deb | Download `MuseLink-<version>-linux-x64.deb` and install via your package manager (supports update alerts, release notes, and direct download links). |
 
 Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executable and installer are unsigned, so Windows may show an unknown publisher prompt.
 
-Linux users can currently build and run MuseLink from source — see [Build from source → Linux](#linux) below.
+Linux users can also build and run MuseLink from source — see [Build from source → Linux](#linux) below.
 
 ## Quick start
 
