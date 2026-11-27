@@ -1044,15 +1044,24 @@ fn production_protection(env: &SensitiveRoots) -> (Vec<PathBuf>, Vec<PathBuf>) {
         push_unique(&mut protected, roaming.join("gcloud"));
         // Firefox credentials (logins.json / key4.db inside each profile).
         // Profile directory names are arbitrary, so protect the container.
-        push_unique(&mut protected, roaming.join("Mozilla").join("Firefox").join("Profiles"));
+        push_unique(
+            &mut protected,
+            roaming.join("Mozilla").join("Firefox").join("Profiles"),
+        );
     }
     #[cfg(windows)]
     if let Some(local) = &env.local_app_data {
         // Chromium credential stores: the Local State encryption key plus each
         // profile's Login Data / Web Data / Network\Cookies. Profile directory
         // names are arbitrary, so protect the whole User Data container.
-        push_unique(&mut protected, local.join("Google").join("Chrome").join("User Data"));
-        push_unique(&mut protected, local.join("Microsoft").join("Edge").join("User Data"));
+        push_unique(
+            &mut protected,
+            local.join("Google").join("Chrome").join("User Data"),
+        );
+        push_unique(
+            &mut protected,
+            local.join("Microsoft").join("Edge").join("User Data"),
+        );
     }
     #[cfg(target_os = "macos")]
     if let Some(roaming) = &env.roaming_app_data {
@@ -1470,7 +1479,11 @@ mod tests {
         #[cfg(windows)]
         for target in [
             roaming.join("gcloud").join("credentials.db"),
-            local.join("Google").join("Chrome").join("User Data").join("Local State"),
+            local
+                .join("Google")
+                .join("Chrome")
+                .join("User Data")
+                .join("Local State"),
             local
                 .join("Google")
                 .join("Chrome")
@@ -1504,14 +1517,23 @@ mod tests {
         #[cfg(target_os = "macos")]
         for target in [
             roaming.join("Google").join("Chrome").join("Local State"),
-            roaming.join("Google").join("Chrome").join("Default").join("Login Data"),
-            roaming.join("Microsoft Edge").join("Default").join("Login Data"),
+            roaming
+                .join("Google")
+                .join("Chrome")
+                .join("Default")
+                .join("Login Data"),
+            roaming
+                .join("Microsoft Edge")
+                .join("Default")
+                .join("Login Data"),
             roaming
                 .join("Firefox")
                 .join("Profiles")
                 .join("abcd1234.default-release")
                 .join("logins.json"),
-            home.join("Library").join("Keychains").join("login.keychain-db"),
+            home.join("Library")
+                .join("Keychains")
+                .join("login.keychain-db"),
         ] {
             assert!(protected_path(&target, &protected));
             assert!(protected_path(&target, &write_protected));
@@ -1520,9 +1542,15 @@ mod tests {
         // 浏览器凭证库（Linux）：~/.config 下的 Chrome / Chromium / Edge 容器与 ~/.mozilla/firefox 整体保护
         #[cfg(target_os = "linux")]
         for target in [
-            roaming.join("google-chrome").join("Default").join("Login Data"),
+            roaming
+                .join("google-chrome")
+                .join("Default")
+                .join("Login Data"),
             roaming.join("chromium").join("Default").join("Login Data"),
-            roaming.join("microsoft-edge").join("Default").join("Login Data"),
+            roaming
+                .join("microsoft-edge")
+                .join("Default")
+                .join("Login Data"),
             home.join(".mozilla")
                 .join("firefox")
                 .join("abcd1234.default-release")
