@@ -114,6 +114,30 @@ pnpm -C muse-connector tauri build --bundles nsis
 
 The installer is written to `muse-connector/src-tauri/target/release/bundle/nsis/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just `muse-connector/src-tauri/target/release/muse-connector.exe`.
 
+### Linux
+
+You'll need a Rust toolchain, Node.js 22.12 or later, pnpm, and these system packages: `build-essential`, `pkg-config`, `libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `libayatana-appindicator3-dev`, `librsvg2-dev`, `libsoup-3.0-dev`, `libxdo-dev`, and `libssl-dev`. On Debian/Ubuntu:
+
+```bash
+sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev libgtk-3-dev \
+  libayatana-appindicator3-dev librsvg2-dev libsoup-3.0-dev libxdo-dev libssl-dev
+```
+
+From the repository root:
+
+```bash
+pnpm -C muse-connector install --frozen-lockfile
+pnpm -C muse-connector build
+cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+pnpm -C muse-connector tauri build --no-bundle
+```
+
+The release binary is written to `muse-connector/src-tauri/target/release/muse-connector`. For local UI development, use `pnpm -C muse-connector tauri dev` (same isolated config as on Windows).
+
+**Setup:** install Tailscale for Linux and run `sudo tailscale set --operator=$USER` once; otherwise the app cannot configure Funnel (serve config is denied).
+
+**Limitation:** sandboxed command execution (`exec`) is Windows-only; on Linux it stays disabled and fails closed.
+
 ## Community
 
 This project links to and recognizes the [LINUX DO](https://linux.do/) community, where it is shared and discussed. Public bug reports, compatibility feedback, and feature suggestions are welcome through GitHub Issues.

@@ -4,6 +4,11 @@
 
 本文件记录 MuseLink / Muse连接器 的功能更新、安全加固与问题修复，随版本发布与推送同步维护。
 
+## [Unreleased]
+
+### 新增功能
+- **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
+
 ## [v0.2.2] - 2026-11-27
 
 ### 优化与新增

@@ -67,7 +67,27 @@ impl TunnelObservation {
     }
 }
 
+/// Platform-specific CLI file name: Windows binaries carry `.exe`, Unix ones do not.
+fn exe_file_name(base: &str) -> String {
+    if cfg!(windows) {
+        format!("{base}.exe")
+    } else {
+        base.to_owned()
+    }
+}
+
+/// Normalize a caller-supplied executable name for the current platform.
+/// Call sites may pass Windows-style `*.exe` names; strip the suffix on Unix.
+fn platform_exe_name(name: &str) -> &str {
+    if cfg!(windows) {
+        name
+    } else {
+        name.strip_suffix(".exe").unwrap_or(name)
+    }
+}
+
 pub fn discover_executable(name: &str) -> Option<PathBuf> {
+    let name = platform_exe_name(name);
     if let Some(found) = std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p)
             .map(|d| d.join(name))
@@ -104,6 +124,10 @@ pub fn discover_executable(name: &str) -> Option<PathBuf> {
                 }
             }
         }
+    }
+    if cfg!(unix) {
+        candidates.push(PathBuf::from("/usr/local/bin").join(name));
+        candidates.push(PathBuf::from("/usr/bin").join(name));
     }
     candidates.into_iter().find(|p| p.is_file())
 }
@@ -193,7 +217,7 @@ impl TunnelManager {
         }
         match settings.kind {
             ProviderKind::Tailscale => {
-                let exe = discover_executable("tailscale.exe")
+                let exe = discover_executable(&exe_file_name("tailscale"))
                     .ok_or("未检测到 Tailscale，请先安装并登录")?;
                 let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
                 let cfg: Value = serde_json::from_str(&raw)
@@ -207,7 +231,7 @@ impl TunnelManager {
                 run_cli(&exe, &["funnel", "--bg", "--https=443", &port.to_string()]).await?;
             }
             ProviderKind::CloudflareNamed => {
-                let exe = discover_executable("cloudflared.exe")
+                let exe = discover_executable(&exe_file_name("cloudflared"))
                     .ok_or("未检测到 cloudflared，请先安装")?;
                 validate_provider(settings)?;
                 let mut cmd = command(&exe);
@@ -257,8 +281,8 @@ impl TunnelManager {
             self.child_job.take();
         }
         if self.owned && self.current.kind == ProviderKind::Tailscale {
-            let exe =
-                discover_executable("tailscale.exe").ok_or("Tailscale 工具不可用，无法清理入口")?;
+            let exe = discover_executable(&exe_file_name("tailscale"))
+                .ok_or("Tailscale 工具不可用，无法清理入口")?;
             let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
             let cfg: Value =
                 serde_json::from_str(&raw).map_err(|_| "无法确认隧道归属，未撤销入口")?;
@@ -325,7 +349,7 @@ impl TunnelManager {
 }
 
 pub(crate) async fn observe_tailscale(port: u16) -> Result<TunnelObservation, String> {
-    let exe = discover_executable("tailscale.exe").ok_or("未安装 Tailscale")?;
+    let exe = discover_executable(&exe_file_name("tailscale")).ok_or("未安装 Tailscale")?;
     let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
     let cfg: Value = serde_json::from_str(&raw).map_err(|_| "Tailscale 状态未知：配置解析失败")?;
     let configured = has_mapping(&cfg, port);
@@ -429,6 +453,14 @@ pub(crate) fn ensure_exclusive_mapping(cfg: &Value, port: u16) -> Result<(), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn platform_exe_name_strips_exe_on_unix() {
+        if cfg!(not(windows)) {
+            assert_eq!(platform_exe_name("tailscale.exe"), "tailscale");
+            assert_eq!(platform_exe_name("tailscale"), "tailscale");
+            assert_eq!(platform_exe_name("cloudflared.exe"), "cloudflared");
+        }
+    }
     #[test]
     fn mapping_checks_target_and_rejects_foreign_handlers() {
         assert!(ensure_exclusive_mapping(&json!(null), 18790).is_err());

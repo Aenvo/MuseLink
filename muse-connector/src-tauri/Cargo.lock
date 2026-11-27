@@ -2376,6 +2376,7 @@ dependencies = [
  "chrono",
  "dirs 5.0.1",
  "getrandom 0.2.17",
+ "libc",
  "reqwest",
  "rustls",
  "serde",
