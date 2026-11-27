@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> ·
+  <a href="README.md">简体中文</a> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> · <a href="README.tr.md">Türkçe</a> ·
   <a href="https://github.com/Aenvo/MuseLink/releases/latest">Download latest</a> ·
   <a href="#quick-start">Quick start</a> · <a href="#build-from-source">Build from source</a> ·
   <a href="CHANGELOG.en.md">Changelog</a>
