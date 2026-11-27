@@ -59,7 +59,7 @@
 
 ## 下载与安装
 
-在 [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) 选择 Windows x64 或 Linux x64 版本（Windows 版本需要 WebView2）。
+在 [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) 选择 Windows x64、Linux x64 或 macOS（Apple Silicon & Intel 通用版）安装文件（Windows 版本需要 WebView2）。
 
 | 版本 | 下载与启动 |
 | --- | --- |
@@ -67,10 +67,18 @@
 | Windows 安装版 | 下载 `MuseLink-<version>-windows-x64-setup.exe`，运行安装程序（支持在「关于 → 检查更新」应用内验签下载并自动重启升级）。 |
 | Linux AppImage | 下载 `MuseLink-<version>-linux-x64.AppImage`，赋予执行权限后直接运行（支持应用内验签下载并自动重启升级）。 |
 | Linux deb | 下载 `MuseLink-<version>-linux-x64.deb` 使用包管理器安装（支持新版本提醒、查看更新详情与跳转下载）。 |
+| macOS 安装镜像（通用版） | 下载 `MuseLink-<version>-macos-universal.dmg`，打开后将 `MuseLink.app` 拖入 `Applications`（支持 Apple Silicon 与 Intel，支持新版本提醒与跳转下载）。 |
+| macOS 便携包（通用版） | 下载 `MuseLink-<version>-macos-universal.app.zip`，解压后即可得到 `MuseLink.app`（免挂载镜像）。 |
 
-可用同一 Release 中的 `SHA256SUMS.txt` 校验下载文件。MuseLink 主程序及安装包尚未进行代码签名，Windows 可能提示未知发布者。
+可用同一 Release 中的 `SHA256SUMS.txt` 校验下载文件。MuseLink 主程序及安装包尚未进行商业代码签名，Windows 可能提示未知发布者。
 
-Linux 和 macOS 用户也可以参考下方 [从源码构建 → Linux](#linux) / [macOS](#macos) 自行编译运行。
+> **macOS 首次启动特别提示（重要）：** 由于 macOS 包尚未经过 Apple 开发者签名与公证（Notarization），从浏览器下载后首次打开会被系统 Gatekeeper 拦截。请按以下两步放行：
+> 1. 先双击尝试打开一次 `MuseLink.app`，被拦截后打开 **系统设置 → 隐私与安全性**，向下滚动到「安全性」区域点击 **仍要打开**；
+> 2. 若在 macOS Sequoia（15+）上仍提示「已损坏，无法打开」，在终端执行一次清除下载隔离属性命令后即可正常打开：
+>    ```bash
+>    xattr -dr com.apple.quarantine /Applications/MuseLink.app
+>    ```
+> （如更偏好完全本地编译，也可参考下方 [从源码构建 → macOS](#macos)；Linux 同样支持 [从源码构建 → Linux](#linux)。）
 
 ## 使用指南
 

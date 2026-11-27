@@ -59,7 +59,7 @@
 
 ## ダウンロードとインストール
 
-[GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) から Windows x64 または Linux x64 ビルドを選択してください（Windows 版には WebView2 が必要です）。
+[GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) から Windows x64、Linux x64、または macOS Universal（Apple Silicon・Intel 両対応）ビルドを選択してください（Windows 版には WebView2 が必要です）。
 
 | 配布形式 | ダウンロードと起動 |
 | --- | --- |
@@ -67,10 +67,18 @@
 | Windows インストーラー版 | `MuseLink-<version>-windows-x64-setup.exe` をダウンロードしてインストールします（「アプリ情報 → 更新を確認」から Minisign 署名検証付きのアプリ内更新・自動再起動に対応）。 |
 | Linux AppImage | `MuseLink-<version>-linux-x64.AppImage` をダウンロードし、実行権限を付与してそのまま起動します（Minisign 署名検証付きのアプリ内更新・自動再起動に対応）。 |
 | Linux deb | `MuseLink-<version>-linux-x64.deb` をダウンロードし、パッケージマネージャーでインストールします（新バージョン通知・リリースノート表示・ダウンロードリンクに対応）。 |
+| macOS インストーラー（Universal） | `MuseLink-<version>-macos-universal.dmg` を開き、`MuseLink.app` を `Applications` へドラッグしてインストールします（Apple Silicon・Intel 両対応、新バージョン通知とダウンロードリンクに対応）。 |
+| macOS ポータブル版（Universal） | `MuseLink-<version>-macos-universal.app.zip` を展開してそのまま `MuseLink.app` を利用できます。 |
 
 同じリリースに含まれる `SHA256SUMS.txt` でダウンロードしたファイルを検証できます。MuseLink の実行ファイルとインストーラーはコード署名されていないため、Windows で不明な発行元の警告が表示される場合があります。
 
-Linux や macOS ユーザーは、下の [ソースからビルド → Linux](#linux) / [macOS](#macos) を参考にソースからビルドして実行することもできます。
+> **macOS 初回起動時の重要なご注意：** macOS ビルドは Apple Developer ID による署名・公証（Notarization）を行っていないため、ブラウザーからダウンロードした初回起動時に Gatekeeper にブロックされます。次の手順で許可してください：
+> 1. 一度 `MuseLink.app` を開こうとした後、**システム設定 → プライバシーとセキュリティ** の「セキュリティ」欄を開き、**このまま開く** をクリックします。
+> 2. macOS Sequoia（15 以降）で「壊れているため開けません」と表示される場合は、ターミナルで一度だけダウンロード隔離属性を解除してください：
+>    ```bash
+>    xattr -dr com.apple.quarantine /Applications/MuseLink.app
+>    ```
+> （ローカルで直接ビルドしたい場合は、下の [ソースからビルド → Linux](#linux) / [macOS](#macos) を参照してください。）
 
 ## クイックスタート
 

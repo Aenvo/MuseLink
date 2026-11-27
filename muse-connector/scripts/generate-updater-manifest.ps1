@@ -8,6 +8,8 @@ param(
     [string]$LinuxAppImagePath,
     [string]$LinuxSignaturePath,
     [string]$LinuxDebPath,
+    [string]$MacosDmgPath,
+    [string]$MacosZipPath,
     [string]$Repository = 'Aenvo/MuseLink',
     # 可选覆盖下载基址（例如第二阶段接入 Cloudflare R2 自定义域名镜像时传入）。
     [string]$BaseDownloadUrl
@@ -147,6 +149,32 @@ if (-not [string]::IsNullOrWhiteSpace($LinuxDebPath)) {
         Copy-Item -LiteralPath $debItem.FullName -Destination $stagedDeb -Force
     }
     $checksumTargets += $stagedDeb
+}
+
+if (-not [string]::IsNullOrWhiteSpace($MacosDmgPath)) {
+    $dmgItem = Get-Item -LiteralPath $MacosDmgPath
+    if ($dmgItem.PSIsContainer -or $dmgItem.Extension -ne '.dmg') {
+        throw 'MacosDmgPath must point to a .dmg disk image.'
+    }
+    $dmgAssetName = "MuseLink-$version-macos-universal.dmg"
+    $stagedDmg = Join-Path $outDir $dmgAssetName
+    if ($dmgItem.FullName -ne $stagedDmg) {
+        Copy-Item -LiteralPath $dmgItem.FullName -Destination $stagedDmg -Force
+    }
+    $checksumTargets += $stagedDmg
+}
+
+if (-not [string]::IsNullOrWhiteSpace($MacosZipPath)) {
+    $macZipItem = Get-Item -LiteralPath $MacosZipPath
+    if ($macZipItem.PSIsContainer -or $macZipItem.Extension -ne '.zip') {
+        throw 'MacosZipPath must point to a .zip archive.'
+    }
+    $macZipAssetName = "MuseLink-$version-macos-universal.app.zip"
+    $stagedMacZip = Join-Path $outDir $macZipAssetName
+    if ($macZipItem.FullName -ne $stagedMacZip) {
+        Copy-Item -LiteralPath $macZipItem.FullName -Destination $stagedMacZip -Force
+    }
+    $checksumTargets += $stagedMacZip
 }
 
 $changelogPath = Join-Path $repoRoot 'CHANGELOG.md'

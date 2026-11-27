@@ -231,9 +231,96 @@ jobs:
           path: ${{ steps.linux_pack.outputs.out_dir }}/*
           if-no-files-found: error
 
+  build-macos:
+    name: Build macOS (Universal dmg & app.zip)
+    runs-on: macos-latest
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Resolve release tag
+        id: meta
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            tag="${{ inputs.tag }}"
+          else
+            tag="${{ github.ref_name }}"
+          fi
+          version="${tag#v}"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Add Apple Silicon and Intel Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: muse-connector/pnpm-lock.yaml
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: muse-connector/src-tauri
+
+      - name: Install locked dependencies
+        run: pnpm -C muse-connector install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm -C muse-connector build
+
+      - name: Run Rust tests on macOS
+        run: cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+
+      - name: Build macOS Universal app bundle
+        run: pnpm -C muse-connector tauri build --target universal-apple-darwin --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}' --ci
+
+      - name: Package macOS Universal dmg and portable app.zip
+        id: macos_pack
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.meta.outputs.version }}"
+          out_dir="${RUNNER_TEMP}/muselink-macos-${version}"
+          dmg_stage="${RUNNER_TEMP}/muselink-macos-dmg-stage-${version}"
+          rm -rf "$out_dir" "$dmg_stage"
+          mkdir -p "$out_dir" "$dmg_stage"
+          app_bundle=$(find muse-connector/src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 1 -type d -name '*.app' | head -n 1)
+          if [ -z "$app_bundle" ] || [ ! -d "$app_bundle" ]; then
+            echo "Missing macOS .app bundle." >&2
+            exit 1
+          fi
+          ditto "$app_bundle" "${dmg_stage}/MuseLink.app"
+          codesign --force --deep --sign - "${dmg_stage}/MuseLink.app"
+          ditto -c -k --sequesterRsrc --keepParent "${dmg_stage}/MuseLink.app" "${out_dir}/MuseLink-${version}-macos-universal.app.zip"
+          ln -s /Applications "${dmg_stage}/Applications"
+          cp LICENSE THIRD_PARTY_NOTICES.md "$dmg_stage/"
+          hdiutil create -volname "MuseLink ${version}" -srcfolder "$dmg_stage" -ov -format UDZO "${out_dir}/MuseLink-${version}-macos-universal.dmg"
+          echo "out_dir=${out_dir}" >> "$GITHUB_OUTPUT"
+          ls -lh "$out_dir"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-assets
+          path: ${{ steps.macos_pack.outputs.out_dir }}/*
+          if-no-files-found: error
+
   publish-draft:
     name: Assemble manifest & create draft Release
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-macos]
     runs-on: windows-latest
     timeout-minutes: 15
     steps:
@@ -252,13 +339,20 @@ jobs:
           name: linux-assets
           path: ${{ runner.temp }}/release-inputs/linux
 
-      - name: Generate dual-platform updater manifest and SHA256SUMS
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: macos-assets
+          path: ${{ runner.temp }}/release-inputs/macos
+
+      - name: Generate updater manifest and SHA256SUMS
         shell: pwsh
         run: |
           $tag = "${{ needs.build-windows.outputs.tag }}"
           $version = "${{ needs.build-windows.outputs.version }}"
           $winDir = Join-Path $env:RUNNER_TEMP "release-inputs/win"
           $linuxDir = Join-Path $env:RUNNER_TEMP "release-inputs/linux"
+          $macosDir = Join-Path $env:RUNNER_TEMP "release-inputs/macos"
           $assetsDir = Join-Path $env:RUNNER_TEMP "release-final-$version"
           & ./muse-connector/scripts/generate-updater-manifest.ps1 `
             -Tag $tag `
@@ -268,6 +362,8 @@ jobs:
             -LinuxAppImagePath (Join-Path $linuxDir "MuseLink-$version-linux-x64.AppImage") `
             -LinuxSignaturePath (Join-Path $linuxDir "MuseLink-$version-linux-x64.AppImage.sig") `
             -LinuxDebPath (Join-Path $linuxDir "MuseLink-$version-linux-x64.deb") `
+            -MacosDmgPath (Join-Path $macosDir "MuseLink-$version-macos-universal.dmg") `
+            -MacosZipPath (Join-Path $macosDir "MuseLink-$version-macos-universal.app.zip") `
             -OutputDirectory $assetsDir
           Get-ChildItem -LiteralPath $assetsDir -File | ForEach-Object {
             Write-Host ("- {0} ({1} bytes)" -f $_.Name, $_.Length)
@@ -286,4 +382,4 @@ jobs:
           if ($LASTEXITCODE -ne 0) {
             throw "gh release create failed with exit code $LASTEXITCODE."
           }
-          Write-Host "Draft release $tag created with Windows + Linux assets. Review and Publish when ready."
+          Write-Host "Draft release $tag created with Windows + Linux + macOS assets. Review and Publish when ready."

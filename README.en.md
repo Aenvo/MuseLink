@@ -59,7 +59,7 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 
 ## Download and install
 
-Choose a Windows x64 or Linux x64 build from [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) (Windows builds require WebView2).
+Choose a Windows x64, Linux x64, or macOS Universal (Apple Silicon & Intel) build from [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) (Windows builds require WebView2).
 
 | Build | Download and launch |
 | --- | --- |
@@ -67,10 +67,18 @@ Choose a Windows x64 or Linux x64 build from [GitHub Releases](https://github.co
 | Windows Installer | Download `MuseLink-<version>-windows-x64-setup.exe` and run the installer (supports Minisign-verified in-app updates with automatic restart under **About → Check for updates**). |
 | Linux AppImage | Download `MuseLink-<version>-linux-x64.AppImage`, make it executable, and run it directly (supports Minisign-verified in-app updates with automatic restart). |
 | Linux deb | Download `MuseLink-<version>-linux-x64.deb` and install via your package manager (supports update alerts, release notes, and direct download links). |
+| macOS Installer (Universal) | Download `MuseLink-<version>-macos-universal.dmg`, open it, and drag `MuseLink.app` into `Applications` (Apple Silicon & Intel; supports update alerts and direct download links). |
+| macOS Portable (Universal) | Download `MuseLink-<version>-macos-universal.app.zip` and extract `MuseLink.app` directly. |
 
-Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executable and installer are unsigned, so Windows may show an unknown publisher prompt.
+Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executables and installers are unsigned, so Windows may show an unknown publisher prompt.
 
-Linux and macOS users can also build and run MuseLink from source — see [Build from source → Linux](#linux) / [macOS](#macos) below.
+> **Important note for macOS first launch:** Because macOS builds are currently ad-hoc signed and not notarized with an Apple Developer ID, Gatekeeper blocks browser-downloaded builds on first launch:
+> 1. Try opening `MuseLink.app` once, then go to **System Settings → Privacy & Security**, scroll down to **Security**, and click **Open Anyway**.
+> 2. If macOS Sequoia (15+) still reports that the app "is damaged and can't be opened", clear the download quarantine attribute once in Terminal:
+>    ```bash
+>    xattr -dr com.apple.quarantine /Applications/MuseLink.app
+>    ```
+> (You can also build locally from source — see [Build from source → Linux](#linux) / [macOS](#macos) below.)
 
 ## Quick start
 
