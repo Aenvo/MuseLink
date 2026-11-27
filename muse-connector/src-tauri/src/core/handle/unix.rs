@@ -127,19 +127,27 @@ fn current_umask() -> libc::mode_t {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        // No /proc on macOS: read the mask by swapping it to 0 and restoring
-        // it immediately (the only portable query POSIX offers). The window
-        // between the two calls is two syscalls; a file created by another
-        // thread of this process inside that window could briefly get a
-        // wider mode, but this backend always fchmod()s the files it creates
-        // to their final mode, so its own outputs are unaffected. The
+        // No /proc on macOS: the only portable query POSIX offers is to swap
+        // the mask to 0 and restore it. That swap is process-global, so two
+        // concurrent swappers can interleave (A clears, B reads 0, A restores
+        // the original, B restores 0) and leave the mask at 000 permanently,
+        // silently widening every file and directory created afterwards.
+        // Nothing in this process changes its umask after startup (the swap
+        // below is the only umask call in the codebase), so perform the swap
+        // exactly once, serialized, and serve the cached value from then on:
+        // after initialization no thread ever mutates the mask again. The
         // alternative (assuming 0o022) silently produces wrong modes for
         // every user whose umask differs.
-        unsafe {
-            let current = libc::umask(0);
-            libc::umask(current);
-            current
-        }
+        static CACHED_UMASK: std::sync::OnceLock<libc::mode_t> = std::sync::OnceLock::new();
+        static SWAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        *CACHED_UMASK.get_or_init(|| {
+            let _guard = SWAP_LOCK.lock().unwrap();
+            unsafe {
+                let current = libc::umask(0);
+                libc::umask(current);
+                current
+            }
+        })
     }
 }
 
@@ -779,6 +787,33 @@ mod tests {
         let mode = file_mode(&target.path);
         assert_ne!(mode, 0o666);
         assert_eq!(mode, u32::from(0o666 & !current_umask()));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn concurrent_umask_queries_never_corrupt_the_process_mask() {
+        // Probe the real process mask with a single swap-and-restore. Safe
+        // here: current_umask() performs its one swap inside its OnceLock
+        // initializer, which the first call below has already completed, so
+        // this probe is the only swapper left in the process.
+        fn probed_mask() -> libc::mode_t {
+            unsafe {
+                let current = libc::umask(0);
+                libc::umask(current);
+                current
+            }
+        }
+
+        let expected = current_umask();
+        assert_eq!(probed_mask(), expected);
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(move || (0..100).all(|_| current_umask() == expected)))
+            .collect();
+        for thread in threads {
+            assert!(thread.join().unwrap());
+        }
+        assert_eq!(probed_mask(), expected);
     }
 
     #[test]
