@@ -55,7 +55,7 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. |
 | Public connection | Use Tailscale Funnel by default, or choose a Cloudflare named tunnel with your own domain. |
 | Dedicated token | Generate and copy Muse connection instructions and the dedicated token under **Connection**; rotate, revoke, or locate the token under **Settings → Data**, with automatic token redaction in logs. |
-| Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports in-app update checks, dismissible update notices, synced in-app changelog/release-notes modals, silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and English / Simplified Chinese UI. |
+| Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports in-app update checks, dismissible update notices, synced in-app changelog/release-notes modals, silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and Simplified Chinese / English / Japanese UI. |
 
 ## Download and install
 
@@ -70,7 +70,7 @@ Choose a Windows x64 or Linux x64 build from [GitHub Releases](https://github.co
 
 Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executable and installer are unsigned, so Windows may show an unknown publisher prompt.
 
-Linux users can also build and run MuseLink from source — see [Build from source → Linux](#linux) below.
+Linux and macOS users can also build and run MuseLink from source — see [Build from source → Linux](#linux) / [macOS](#macos) below.
 
 ## Quick start
 
@@ -118,7 +118,7 @@ cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
 pnpm -C muse-connector tauri build --bundles nsis
 ```
 
-The installer is written to `muse-connector/src-tauri/target/release/bundle/nsis/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just `muse-connector/src-tauri/target/release/muse-connector.exe`.
+The installer is written to `muse-connector/src-tauri/target/release/bundle/nsis/`. Without `TAURI_SIGNING_PRIVATE_KEY`, append `--config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'` for an unsigned local installer; or run `pnpm -C muse-connector tauri build --no-bundle` to produce just `muse-connector/src-tauri/target/release/muse-connector.exe`.
 
 ### Linux
 
@@ -152,7 +152,7 @@ You'll need a Rust toolchain, Node.js 22.12 or later, pnpm, and the Xcode Comman
 pnpm -C muse-connector install --frozen-lockfile
 pnpm -C muse-connector build
 cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
-pnpm -C muse-connector tauri build --bundles app
+pnpm -C muse-connector tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 The app bundle is written to `muse-connector/src-tauri/target/release/bundle/macos/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just the binary at `muse-connector/src-tauri/target/release/muse-connector`. For local UI development, use `pnpm -C muse-connector tauri dev` (same isolated config as on Windows).

@@ -341,6 +341,14 @@ mod tests {
             profile.window_title(reopened.language),
             "MuseLink · Development"
         );
+        state.language = Language::Japanese;
+        profile.save_desktop(&state).unwrap();
+        let reopened_ja = profile.load_desktop().unwrap();
+        assert_eq!(reopened_ja.language, Language::Japanese);
+        assert_eq!(
+            profile.window_title(reopened_ja.language),
+            "MuseLink · 開発モード"
+        );
         assert!(!DesktopState::default().start_minimized);
         assert!(DesktopState::default().close_to_tray);
         std::fs::write(

@@ -55,7 +55,7 @@
 | 受控命令执行 | 默认关闭；按需开启后，让 Muse 在授权项目子目录内运行开发工具与受控 PowerShell/cmd，运行于每工作区独立 SID 的 Windows 写受限沙箱与三档审批弹窗下。 |
 | 公网连接 | 默认使用 Tailscale Funnel，也支持 Cloudflare 命名隧道（自有域名）。 |
 | 专用凭证 | 在「连接」生成并复制 Muse 接入说明与专用令牌，在「设置 → 数据」轮换、撤销或定位令牌文件，日志自动脱敏令牌。 |
-| 桌面管理 | 按时间、结果、范围与关键词检索日志，在「设置 → 数据」查看占用、清除/导出（JSONL/CSV）日志与管理本机索引；支持应用内检查更新、右下角新版本提醒与同步更新日志弹窗，支持开机静默自启、关闭时最小化到托盘、退出自动回收全部托管子进程，支持简体中文 / English。 |
+| 桌面管理 | 按时间、结果、范围与关键词检索日志，在「设置 → 数据」查看占用、清除/导出（JSONL/CSV）日志与管理本机索引；支持应用内检查更新、右下角新版本提醒与同步更新日志弹窗，支持开机静默自启、关闭时最小化到托盘、退出自动回收全部托管子进程，支持简体中文 / English / 日本語。 |
 
 ## 下载与安装
 
@@ -70,7 +70,7 @@
 
 可用同一 Release 中的 `SHA256SUMS.txt` 校验下载文件。MuseLink 主程序及安装包尚未进行代码签名，Windows 可能提示未知发布者。
 
-Linux 用户也可以参考下方 [从源码构建 → Linux](#linux) 自行编译运行。
+Linux 和 macOS 用户也可以参考下方 [从源码构建 → Linux](#linux) / [macOS](#macos) 自行编译运行。
 
 ## 使用指南
 
@@ -118,7 +118,7 @@ cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
 pnpm -C muse-connector tauri build --bundles nsis
 ```
 
-安装包输出在 `muse-connector/src-tauri/target/release/bundle/nsis/`。如只需 EXE，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector.exe`。
+安装包输出在 `muse-connector/src-tauri/target/release/bundle/nsis/`。如未配置更新签名私钥 `TAURI_SIGNING_PRIVATE_KEY`，本地构建未签名安装包请附加 `--config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'`；如只需 EXE，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector.exe`。
 
 ### Linux
 
@@ -152,7 +152,7 @@ pnpm -C muse-connector tauri build --no-bundle
 pnpm -C muse-connector install --frozen-lockfile
 pnpm -C muse-connector build
 cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
-pnpm -C muse-connector tauri build --bundles app
+pnpm -C muse-connector tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
 ```
 
 应用包输出在 `muse-connector/src-tauri/target/release/bundle/macos/`。如只需二进制，运行 `pnpm -C muse-connector tauri build --no-bundle`，输出为 `muse-connector/src-tauri/target/release/muse-connector`。本地界面开发同样使用 `pnpm -C muse-connector tauri dev`（与 Windows 相同的隔离配置）。

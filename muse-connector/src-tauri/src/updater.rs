@@ -12,6 +12,7 @@ use crate::profile::{Language, RuntimeProfile};
 use crate::service::ServiceController;
 use serde::Serialize;
 use std::collections::HashMap;
+#[cfg(any(target_os = "windows", target_os = "linux", test))]
 use std::path::Path;
 use std::sync::{
     Arc, Mutex,
@@ -778,6 +779,15 @@ mod tests {
     fn bundled_changelogs_are_embedded_and_non_empty() {
         assert!(BUNDLED_CHANGELOG_ZH.contains("## [v0.2."));
         assert!(BUNDLED_CHANGELOG_EN.contains("## [v0.2."));
+        assert_eq!(
+            changelog_urls(Language::Japanese),
+            (
+                "en",
+                BUNDLED_CHANGELOG_EN,
+                CHANGELOG_RAW_EN_URL,
+                CHANGELOG_WEB_EN_URL,
+            )
+        );
     }
 
     #[test]

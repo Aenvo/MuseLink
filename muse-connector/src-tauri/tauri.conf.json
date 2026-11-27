@@ -47,7 +47,8 @@
         "installerHooks": "windows/installer-hooks.nsh",
         "languages": [
           "SimpChinese",
-          "English"
+          "English",
+          "Japanese"
         ]
       }
     }
