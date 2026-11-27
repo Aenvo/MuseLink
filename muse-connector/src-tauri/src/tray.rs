@@ -79,36 +79,42 @@ pub fn refresh(app: &AppHandle) {
         let _ = tray.set_tooltip(Some(tooltip));
     }
     let items = app.state::<TrayItems>();
-    let _ = items.status.set_text(if language == Language::English {
-        format!("Status: {health}")
-    } else {
-        format!("状态：{health}")
+    let _ = items.status.set_text(match language {
+        Language::English => format!("Status: {health}"),
+        Language::Japanese => format!("ステータス：{health}"),
+        Language::Chinese => format!("状态：{health}"),
     });
     let _ = items.toggle.set_text(if status.enabled {
-        language.text("暂停连接", "Pause connection")
+        language.text("暂停连接", "Pause connection", "接続を一時停止")
     } else {
-        language.text("开启连接", "Start connection")
+        language.text("开启连接", "Start connection", "接続を開始")
     });
     let _ = items.toggle.set_enabled(!matches!(
         status.health,
         Health::Starting | Health::Stopping
     ));
-    let _ = items
-        .show
-        .set_text(language.text("打开主窗口", "Open main window"));
-    let _ = items.quit.set_text(language.text("退出", "Quit"));
+    let _ = items.show.set_text(language.text(
+        "打开主窗口",
+        "Open main window",
+        "メインウィンドウを開く",
+    ));
+    let _ = items.quit.set_text(language.text("退出", "Quit", "終了"));
 }
 
 fn health_label(health: &Health, language: Language) -> &'static str {
     match health {
-        Health::Up => language.text("连接已配置", "Connection configured"),
-        Health::Degraded => language.text("需要检查", "Needs attention"),
-        Health::Down => language.text("文件服务异常", "File service error"),
-        Health::Paused => language.text("本应用已暂停", "Paused"),
-        Health::Unknown => language.text("尚未探测", "Unchecked"),
-        Health::Starting => language.text("正在开启", "Starting"),
-        Health::Stopping => language.text("正在暂停", "Pausing"),
-        Health::Conflict => language.text("端口冲突", "Port conflict"),
+        Health::Up => language.text("连接已配置", "Connection configured", "接続が設定済み"),
+        Health::Degraded => language.text("需要检查", "Needs attention", "確認が必要です"),
+        Health::Down => language.text(
+            "文件服务异常",
+            "File service error",
+            "ファイルサービスエラー",
+        ),
+        Health::Paused => language.text("本应用已暂停", "Paused", "一時停止済み"),
+        Health::Unknown => language.text("尚未探测", "Unchecked", "未確認"),
+        Health::Starting => language.text("正在开启", "Starting", "開始中"),
+        Health::Stopping => language.text("正在暂停", "Pausing", "一時停止中"),
+        Health::Conflict => language.text("端口冲突", "Port conflict", "ポートの競合"),
     }
 }
 pub fn show_main(app: &AppHandle) {
