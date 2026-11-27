@@ -8,6 +8,7 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 
 ### Added
 - **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
+- **Japanese localization**: Added a Japanese (ja) locale; the full UI can now be displayed in Japanese, selectable in Settings.
 
 ## [v0.2.2] - 2026-11-27
 
