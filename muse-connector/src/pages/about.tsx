@@ -9,6 +9,7 @@ const githubRepositoryUrl = "https://github.com/Aenvo/MuseLink";
 const changelogUrls = {
   "zh-CN": "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.md",
   en: "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.en.md",
+  ja: "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.en.md",
 } as const;
 
 export default function About({ version, onError }: { version: string; onError: (message: string) => void }) {
