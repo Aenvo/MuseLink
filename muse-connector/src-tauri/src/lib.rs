@@ -249,6 +249,7 @@ async fn pick_directory(
         let mut dialog = app.dialog().file().set_title(language.text(
             "选择允许 Muse 访问的目录",
             "Choose a folder Muse can access",
+            "Muse がアクセスできるフォルダーを選択",
         ));
         if profile.onboarding_qa {
             dialog = dialog.set_directory(profile.home.join("files"));
@@ -354,7 +355,7 @@ async fn export_logs(
         let picked = app
             .dialog()
             .file()
-            .set_title(language.text("导出日志", "Export logs"))
+            .set_title(language.text("导出日志", "Export logs", "ログをエクスポート"))
             .set_file_name(&file_name)
             .add_filter(filter_name, &[ext])
             .blocking_save_file();
