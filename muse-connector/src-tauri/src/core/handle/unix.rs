@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use crate::core::path_guard::Resolved;
 
@@ -244,19 +244,34 @@ fn verify_root(file: &File, canonical_root: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// The anchor for a strict (reject_reparse) walk: the requested root as
+/// spelled in the grant, never the canonical root. The canonical root is
+/// computed once at resolve time; if a writable ancestor was briefly a
+/// symlink during that computation it names an ungranted directory, and
+/// walking it would escape the grant. Walking the requested spelling with
+/// nofollow opens at use time fails closed instead, and verify_root() then
+/// cross-checks that the two spellings name the same inode, so a poisoned
+/// canonical root surfaces as Changed (409) rather than an escape.
+#[cfg(target_os = "macos")]
+fn strict_anchor(target: &Resolved) -> PathBuf {
+    // The requested spelling can cross one of macOS's root-owned alias
+    // symlinks (/var -> /private/var etc.), which a nofollow walk must
+    // reject. Normalize exactly those three trusted prefixes (the same
+    // table access::canonicalize_direct trusts); every other component is
+    // walked as spelled, so any other symlink in the root path fails the
+    // walk instead of being followed.
+    crate::core::access::macos_alias_spelling(&target.requested_root)
+        .unwrap_or_else(|| target.requested_root.clone())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn strict_anchor(target: &Resolved) -> PathBuf {
+    target.requested_root.clone()
+}
+
 fn open_root(target: &Resolved) -> Result<File, Error> {
-    // On macOS the requested (lexical) root can cross the OS alias symlinks
-    // (/var -> /private/var etc.), which a nofollow walk must reject, so the
-    // strict walk uses the canonical root instead. Its components are real
-    // directories by construction, verify_root() below still pins the
-    // opened fd to the canonical root's device/inode, and traversal below
-    // the root stays nofollow, so a swapped component still fails closed.
-    #[cfg(target_os = "macos")]
-    let strict_root = &target.root;
-    #[cfg(not(target_os = "macos"))]
-    let strict_root = &target.requested_root;
     let file = if target.reject_reparse {
-        open_from_root(strict_root)?
+        open_from_root(&strict_anchor(target))?
     } else {
         open_path_absolute(&target.root, true)?
     };
@@ -624,6 +639,36 @@ mod tests {
 
         let target = fixture.target("link/note.txt");
         assert!(matches!(read(&target), Err(Error::Escape)));
+    }
+
+    #[test]
+    fn strict_open_rejects_canonical_root_swapped_at_resolve_time() {
+        // End state of a resolve()-time ancestor swap: the canonical root
+        // names an ungranted directory while the requested root still names
+        // the granted one. The strict walk must stay anchored to the
+        // requested root, so root verification fails closed with Changed
+        // (409) instead of reading or overwriting the ungranted directory.
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("note.txt"), b"granted").unwrap();
+        let outside =
+            std::env::temp_dir().join(format!("muse-outside-{}", crate::core::token::generate()));
+        std::fs::create_dir(&outside).unwrap();
+        let _cleanup = scopeguard_remove_dir(outside.clone());
+        std::fs::write(outside.join("note.txt"), b"ungranted").unwrap();
+
+        let target = Resolved {
+            root: outside.clone(),
+            path: outside.join("note.txt"),
+            requested_root: fixture.0.clone(),
+            requested_relative: PathBuf::from("note.txt"),
+            reject_reparse: true,
+        };
+        assert!(matches!(read(&target), Err(Error::Changed)));
+        assert!(matches!(write(&target, b"overwrite"), Err(Error::Changed)));
+        assert_eq!(
+            std::fs::read(outside.join("note.txt")).unwrap(),
+            b"ungranted"
+        );
     }
 
     #[test]

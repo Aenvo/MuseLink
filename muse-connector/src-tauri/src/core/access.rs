@@ -300,7 +300,7 @@ pub(crate) fn canonicalize_direct(path: &Path) -> Option<PathBuf> {
 /// root-owned alias symlinks (/etc, /tmp, /var all point into /private).
 /// Returns None for paths that do not start with one of those aliases.
 #[cfg(target_os = "macos")]
-fn macos_alias_spelling(path: &Path) -> Option<PathBuf> {
+pub(crate) fn macos_alias_spelling(path: &Path) -> Option<PathBuf> {
     for (alias, real) in [
         ("/etc", "/private/etc"),
         ("/tmp", "/private/tmp"),
