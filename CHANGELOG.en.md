@@ -4,6 +4,11 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
+## [Unreleased]
+
+### Security & Stability
+- **Build provenance attestation for release artifacts**: The release workflow now generates GitHub build provenance attestations for the Windows / Linux / macOS release assets, so users can verify with `gh attestation verify` that a downloaded binary was built from this repository's source on GitHub Actions and has not been substituted or tampered with.
+
 ## [v0.3.2] - 2026-11-28
 
 ### Improvements & Added
