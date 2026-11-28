@@ -4,6 +4,11 @@
 
 本文件记录 MuseLink / Muse连接器 的功能更新、安全加固与问题修复，随版本发布与推送同步维护。
 
+## [Unreleased]
+
+### 安全与稳定性加固
+- **发布产物增加构建来源证明**：发布工作流为 Windows / Linux / macOS 三个平台的发布资产生成 GitHub 构建来源证明（build provenance attestation），用户可通过 `gh attestation verify` 校验下载的二进制确实由本仓库源码在 GitHub Actions 中构建，未被替换或篡改。
+
 ## [v0.3.2] - 2026-11-28
 
 ### 优化与新增
