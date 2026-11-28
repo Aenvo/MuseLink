@@ -30,7 +30,7 @@ export default function Settings({
   bridge: BridgeModel;
   confirm: (value: Confirmation) => void;
 }) {
-  const { t } = useLanguage();
+  const { language, t } = useLanguage();
   const { snapshot: s, busy, run } = bridge;
   const [exportOpen, setExportOpen] = useState(false);
   if (!s) return null;
@@ -62,7 +62,7 @@ export default function Settings({
             <Field orientation="horizontal">
               <FieldLabel htmlFor="display-language">{t("界面语言")}</FieldLabel>
               <Select
-                value={s.desktop.language ?? "zh-CN"}
+                value={s.desktop.language ?? language}
                 disabled={!!busy}
                 onValueChange={(language: Language) => void run(t("正在切换界面语言"), "set_language", { language })}
               >

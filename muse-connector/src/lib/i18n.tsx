@@ -5,7 +5,19 @@ export type Language = "zh-CN" | "en" | "ja";
 type Message = keyof typeof english;
 export type Translate = (message: Message, ...values: (string | number)[]) => string;
 
-const LanguageContext = createContext<Language>("zh-CN");
+export function detectBrowserLanguage(): Language {
+  if (typeof navigator === "undefined") return "en";
+  const candidates = navigator.languages?.length ? navigator.languages : navigator.language ? [navigator.language] : [];
+  for (const raw of candidates) {
+    const primary = raw.trim().split(/[.@]/)[0]?.split(/[-_]/)[0]?.toLowerCase();
+    if (primary === "zh" || primary === "zho" || primary === "chi") return "zh-CN";
+    if (primary === "ja" || primary === "jpn") return "ja";
+    if (primary === "en" || primary === "eng" || primary === "c" || primary === "posix") return "en";
+  }
+  return "en";
+}
+
+const LanguageContext = createContext<Language>("en");
 const catalogs: Record<Exclude<Language, "zh-CN">, Record<Message, string>> = { en: english, ja: japanese };
 const diagnosticPatterns = [
   [/^读取连接器状态失败：([\s\S]+)$/, "读取连接器状态失败：{0}"],

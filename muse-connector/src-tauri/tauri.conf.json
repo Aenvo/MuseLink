@@ -13,7 +13,7 @@
   "app": {
     "windows": [
       {
-        "title": "Muse连接器",
+        "title": "MuseLink",
         "width": 720,
         "height": 680,
         "resizable": true,
@@ -46,8 +46,8 @@
         "installMode": "currentUser",
         "installerHooks": "windows/installer-hooks.nsh",
         "languages": [
-          "SimpChinese",
           "English",
+          "SimpChinese",
           "Japanese"
         ]
       }

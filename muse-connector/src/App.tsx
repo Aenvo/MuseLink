@@ -17,7 +17,7 @@ import ChangelogDialog from "@/components/changelog-dialog";
 import UpdateNotice from "@/components/update-notice";
 import { useBridge, type BridgeModel } from "@/lib/use-bridge";
 import { useUpdater } from "@/lib/use-updater";
-import { LanguageProvider } from "@/lib/i18n";
+import { detectBrowserLanguage, LanguageProvider } from "@/lib/i18n";
 import { connectionPresentation } from "@/lib/connection-presentation";
 import { providerToolAvailable, readSetupVerification, setupStorageKey } from "@/lib/setup-progress";
 import { hasFileGrant } from "@/lib/agent-setup";
@@ -43,7 +43,8 @@ function shouldResumeGuide(key: string, useLegacy: boolean) {
 
 export default function App() {
   const bridge = useBridge();
-  return <LanguageProvider language={bridge.snapshot?.desktop.language ?? "zh-CN"}>
+  const fallbackLanguage = useMemo(detectBrowserLanguage, []);
+  return <LanguageProvider language={bridge.snapshot?.desktop.language ?? fallbackLanguage}>
     <AppContent bridge={bridge} />
   </LanguageProvider>;
 }

@@ -94,7 +94,7 @@ For the default connection method, install [Tailscale](https://tailscale.com/dow
 
 When connecting several computers, give each one a distinct device name, its own connector, and its own token. Ask Muse for the device by name, for example, “Find `hello.txt` on Laptop.” To rename a connected device, save the new name under **Connection**, then copy the rename instructions and paste them into Muse. The pending status clears when Muse sends its confirmation. You can also check the new name in Muse and confirm it manually under **Connection**.
 
-File indexing starts in the background after you first save permissions. Manage local data, file index usage/rebuilds, log cleanup/export, and token rotation/revocation under **Settings → Data**. Configure display language, silent startup launch, and minimize-to-tray on close under **Settings → General**.
+File indexing starts in the background after you first save permissions. Manage local data, file index usage/rebuilds, log cleanup/export, and token rotation/revocation under **Settings → Data**. Configure display language (auto-detected from the system locale on first launch with English as the default outside Chinese/Japanese locales), silent startup launch, and minimize-to-tray on close under **Settings → General**.
 
 ## Access and connection boundaries
 

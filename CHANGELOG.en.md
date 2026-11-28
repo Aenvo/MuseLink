@@ -7,6 +7,9 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ## [Unreleased]
 
 ### Improvements & Added
+- **Automatic first-launch system language detection (English default)**: On first launch, MuseLink now detects the OS language automatically (Chinese locales use Simplified Chinese, Japanese uses Japanese, and all other locales default to English); manually changing the language in **Settings → General** locks your choice.
+  - **Native cross-platform locale detection**: Uses `GetUserPreferredUILanguages` / `GetUserDefaultLocaleName` on Windows, `NSLocale.preferredLanguages` on macOS (working reliably when launched from Finder/Dock without shell `LANG`), and POSIX / GNU gettext precedence (`LC_ALL` → `LC_MESSAGES` → `LANG`, plus `LANGUAGE` when not under `C`/`POSIX`) on Linux.
+  - **Clean first-run state & English defaults**: Keeps auto-detected language in memory until preferences are saved so `fresh_setup` onboarding is preserved; updates default window title, HTML `lang`, pre-snapshot frontend fallback, and the Windows NSIS installer fallback language to English.
 - **Layered in-app changelog reading & native Japanese changelog**: The in-app **About → Changelog / Release notes** dialog now shows concise highlights by default with a per-version toggle for technical details, and the Japanese UI displays native Japanese notes directly.
   - Added `CHANGELOG.ja.md` so the Japanese in-app dialog and GitHub links no longer fall back to English.
   - Upgraded the CI and release workflows to auto-discover all `CHANGELOG*.md` and `README*.md` locales, enforce cross-locale version sync, and assemble multilingual GitHub Release notes automatically when new languages are added.

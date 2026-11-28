@@ -7,6 +7,9 @@
 ## [Unreleased]
 
 ### 优化与新增
+- **首次启动自动匹配系统语言（非中 / 日环境默认英文）**：新用户首次打开将自动识别系统语言（中文简繁归属简体中文、日语显示日本語、其余语言统一回退 English），在「设置 → 常规」手动切换后保持固定。
+  - **三平台原生系统语言探测**：Windows 通过 `GetUserPreferredUILanguages` / `GetUserDefaultLocaleName` 读取显示语言偏好；macOS 通过 `NSLocale.preferredLanguages` 读取系统语言列表（不依赖 Finder 启动缺失的 `LANG`）；Linux 按 `LC_ALL` → `LC_MESSAGES` → `LANG` 与 `LANGUAGE` 规范解析（`C` / `POSIX` 稳定回退英文）。
+  - **无闪屏与首次配置保护**：首次自动探测仅在内存生效，不提前写入 `desktop-state.json`，避免干扰新用户首次配置引导；同步将窗口默认标题、HTML 初始属性、前端首帧兜底与 Windows NSIS 安装器回退语言调整为按系统优先并默认英文。
 - **更新日志阅读分层与原生日语日志支持**：应用内「关于 → 更新日志 / 更新详情」弹窗默认只展示精炼重点并支持按版本一键展开细节，日语界面改为直接展示原生日语更新日志。
   - 新增 `CHANGELOG.ja.md`，日语界面弹窗与 GitHub 链接不再回退英文。
   - 发布与 CI 工作流升级为自动扫描仓库全部 `CHANGELOG*.md` 与 `README*.md`，自动校验多语言版本一致性并生成全语种 GitHub Release 说明，便于后续零配置扩展新语言。
