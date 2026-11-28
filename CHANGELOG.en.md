@@ -7,6 +7,8 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ## [Unreleased]
 
 ### Security & Stability
+- **Exec child processes now strip credential-like environment variables** ([#14](https://github.com/Aenvo/MuseLink/pull/14) by [@KammyAugust11](https://github.com/KammyAugust11)): Common third-party tokens and secret environment variables are automatically removed when building the sandbox child-process environment block so host credentials cannot be read by agent-executed commands.
+  - Added platform-independent `core/env_scrub.rs` wired into `build_clean_env` in `sandbox.rs`, matching variable names case-insensitively against a curated exact list (`GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`, etc.) and sensitive substrings (`TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `API_KEY`, `APIKEY`, `PRIVATE_KEY`, `ACCESS_KEY`, `CREDENTIAL`) without ever reading or logging values; essential variables such as `PATH`, `SystemRoot`, and `TEMP` remain intact.
 - **Build provenance attestation for release artifacts** ([#16](https://github.com/Aenvo/MuseLink/pull/16) by [@KammyAugust11](https://github.com/KammyAugust11)): The release workflow now generates GitHub build provenance attestations for the Windows / Linux / macOS release assets, so users can verify with `gh attestation verify` that a downloaded binary was built from this repository's source on GitHub Actions and has not been substituted or tampered with.
 
 ## [v0.3.2] - 2026-11-28

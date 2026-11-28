@@ -884,12 +884,20 @@ fn open_nul_stdin() -> io::Result<OwnedHandle> {
 }
 
 fn build_clean_env(temp_dir: &Path) -> Vec<u16> {
+    build_clean_env_from(std::env::vars_os(), temp_dir)
+}
+
+fn build_clean_env_from<I>(vars_iter: I, temp_dir: &Path) -> Vec<u16>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
     let mut vars: BTreeMap<String, (OsString, OsString)> = BTreeMap::new();
-    for (k, v) in std::env::vars_os() {
+    for (k, v) in vars_iter {
         let upper = k.to_string_lossy().to_ascii_uppercase();
         if upper.starts_with("MUSE_CONNECTOR_")
             || upper.starts_with("MUSE_LINK_")
             || upper.contains("AGENT_TOKEN")
+            || super::env_scrub::is_sensitive_env_name(&upper)
         {
             continue;
         }
@@ -1204,5 +1212,57 @@ mod tests {
             !parent_escape.exists(),
             "child workspace escaped into previously-sandboxed parent directory!"
         );
+    }
+
+    #[test]
+    fn clean_env_block_strips_internal_and_credential_vars() {
+        let block = build_clean_env_from(
+            [
+                (
+                    OsString::from("Path"),
+                    OsString::from(r"C:\Windows\System32"),
+                ),
+                (
+                    OsString::from("MUSE_CONNECTOR_INTERNAL"),
+                    OsString::from("1"),
+                ),
+                (OsString::from("MUSE_LINK_HOME"), OsString::from("x")),
+                (OsString::from("CUSTOM_AGENT_TOKEN"), OsString::from("tok")),
+                (OsString::from("GITHUB_TOKEN"), OsString::from("ghp_dummy")),
+                (OsString::from("OpenAI_Api_Key"), OsString::from("sk-dummy")),
+                (
+                    OsString::from("AWS_SECRET_ACCESS_KEY"),
+                    OsString::from("secret"),
+                ),
+                (OsString::from("NODE_ENV"), OsString::from("test")),
+            ],
+            Path::new(r"\\?\C:\isolated-tmp"),
+        );
+
+        let entries: Vec<String> = block
+            .split(|&u| u == 0)
+            .filter(|part| !part.is_empty())
+            .map(String::from_utf16_lossy)
+            .collect();
+
+        assert!(entries.contains(&r"Path=C:\Windows\System32".to_owned()));
+        assert!(entries.contains(&"NODE_ENV=test".to_owned()));
+        assert!(entries.contains(&r"TEMP=C:\isolated-tmp".to_owned()));
+        assert!(entries.contains(&r"TMP=C:\isolated-tmp".to_owned()));
+        for forbidden in [
+            "MUSE_CONNECTOR_INTERNAL",
+            "MUSE_LINK_HOME",
+            "CUSTOM_AGENT_TOKEN",
+            "GITHUB_TOKEN",
+            "OpenAI_Api_Key",
+            "AWS_SECRET_ACCESS_KEY",
+        ] {
+            assert!(
+                !entries
+                    .iter()
+                    .any(|e| e.starts_with(&format!("{forbidden}="))),
+                "env block must strip {forbidden}, got {entries:?}"
+            );
+        }
     }
 }
