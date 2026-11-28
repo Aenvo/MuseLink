@@ -2,21 +2,23 @@
   <img src="assets/muselink-logo.png" alt="MuseLink app icon" width="128">
 </p>
 
-<h1 align="center">MuseLink — Windows File Connector for Muse</h1>
+<h1 align="center">MuseLink — Local File Connector for Muse</h1>
 
 <p align="center">
-  Let Muse search, read, and write files in authorized Windows folders and drives, and optionally run project commands inside a write-restricted sandbox with local approval.
+  Let Muse search, read, and write authorized local files on Windows, Linux, and macOS, and optionally run project commands on Windows inside a write-restricted sandbox with local approval.
 </p>
 
 <p align="center">
-  <a href="README.md">简体中文</a> · <a href="README.en.md">English</a> ·
+  <a href="README.md">简体中文</a> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> ·
   <a href="https://github.com/Aenvo/MuseLink/releases/latest">Download latest</a> ·
   <a href="#quick-start">Quick start</a> · <a href="#build-from-source">Build from source</a> ·
   <a href="CHANGELOG.en.md">Changelog</a>
 </p>
 
 <p align="center">
-  <img alt="Windows desktop app" src="https://img.shields.io/badge/Windows-Desktop-0078D4?logo=windows&amp;logoColor=white">
+  <img alt="Windows x64" src="https://img.shields.io/badge/Windows-x64-0078D4">
+  <img alt="Linux x64" src="https://img.shields.io/badge/Linux-x64-FCC624?logo=linux&amp;logoColor=black">
+  <img alt="macOS Universal" src="https://img.shields.io/badge/macOS-Universal-181717?logo=apple&amp;logoColor=white">
   <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&amp;logoColor=white">
   <a href="./LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/License-MIT-green"></a>
 </p>
@@ -55,24 +57,34 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | Controlled command execution | Off by default; when enabled, lets Muse run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. |
 | Public connection | Use Tailscale Funnel by default, or choose a Cloudflare named tunnel with your own domain. |
 | Dedicated token | Generate and copy Muse connection instructions and the dedicated token under **Connection**; rotate, revoke, or locate the token under **Settings → Data**, with automatic token redaction in logs. |
-| Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and English / Simplified Chinese UI. |
+| Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports in-app update checks, dismissible update notices, synced in-app changelog/release-notes modals, silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and Simplified Chinese / English / Japanese UI. |
 
 ## Download and install
 
-Choose a Windows x64 build from [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest). Both builds require WebView2.
+Choose a Windows x64, Linux x64, or macOS Universal (Apple Silicon & Intel) build from [GitHub Releases](https://github.com/Aenvo/MuseLink/releases/latest) (Windows builds require WebView2).
 
 | Build | Download and launch |
 | --- | --- |
-| Portable | Download `MuseLink-<version>-windows-x64-portable.zip`, extract the entire archive, and run `muse-connector.exe`. |
-| Installer | Download `MuseLink-<version>-windows-x64-setup.exe` and run the installer. |
+| Windows Portable | Download `MuseLink-<version>-windows-x64-portable.zip`, extract the entire archive, and run `muse-connector.exe` (supports update alerts with a direct download link). |
+| Windows Installer | Download `MuseLink-<version>-windows-x64-setup.exe` and run the installer (supports Minisign-verified in-app updates with automatic restart under **About → Check for updates**). |
+| Linux AppImage | Download `MuseLink-<version>-linux-x64.AppImage`, make it executable, and run it directly (supports Minisign-verified in-app updates with automatic restart). |
+| Linux deb | Download `MuseLink-<version>-linux-x64.deb` and install via your package manager (supports update alerts, release notes, and direct download links). |
+| macOS Installer (Universal) | Download `MuseLink-<version>-macos-universal.dmg`, open it, and drag `MuseLink.app` into `Applications` (Apple Silicon & Intel; supports update alerts and direct download links). |
+| macOS Portable (Universal) | Download `MuseLink-<version>-macos-universal.app.zip` and extract `MuseLink.app` directly. |
 
-Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executable and installer are unsigned, so Windows may show an unknown publisher prompt.
+Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink executables and installers are unsigned, so Windows may show an unknown publisher prompt.
 
-Linux users can currently build and run MuseLink from source — see [Build from source → Linux](#linux) below.
+> **Important note for macOS first launch:** Because macOS builds are currently ad-hoc signed and not notarized with an Apple Developer ID, Gatekeeper blocks browser-downloaded builds on first launch:
+> 1. Try opening `MuseLink.app` once, then go to **System Settings → Privacy & Security**, scroll down to **Security**, and click **Open Anyway**.
+> 2. If macOS Sequoia (15+) still reports that the app "is damaged and can't be opened", clear the download quarantine attribute once in Terminal:
+>    ```bash
+>    xattr -dr com.apple.quarantine /Applications/MuseLink.app
+>    ```
+> (You can also build locally from source — see [Build from source → Linux](#linux) / [macOS](#macos) below.)
 
 ## Quick start
 
-For the default connection method, install [Tailscale for Windows](https://tailscale.com/download/windows) and sign in.
+For the default connection method, install [Tailscale](https://tailscale.com/download) and sign in.
 
 1. On **Overview** or **Connection**, select **Start guide**.
 2. Choose the folders or drives to authorize. All available local fixed drives are selected by default in drive mode. Open the menu to narrow the selection.
@@ -86,8 +98,8 @@ File indexing starts in the background after you first save permissions. Manage 
 
 ## Access and connection boundaries
 
-- **File & sensitive-path protection**: Muse's file operations follow the saved access scope and the current Windows account's permissions. Credential directories (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg`) are excluded by default, and system folders, Startup folders, shell profiles, `.gitconfig`, and the app directory are write-protected by default. Reads and atomic writes are verified through open OS handles.
-- **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory, process-count, and timeout limits) with a unique SHA-256-derived SID per workspace. Writes are restricted strictly to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution.
+- **File & sensitive-path protection**: Muse's file operations follow the saved access scope and the current OS account's permissions. Credential directories, token-bearing configs, and browser credential stores (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.azure`, gcloud, `~/.npmrc`, `~/.pypirc`, macOS `~/Library/Keychains`, and Chrome / Edge / Firefox credential containers) are excluded by default, and system folders, Startup/autostart folders, shell profiles, `.gitconfig`, and the app directory (including macOS `.app` bundles) are write-protected by default. Reads and atomic writes are verified through open OS handles.
+- **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory and process-count hard limits; the execution timeout is enforced by runtime polling, not by a Job Object time limit) with a unique SHA-256-derived SID per workspace. Writes are restricted to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Note, however, that the restricting token also includes the `Everyone` (S-1-1-0) and `RESTRICTED` (S-1-5-12) SIDs, so any location granting write access to those SIDs (such as world-writable shared folders or custom-ACL directories) remains writable too. The sandbox restricts writes only; reads are not isolated and run with the executing user's permissions. Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution.
 - **3-tier risk model & auto-elevated approval dialog**:
   - **Auto-allowed**: Standard read-only and project build/test commands (such as `git status`/`diff`/`log`, `cargo test`/`check`, `pnpm build`, `pytest`) run without interrupting you and return HTTP 200 directly when they finish quickly; pure read-only direct commands skip workspace write ACLs entirely.
   - **Per-project session approval**: First-time `powershell`/`cmd` usage, package installs/updates, or `git push` in a project wakes the MuseLink window to the foreground (120-second timeout defaults to deny) with long-polling via `GET /agent/v1/exec/<job_id>?wait_ms=20000` so Muse receives approvals and outputs immediately without waiting for a manual chat reply. Choose **Allow once** or **Allow project this session** (valid for 4 hours, strictly scoped per folder, revocable anytime via **Revoke session grants** in **File Access**).
@@ -116,7 +128,7 @@ cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
 pnpm -C muse-connector tauri build --bundles nsis
 ```
 
-The installer is written to `muse-connector/src-tauri/target/release/bundle/nsis/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just `muse-connector/src-tauri/target/release/muse-connector.exe`.
+The installer is written to `muse-connector/src-tauri/target/release/bundle/nsis/`. Without `TAURI_SIGNING_PRIVATE_KEY`, append `--config '{\"bundle\":{\"createUpdaterArtifacts\":false}}'` for an unsigned local installer; or run `pnpm -C muse-connector tauri build --no-bundle` to produce just `muse-connector/src-tauri/target/release/muse-connector.exe`.
 
 ### Linux
 
@@ -141,6 +153,23 @@ The release binary is written to `muse-connector/src-tauri/target/release/muse-c
 **Setup:** install Tailscale for Linux and run `sudo tailscale set --operator=$USER` once; otherwise the app cannot configure Funnel (serve config is denied).
 
 **Limitation:** sandboxed command execution (`exec`) is Windows-only; on Linux it stays disabled and fails closed.
+
+### macOS
+
+You'll need a Rust toolchain, Node.js 22.12 or later, pnpm, and the Xcode Command Line Tools (`xcode-select --install`). From the repository root:
+
+```bash
+pnpm -C muse-connector install --frozen-lockfile
+pnpm -C muse-connector build
+cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+pnpm -C muse-connector tauri build --bundles app --config '{"bundle":{"createUpdaterArtifacts":false}}'
+```
+
+The app bundle is written to `muse-connector/src-tauri/target/release/bundle/macos/`. Run `pnpm -C muse-connector tauri build --no-bundle` to produce just the binary at `muse-connector/src-tauri/target/release/muse-connector`. For local UI development, use `pnpm -C muse-connector tauri dev` (same isolated config as on Windows).
+
+**Setup:** install the Tailscale app from the website or the Mac App Store and sign in; the app discovers the CLI inside the app bundle (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) automatically, and Homebrew installs of `tailscale` / `cloudflared` (`/opt/homebrew/bin`) are discovered too. When using **Manage local drives (full access)** to access protected folders such as Desktop, Documents, or Downloads, allow the macOS system prompt or grant `MuseLink` access (or **Full Disk Access**) under **System Settings → Privacy & Security**.
+
+**Limitation:** sandboxed command execution (`exec`) is Windows-only; on macOS it stays disabled and fails closed. macOS builds are currently unsigned and not notarized, intended for local build-from-source use; a browser-downloaded bundle may be blocked by Gatekeeper.
 
 ## Community
 

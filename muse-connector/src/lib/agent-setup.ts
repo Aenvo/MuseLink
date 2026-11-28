@@ -117,6 +117,8 @@ export function agentTrial(t: Translate, policy: FileAccessPolicy | null, prefer
 export function deviceRenameBrief(language: Language, origin: string, deviceName: string, id: string) {
   const endpoint = `${origin}/agent/v1/device-name/confirm`;
   const body = JSON.stringify({ update_id: id });
+  if (language === "ja") return `HTTPS アドレスが ${origin} の既存の Custom Connector を見つけて、表示名を「Muse 本機ファイル - ${deviceName}」に更新し、コネクタの指示内のデバイス名も「${deviceName}」に更新してください。既存のエンドポイント、ツール、認証情報はそのまま使ってください。コネクタを特定できない、または更新できない場合は、止めて私に知らせてください。
+変更が成功したら、このコネクタの既存の専用認証情報を使って、Content-Type: application/json、ボディ ${body} で POST ${endpoint} を送信してください。確認が失敗した場合は、HTTP ステータスとエラーを報告してください。`;
   if (language === "en") return `Find my existing Custom Connector for ${origin}. Rename it to “Muse Local Files - ${deviceName}” and use “${deviceName}” as the device name in its instructions. Keep its existing endpoint, tools, and credentials. If you cannot identify or update that connector, stop and tell me.
 After the change succeeds, use this connector's existing dedicated credential to send POST ${endpoint} with Content-Type: application/json and body ${body}. If the confirmation fails, report the HTTP status and error.`;
   return `请找到 HTTPS 地址为 ${origin} 的现有 Custom Connector，把显示名称更新为「Muse 本机文件 - ${deviceName}」，并把连接器指令中的设备名称更新为「${deviceName}」。沿用原有地址、工具和专用凭证。如果无法确定连接器或无法修改，请停下来告诉我。
@@ -124,6 +126,30 @@ After the change succeeds, use this connector's existing dedicated credential to
 }
 
 export function connectorBrief(language: Language, origin: string, trialInstruction: string, deviceName: string, execEnabled = false) {
+  if (language === "ja") {
+    const introduction = deviceName
+      ? `デバイス「${deviceName}」用に、名前が「Muse 本機ファイル - ${deviceName}」の Custom Connector を設定してください。HTTPS ベース URL は ${origin}、API プレフィックスは /agent/v1 です。
+コネクタを作成または名前変更する前に、デバイス名を私に確認してください。この URL を使うコネクタが既にある場合は、その表示名を更新してください。要求された名前が別の URL で使われている場合は、進める前に別の名前を選ばせてください。
+このコネクタはデバイス「${deviceName}」専用です。私がデバイスを指定していない、または名前が曖昧な場合は、どのデバイスを使うか聞いてください。このデバイスを名指しした場合は、このコネクタだけを使ってください。利用できない場合は、その旨を報告し、別のデバイスへ切り替えないでください。以下のセットアップテストにはこのコネクタを使ってください。`
+      : `名前が「Muse 本機ファイル」の Custom Connector を設定してください。HTTPS ベース URL は ${origin}、API プレフィックスは /agent/v1 です。`;
+    const execSection = execEnabled ? `
+- POST /agent/v1/exec は、許可済みプロジェクトのサブフォルダー内でコマンドを実行します（ドライブのルート直下は不可）。{"root":"alias","cwd":"プロジェクトフォルダーの相対パス","mode":"direct","program":"git","args":["status"],"reason":"意図の要約"} の形式を優先してください。シェルのパイプラインやスクリプトには、program/args の代わりに mode を "powershell" または "cmd" にして "command" を渡してください。コマンドは既定で Windows の書き込み制限付きサンドボックス内で実行されます。高速で自動許可されるコマンドは HTTP 200 を直接返します。長時間かかるジョブや承認が必要なジョブは、job_id、status（"running" または "awaiting_approval"）、retry_after_ms とともに HTTP 202 を返します。status が "awaiting_approval" または "running" の間は、止まってチャットでの私の返信を待たないでください。承認ダイアログは Windows 上に自動で表示されます（120 秒でタイムアウト）。status が終端状態（"completed"、"failed"、"timed_out"、"cancelled"、"denied"、"expired"）になるまで、GET /agent/v1/exec/<job_id>?wait_ms=20000 をすぐにポーリングし続けてください。私が承認または拒否するか、ジョブが終われば、エンドポイントは即座に返ります。status が "expired" または "denied" になった場合は、自動で再試行せず、その旨を明確に報告してください。ポーリングの上限は "awaiting_approval" で連続 8 回、"running" で連続 18 回までとし、それでも終わらない場合は job_id と現在の status を報告し、POST /agent/v1/exec/<job_id>/cancel で中止するか尋ねてください。` : "";
+    return `${introduction}
+専用の agent-token はセキュリティカードで収集してください。各リクエストには Authorization: Bearer <token> を送ってください。トークンは別々に保管し、${origin}/agent/v1/ へのリクエストにだけ使ってください。会話には結果だけを表示してください。
+
+API は JSON を返します。POST リクエストでは Content-Type: application/json を送り、GET のクエリパラメータは URL エンコードしてください。root には許可済みの別名を、path にはその中の相対パスを使ってください。
+- GET /agent/v1/roots は roots.search、roots.read、roots.write を返し、それぞれその操作に許可された別名を列挙します。
+- GET /agent/v1/locations/desktop はローカルデスクトップの root、path、absolute_path を返します。デスクトップが許可範囲内にある場合、その場所の特定に使ってください。
+- POST /agent/v1/search は {"name":"ファイル名の一部","limit":30} を受け付けます。任意フィールド: root、extensions、modified_since_ms、modified_before_ms、cursor。ドライブまたはルート別名が分かる場合は、その root を先に渡してください。結果には hits、complete、scanning、backend、scopes、任意の next_cursor と retry_after_ms が含まれます。各ヒットには root、path、kind、size、modified_ms があります。scanning が true の間は、現在の結果とまだインデックス中のスコープを示し、retry_after_ms 待ってから再試行してください。インデックスが未完了、または complete が false の場合は、カバー範囲が不完全だと伝えてください。ページングする場合は next_cursor を cursor として渡し、他のクエリパラメータは同じに保ってください。
+- search が error search_index_cleared とともに HTTP 409 を返した場合は、MuseLink の「設定 → データ」を開いて「インデックスを再作成」を選択するようユーザーに伝えてください。再検索する前にユーザーを待ってください。
+- GET /agent/v1/list?root=<alias>&path=<相対フォルダー> はフォルダーを一覧します。ルートを一覧する場合は path を空にしてください。
+- GET /agent/v1/read?root=<alias>&path=<相対ファイル> は、最大 10 MiB のファイルについて encoding（"text" または "base64"）と content を返します。画像やバイナリファイルでは、&raw=1 を付けて生バイトを直接受け取る方法を優先してください（Base64 の膨張がなく、メタデータは Content-Type、ETag、X-File-* ヘッダーに入ります）。4 MiB を超えるファイル、または HTTP 413 の後は、&offset=<バイト>&limit=<バイト> でチャンク読み取りしてください（推奨: &raw=1&limit=4194304、JSON チャンクなら &limit=2097152、JSON 1 チャンク最大 4 MiB）。後続チャンクには &if_match=<etag> を渡して同時編集に備え、チャンクが転送途中で切れた場合は、そのチャンクだけを再試行してください。
+- POST /agent/v1/write は {"root":"alias","path":"相対ファイル","content":"ファイル内容","encoding":"text"} を受け付けます。encoding は base64 も使えます。ファイルの書き込みは私が明示的に頼んだ場合だけ行ってください。
+- POST /agent/v1/mkdir は {"root":"alias","path":"相対フォルダー"} を受け付けます。フォルダーの作成は私が明示的に頼んだ場合だけ行ってください。${execSection}
+
+セットアップが完了したら、コネクタを一度検証してください。${trialInstruction} リクエストが失敗した場合は、エンドポイント、HTTP ステータス、実際のエラーを報告してください。`;
+  }
+
   if (language === "en") {
     const introduction = deviceName
       ? `Set up a Custom Connector for the device “${deviceName}”, named “Muse Local Files - ${deviceName}”. Its HTTPS base URL is ${origin} and its API prefix is /agent/v1.
@@ -137,8 +163,8 @@ Use a security card to collect the dedicated agent-token. Send Authorization: Be
 
 The API returns JSON. Send Content-Type: application/json for POST requests and URL-encode GET query parameters. Use the authorized alias as root and the relative path within it as path.
 - GET /agent/v1/roots returns roots.search, roots.read, and roots.write, each listing the aliases authorized for that operation.
-- GET /agent/v1/locations/desktop returns root, path, and the absolute_path of the Windows Desktop. Use this to locate the Desktop if it is within the authorized scope.
-- POST /agent/v1/search accepts {"name":"part of the file name","limit":30}. Optional fields: root, extensions, modified_since_ms, modified_before_ms, and cursor. If you know the drive letter, pass its root alias first. Results include hits, complete, scanning, backend, scopes, and optional next_cursor and retry_after_ms. Each hit has root, path, kind, size, and modified_ms. When scanning is true, show the current results and scopes still being indexed, wait for retry_after_ms, and try again. If indexing is unfinished or complete is false, say that coverage is incomplete. To paginate, pass next_cursor as cursor and keep the other query parameters the same.
+- GET /agent/v1/locations/desktop returns root, path, and the absolute_path of the local Desktop. Use this to locate the Desktop if it is within the authorized scope.
+- POST /agent/v1/search accepts {"name":"part of the file name","limit":30}. Optional fields: root, extensions, modified_since_ms, modified_before_ms, and cursor. If you know the drive or root alias, pass it as root first. Results include hits, complete, scanning, backend, scopes, and optional next_cursor and retry_after_ms. Each hit has root, path, kind, size, and modified_ms. When scanning is true, show the current results and scopes still being indexed, wait for retry_after_ms, and try again. If indexing is unfinished or complete is false, say that coverage is incomplete. To paginate, pass next_cursor as cursor and keep the other query parameters the same.
 - If search returns HTTP 409 with search_index_cleared, ask the user to open Settings → Data in MuseLink and select Rebuild index. Wait for the user before searching again.
 - GET /agent/v1/list?root=<alias>&path=<relative-folder> lists a folder. Use an empty path to list the root.
 - GET /agent/v1/read?root=<alias>&path=<relative-file> returns encoding ("text" or "base64") and content for files up to 10 MiB. For images or binary files, prefer adding &raw=1 to receive raw bytes directly (no Base64 overhead; metadata in Content-Type, ETag, and X-File-* headers). For files larger than 4 MiB—or after HTTP 413—read in chunks using &offset=<bytes>&limit=<bytes> (recommended: &raw=1&limit=4194304, or JSON chunking with &limit=2097152, max 4 MiB per JSON chunk). Pass &if_match=<etag> on subsequent chunks to guard against concurrent edits, and if a chunk drops mid-transfer, retry only that chunk.
@@ -160,8 +186,8 @@ Verify the connector once setup is complete. ${trialInstruction} If a request fa
 
 接口返回 JSON。POST 请求发送 Content-Type: application/json。GET 查询参数需做 URL 编码。各路径使用授权别名 root 与该别名内的相对路径 path。
 - GET /agent/v1/roots 返回 roots.search、roots.read、roots.write，各自列出对应操作的目录别名。
-- GET /agent/v1/locations/desktop 返回 root、path 和 Windows 实际桌面的 absolute_path。需要定位桌面时使用，桌面须在授权范围内。
-- POST /agent/v1/search 接收 {"name":"文件名的一部分","limit":30}。可选 root、extensions、modified_since_ms、modified_before_ms 和 cursor。知道盘符时优先传对应的 root。返回 hits、complete、scanning、backend、scopes 及可选 next_cursor、retry_after_ms。命中含 root、path、kind、size、modified_ms。若 scanning 为 true，按 retry_after_ms 等待后再查，先告知当前有哪些结果及未完成的范围。扫描未结束或 complete 为 false 时，标明覆盖还不完整。分页时把 next_cursor 作为下一次的 cursor，其余查询参数保持一致。
+- GET /agent/v1/locations/desktop 返回 root、path 和本机桌面的 absolute_path。需要定位桌面时使用，桌面须在授权范围内。
+- POST /agent/v1/search 接收 {"name":"文件名的一部分","limit":30}。可选 root、extensions、modified_since_ms、modified_before_ms 和 cursor。知道磁盘或根目录别名时优先传对应的 root。返回 hits、complete、scanning、backend、scopes 及可选 next_cursor、retry_after_ms。命中含 root、path、kind、size、modified_ms。若 scanning 为 true，按 retry_after_ms 等待后再查，先告知当前有哪些结果及未完成的范围。扫描未结束或 complete 为 false 时，标明覆盖还不完整。分页时把 next_cursor 作为下一次的 cursor，其余查询参数保持一致。
 - 若搜索返回 HTTP 409 且 error 为 search_index_cleared，告诉用户在桌面连接器的「设置 → 数据」中点「重新建立索引」。等待用户操作后再搜索。
 - GET /agent/v1/list?root=<目录别名>&path=<相对目录> 列出目录。列根目录时 path 填空字符串。
 - GET /agent/v1/read?root=<目录别名>&path=<相对文件> 返回 encoding（text 或 base64）和 content，整文件 JSON 读取上限为 10 MiB。读取图片或二进制文件时优先加 &raw=1 直接获取原始字节流（无 Base64 膨胀，元信息在 Content-Type、ETag 与 X-File-* 响应头中）。文件超过 4 MiB 或收到 HTTP 413 时，使用 &offset=<字节偏移>&limit=<分片字节数> 分片读取（优先 &raw=1&limit=4194304；若需 JSON 则用 &limit=2097152，JSON 单片上限 4 MiB）。后续分片携带 &if_match=<etag> 防止读取中途文件变更；若单个分片传输中断，只需重试该分片。

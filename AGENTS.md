@@ -1,12 +1,13 @@
 # MuseLink 协作指南
 
 - `muse-connector/src/` 是 React 界面，`muse-connector/src-tauri/` 是 Tauri 和 Rust 后端。优先复用现有组件、状态模型和命令。
-- 界面文案通过 `muse-connector/src/lib/i18n.tsx` 和 `muse-connector/src/lib/messages.ts` 管理。更新页面、引导或反馈文案时同步中英文。对外使用英文名 MuseLink 和中文名 Muse连接器。
-- 维护文件授权与令牌边界。新版 `/agent/v1` 使用独立令牌，文件访问受已保存的授权范围和 Windows 账户权限约束。变更权限、路径解析或令牌处理时，用隔离测试目录和测试凭证验证。
+- 界面文案通过 `muse-connector/src/lib/i18n.tsx` 和 `muse-connector/src/lib/messages.ts` 管理。更新页面、引导、托盘或反馈文案时同步中、英、日三语（含 Rust 侧 `Language::text`）。对外使用英文名 MuseLink 和中文名 Muse连接器。
+- 维护文件授权与令牌边界。新版 `/agent/v1` 使用独立令牌，文件访问受已保存的授权范围和当前系统账户权限约束。变更权限、路径解析或令牌处理时，用隔离测试目录和测试凭证验证。
 - 文件操作经 `muse-connector/src-tauri/src/core/handle/`（`windows.rs` / `unix.rs`）：打开句柄后核对对象实际路径与属性，读取只通过该句柄完成，写入以已验证目录中的临时文件替换并在重命名前后复核。校验后对象发生变化时返回 409 `path changed; retry`，不要退回只按路径字符串操作。
 - 本地开发使用 `pnpm -C muse-connector tauri dev` 的隔离配置。界面变更运行 `pnpm -C muse-connector build`。Rust 变更运行 `cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked`。原生窗口、隧道或文件操作的验收需要在对应入口验证。
-- 更改用户流程、安装或构建命令时，同步更新 `README.md` 和 `README.en.md`。文档使用仓库相对路径，提交前排除本机配置、凭证、日志、内部笔记和构建产物。
-- 每次功能更新、问题修复或推送发布时，必须同步更新仓库根目录的 `CHANGELOG.md` 和 `CHANGELOG.en.md`（按版本与日期记录用户可见的新增、优化、修复与安全变更），确保 GitHub 首页的「更新日志」入口与程序内「关于 → 更新日志」按钮指向的内容始终与推送保持同步。
+- 更改支持平台、核心功能、权限/安全边界、用户流程、安装方式或构建命令时，必须通盘核对并同步更新 `README.md`、`README.en.md` 和 `README.ja.md`（逐项检查顶部标题与短描述、语言切换栏、平台徽章、界面预览、功能概览表、下载与安装、使用指南、权限与连接边界、源码构建章节）；涉及产品定位或支持平台变化时，一并检查 `muse-connector/src-tauri/Cargo.toml`、`muse-connector/package.json` 的 `description` 以及 GitHub 仓库 About / Topics，避免只改正文却漏改顶部简介、徽章或其他语种。文档使用仓库相对路径，提交前排除本机配置、凭证、日志、内部笔记和构建产物。
+- 每次功能更新、问题修复或推送发布时，必须同步更新仓库根目录的 `CHANGELOG.md` 和 `CHANGELOG.en.md`（按版本与日期记录用户可见的新增、优化、修复与安全变更），确保 GitHub 首页的「更新日志」入口与程序内嵌「关于 → 更新日志 / 更新详情」弹窗（启动内置兜底并后台同步 GitHub）内容始终一致。
+- 自动更新经 `muse-connector/src-tauri/src/updater.rs` 与 `muse-connector/src-tauri/tauri.conf.json` 编译期固化的 Minisign 公钥及 GitHub Releases 静态 `latest.json` 完成（正式构建禁止运行时环境变量覆盖更新源，客户端不调用受限的 `api.github.com`）；更新安装前必须经 `suspend_for_update` 停止连接、命令与托管 `Everything.exe`。推送 `v*` 标签会触发 `.github/workflows/release.yml`（需配置 Secret `TAURI_SIGNING_PRIVATE_KEY`，且 `tauri.conf.json`、`Cargo.toml`、`package.json` 与标签版本一致），并行构建并签名 Windows 与 Linux（Ubuntu 22.04 AppImage / `.deb`）资产以及 macOS Universal（`.dmg` / `.app.zip`）未公证包并创建 Draft Release。
 
 ## 验证与覆盖
 

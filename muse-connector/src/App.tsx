@@ -13,7 +13,10 @@ import { Spinner } from "@/components/ui/spinner";
 import { StatusBadge } from "@/components/status-badge";
 import { ConfirmAction, Notice, type Confirmation } from "@/components/feedback";
 import ApprovalDialog from "@/components/approval-dialog";
+import ChangelogDialog from "@/components/changelog-dialog";
+import UpdateNotice from "@/components/update-notice";
 import { useBridge, type BridgeModel } from "@/lib/use-bridge";
+import { useUpdater } from "@/lib/use-updater";
 import { LanguageProvider } from "@/lib/i18n";
 import { connectionPresentation } from "@/lib/connection-presentation";
 import { providerToolAvailable, readSetupVerification, setupStorageKey } from "@/lib/setup-progress";
@@ -58,6 +61,8 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
   const [guideSpace, setGuideSpace] = useState(0);
   const [guideActivation, setGuideActivation] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
+  const [changelogModal, setChangelogModal] = useState<"all" | "release" | null>(null);
+  const updater = useUpdater(s);
   const scroll = useRef<HTMLDivElement>(null);
   const confirmationTrigger = useRef<HTMLElement | null>(null);
   const clearGuideTestError = useRef(false);
@@ -161,6 +166,31 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
       execute: async () => (await bridge.run(t("正在测试公网"), "test_public_connection", { agent }, t("公网健康接口已验证"))).ok,
     });
   };
+  const triggerInstallUpdate = () => {
+    const targetVersion = updater.result?.version;
+    if (!targetVersion || !updater.result?.can_install_in_app || updater.busy) return;
+    const hasActiveService = Boolean(
+      s && (s.desktop.desired_enabled || s.status.api_up || s.status.funnel_up || s.pending_approvals.length > 0),
+    );
+    const startInstall = () => {
+      if (page !== "about") selectPage("about");
+      void updater.installUpdate();
+    };
+    if (!hasActiveService) {
+      startInstall();
+      return;
+    }
+    confirm({
+      title: t("确认安装更新 v{0}？", targetVersion),
+      description: t("下载并校验通过后，将短暂暂停当前连接、停止本地索引服务并自动重启完成升级。"),
+      action: t("开始更新"),
+      execute: async () => {
+        if (page !== "about") selectPage("about");
+        void updater.installUpdate();
+        return true;
+      },
+    });
+  };
   const paused = !s?.desktop.desired_enabled;
   const connectionBusy = busy === "startConnection" || busy === "pauseConnection";
   const transitional = connectionBusy || s?.status.health === "Starting" || s?.status.health === "Stopping";
@@ -179,7 +209,7 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
       </Button> : null}
     </header>
     <Tabs value={page} onValueChange={navigate} className="min-h-0 flex-1 gap-0">
-      <nav className="app-shell app-navigation shrink-0" aria-label={t("主导航")}><TabsList className="grid h-auto w-full grid-cols-6">{pages.map(([value, label]) => <TabsTrigger key={value} value={value} className="min-w-0 px-1 text-center text-xs leading-tight whitespace-normal sm:text-sm">{t(label)}</TabsTrigger>)}</TabsList></nav>
+      <nav className="app-shell app-navigation shrink-0" aria-label={t("主导航")}><TabsList className="grid h-10 w-full grid-cols-6">{pages.map(([value, label]) => <TabsTrigger key={value} value={value} title={t(label)} className="min-w-0 overflow-hidden px-1.5 text-center text-xs sm:text-sm"><span className="truncate">{t(label)}</span></TabsTrigger>)}</TabsList></nav>
       <ScrollArea ref={scroll} className="app-scroll min-h-0 flex-1" type="hover" scrollHideDelay={150}>
         <div className="app-shell app-page flex flex-col gap-4">
           {error && !confirmation && !(needsAttention && error === s?.status.note) ? <Notice title={t("操作未完成")} error><p>{diagnostic(error)}</p><Button variant="ghost" size="sm" onClick={() => bridge.setError(null)}><X data-icon="inline-start" />{t("收起提示")}</Button></Notice> : null}
@@ -192,16 +222,36 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
             <TabsContent value="roots">{page === "roots" ? <Suspense fallback={loadingPage}><Roots bridge={bridge} guided={guideVisible && !hasFileGrant(s.file_access)} guiding={guiding} onAccessSaved={expandGuide} confirm={confirm} /></Suspense> : null}</TabsContent>
             {visited.has("logs") ? <TabsContent value="logs" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Logs key={s.run_id} bridge={bridge} selected={page === "logs"} /></Suspense></TabsContent> : null}
             {visited.has("settings") ? <TabsContent value="settings" forceMount className="data-[state=inactive]:hidden"><Suspense fallback={loadingPage}><Settings bridge={bridge} confirm={confirm} /></Suspense></TabsContent> : null}
-            <TabsContent value="about">{page === "about" ? <Suspense fallback={loadingPage}><About version={s.version} onError={bridge.setError} /></Suspense> : null}</TabsContent>
+            <TabsContent value="about">{page === "about" ? <Suspense fallback={loadingPage}><About version={s.version} updater={updater} onOpenChangelog={() => setChangelogModal("all")} onTriggerUpdate={triggerInstallUpdate} onError={bridge.setError} /></Suspense> : null}</TabsContent>
           </> : loadingPage}
         </div>
       </ScrollArea>
     </Tabs>
+    {s ? <UpdateNotice
+      updater={updater}
+      suspended={guideSuspended || changelogModal !== null || guiding || page === "about"}
+      onOpenReleaseDetails={() => setChangelogModal("release")}
+      onTriggerUpdate={triggerInstallUpdate}
+    /> : null}
     {s && guideVisible ? <Suspense fallback={null}>
       <SetupGuide key={storageKey} snapshot={s} bridge={bridge} deviceName={deviceName} storageKey={storageKey} page={page} expanded={guiding} suspended={guideSuspended} activation={guideActivation}
         onExpand={expandGuide} onCollapse={() => setGuideMode("collapsed")} onNavigate={navigate}
         onHeightChange={setGuideSpace} onProgressChange={rememberGuide} confirm={confirm} onTestPublicConnection={() => testPublicConnection(true)} />
     </Suspense> : null}
+    {s ? <ChangelogDialog
+      open={changelogModal !== null}
+      mode={changelogModal ?? "all"}
+      onOpenChange={open => { if (!open) setChangelogModal(null); }}
+      currentVersion={s.version}
+      latestVersion={updater.result?.available ? updater.result.version : null}
+      releaseNotes={updater.result?.notes ?? null}
+      releaseDate={updater.result?.date ?? null}
+      canInstallInApp={updater.result?.can_install_in_app ?? false}
+      installing={updater.phase === "downloading" || updater.phase === "verifying" || updater.phase === "installing"}
+      onTriggerUpdate={triggerInstallUpdate}
+      onOpenReleases={() => void updater.openReleases()}
+      onError={bridge.setError}
+    /> : null}
     <ConfirmAction value={confirmation} close={() => {
       if (clearGuideTestError.current) bridge.setError(null);
       clearGuideTestError.current = false;

@@ -41,18 +41,26 @@ pub enum Language {
     Chinese,
     #[serde(rename = "en")]
     English,
+    #[serde(rename = "ja")]
+    Japanese,
 }
 
 impl Language {
-    pub fn text(self, chinese: &'static str, english: &'static str) -> &'static str {
+    pub fn text(
+        self,
+        chinese: &'static str,
+        english: &'static str,
+        japanese: &'static str,
+    ) -> &'static str {
         match self {
             Self::Chinese => chinese,
             Self::English => english,
+            Self::Japanese => japanese,
         }
     }
 
     pub fn product_name(self) -> &'static str {
-        self.text("Muse连接器", "MuseLink")
+        self.text("Muse连接器", "MuseLink", "MuseLink")
     }
 }
 
@@ -166,9 +174,9 @@ impl RuntimeProfile {
     }
     pub fn window_title(&self, language: Language) -> String {
         let suffix = if self.onboarding_qa {
-            language.text(" · 首次配置验收", " · Setup QA")
+            language.text(" · 首次配置验收", " · Setup QA", " · 初回設定の確認")
         } else if self.is_development() {
-            language.text(" · 开发隔离", " · Development")
+            language.text(" · 开发隔离", " · Development", " · 開発モード")
         } else {
             ""
         };
@@ -332,6 +340,14 @@ mod tests {
         assert_eq!(
             profile.window_title(reopened.language),
             "MuseLink · Development"
+        );
+        state.language = Language::Japanese;
+        profile.save_desktop(&state).unwrap();
+        let reopened_ja = profile.load_desktop().unwrap();
+        assert_eq!(reopened_ja.language, Language::Japanese);
+        assert_eq!(
+            profile.window_title(reopened_ja.language),
+            "MuseLink · 開発モード"
         );
         assert!(!DesktopState::default().start_minimized);
         assert!(DesktopState::default().close_to_tray);

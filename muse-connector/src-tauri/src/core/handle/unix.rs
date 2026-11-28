@@ -5,7 +5,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use crate::core::path_guard::Resolved;
 
@@ -93,20 +93,62 @@ fn not_regular_file() -> Error {
     ))
 }
 
-/// Read the process umask from `/proc/self/status` without changing it.
-fn current_umask() -> libc::mode_t {
-    let Ok(status) = std::fs::read_to_string("/proc/self/status") else {
-        return 0o022;
-    };
-    for line in status.lines() {
-        let Some(value) = line.strip_prefix("Umask:") else {
-            continue;
-        };
-        if let Ok(parsed) = libc::mode_t::from_str_radix(value.trim(), 8) {
-            return parsed;
-        }
+/// Pointer to this thread's errno cell.
+///
+/// glibc exposes it as `__errno_location()`; macOS (and the BSDs) call the
+/// same cell `__error()`. Keeping the split in one helper leaves the
+/// readdir clear/check sequence below platform-neutral.
+fn errno_location() -> *mut libc::c_int {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::__errno_location()
     }
-    0o022
+    #[cfg(not(target_os = "linux"))]
+    unsafe {
+        libc::__error()
+    }
+}
+
+/// Read the process umask without permanently changing it.
+fn current_umask() -> libc::mode_t {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(status) = std::fs::read_to_string("/proc/self/status") {
+            for line in status.lines() {
+                let Some(value) = line.strip_prefix("Umask:") else {
+                    continue;
+                };
+                if let Ok(parsed) = libc::mode_t::from_str_radix(value.trim(), 8) {
+                    return parsed;
+                }
+            }
+        }
+        0o022
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        // No /proc on macOS: the only portable query POSIX offers is to swap
+        // the mask to 0 and restore it. That swap is process-global, so two
+        // concurrent swappers can interleave (A clears, B reads 0, A restores
+        // the original, B restores 0) and leave the mask at 000 permanently,
+        // silently widening every file and directory created afterwards.
+        // Nothing in this process changes its umask after startup (the swap
+        // below is the only umask call in the codebase), so perform the swap
+        // exactly once, serialized, and serve the cached value from then on:
+        // after initialization no thread ever mutates the mask again. The
+        // alternative (assuming 0o022) silently produces wrong modes for
+        // every user whose umask differs.
+        static CACHED_UMASK: std::sync::OnceLock<libc::mode_t> = std::sync::OnceLock::new();
+        static SWAP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        *CACHED_UMASK.get_or_init(|| {
+            let _guard = SWAP_LOCK.lock().unwrap();
+            unsafe {
+                let current = libc::umask(0);
+                libc::umask(current);
+                current
+            }
+        })
+    }
 }
 
 fn fchmod(file: &File, mode: libc::mode_t) -> Result<(), Error> {
@@ -210,9 +252,34 @@ fn verify_root(file: &File, canonical_root: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// The anchor for a strict (reject_reparse) walk: the requested root as
+/// spelled in the grant, never the canonical root. The canonical root is
+/// computed once at resolve time; if a writable ancestor was briefly a
+/// symlink during that computation it names an ungranted directory, and
+/// walking it would escape the grant. Walking the requested spelling with
+/// nofollow opens at use time fails closed instead, and verify_root() then
+/// cross-checks that the two spellings name the same inode, so a poisoned
+/// canonical root surfaces as Changed (409) rather than an escape.
+#[cfg(target_os = "macos")]
+fn strict_anchor(target: &Resolved) -> PathBuf {
+    // The requested spelling can cross one of macOS's root-owned alias
+    // symlinks (/var -> /private/var etc.), which a nofollow walk must
+    // reject. Normalize exactly those three trusted prefixes (the same
+    // table access::canonicalize_direct trusts); every other component is
+    // walked as spelled, so any other symlink in the root path fails the
+    // walk instead of being followed.
+    crate::core::access::macos_alias_spelling(&target.requested_root)
+        .unwrap_or_else(|| target.requested_root.clone())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn strict_anchor(target: &Resolved) -> PathBuf {
+    target.requested_root.clone()
+}
+
 fn open_root(target: &Resolved) -> Result<File, Error> {
     let file = if target.reject_reparse {
-        open_from_root(&target.requested_root)?
+        open_from_root(&strict_anchor(target))?
     } else {
         open_path_absolute(&target.root, true)?
     };
@@ -319,11 +386,11 @@ pub(crate) fn list(target: &Resolved, mut visit: impl FnMut(Entry)) -> Result<()
         loop {
             // readdir uses errno: clear before call, then distinguish end vs error.
             unsafe {
-                *libc::__errno_location() = 0;
+                *errno_location() = 0;
             }
             let entry = unsafe { libc::readdir(dir) };
             if entry.is_null() {
-                let errno = unsafe { *libc::__errno_location() };
+                let errno = unsafe { *errno_location() };
                 if errno == 0 {
                     return Ok(());
                 }
@@ -583,6 +650,36 @@ mod tests {
     }
 
     #[test]
+    fn strict_open_rejects_canonical_root_swapped_at_resolve_time() {
+        // End state of a resolve()-time ancestor swap: the canonical root
+        // names an ungranted directory while the requested root still names
+        // the granted one. The strict walk must stay anchored to the
+        // requested root, so root verification fails closed with Changed
+        // (409) instead of reading or overwriting the ungranted directory.
+        let fixture = Fixture::new();
+        std::fs::write(fixture.0.join("note.txt"), b"granted").unwrap();
+        let outside =
+            std::env::temp_dir().join(format!("muse-outside-{}", crate::core::token::generate()));
+        std::fs::create_dir(&outside).unwrap();
+        let _cleanup = scopeguard_remove_dir(outside.clone());
+        std::fs::write(outside.join("note.txt"), b"ungranted").unwrap();
+
+        let target = Resolved {
+            root: outside.clone(),
+            path: outside.join("note.txt"),
+            requested_root: fixture.0.clone(),
+            requested_relative: PathBuf::from("note.txt"),
+            reject_reparse: true,
+        };
+        assert!(matches!(read(&target), Err(Error::Changed)));
+        assert!(matches!(write(&target, b"overwrite"), Err(Error::Changed)));
+        assert_eq!(
+            std::fs::read(outside.join("note.txt")).unwrap(),
+            b"ungranted"
+        );
+    }
+
+    #[test]
     fn missing_file_maps_to_missing() {
         let fixture = Fixture::new();
         let target = fixture.target("absent.txt");
@@ -689,7 +786,34 @@ mod tests {
         write(&target, b"new").unwrap();
         let mode = file_mode(&target.path);
         assert_ne!(mode, 0o666);
-        assert_eq!(mode, 0o666 & !current_umask());
+        assert_eq!(mode, u32::from(0o666 & !current_umask()));
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn concurrent_umask_queries_never_corrupt_the_process_mask() {
+        // Probe the real process mask with a single swap-and-restore. Safe
+        // here: current_umask() performs its one swap inside its OnceLock
+        // initializer, which the first call below has already completed, so
+        // this probe is the only swapper left in the process.
+        fn probed_mask() -> libc::mode_t {
+            unsafe {
+                let current = libc::umask(0);
+                libc::umask(current);
+                current
+            }
+        }
+
+        let expected = current_umask();
+        assert_eq!(probed_mask(), expected);
+
+        let threads: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(move || (0..100).all(|_| current_umask() == expected)))
+            .collect();
+        for thread in threads {
+            assert!(thread.join().unwrap());
+        }
+        assert_eq!(probed_mask(), expected);
     }
 
     #[test]

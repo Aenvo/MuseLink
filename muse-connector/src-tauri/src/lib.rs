@@ -1,6 +1,5 @@
 //! Muse 连接器桌面壳：所有生命周期操作委托给同一服务监督层。
 pub mod capabilities;
-#[cfg(windows)]
 mod clipboard;
 pub mod core;
 mod legacy;
@@ -8,6 +7,7 @@ pub mod profile;
 pub mod service;
 mod tray;
 mod tunnel;
+mod updater;
 use profile::{Language, ProviderSettings, RuntimeProfile};
 use serde_json::{Value, json};
 use service::ServiceController;
@@ -17,7 +17,6 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt as AutostartExt;
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_opener::OpenerExt;
-use tauri_plugin_updater::UpdaterExt;
 type Services = Arc<ServiceController>;
 
 #[tauri::command]
@@ -38,7 +37,11 @@ fn get_snapshot(
             .map(Value::Bool)
             .unwrap_or(Value::Null)
     };
-    result["update_configured"] = json!(update_configuration().is_some());
+    let install_kind = updater::install_kind(&state.profile);
+    result["platform"] = json!(std::env::consts::OS);
+    result["update_configured"] = json!(updater::is_configured());
+    result["in_app_update_supported"] = json!(install_kind.can_install_in_app());
+    result["install_kind"] = json!(install_kind.as_str());
     result
 }
 #[tauri::command]
@@ -137,15 +140,16 @@ fn copy_agent_token(
     window: tauri::WebviewWindow,
     state: tauri::State<'_, Services>,
 ) -> Result<(), String> {
+    let secret = state.current_agent_token()?;
     #[cfg(windows)]
     {
         let owner = window.hwnd().map_err(|_| "无法读取连接器窗口")?;
-        clipboard::copy_secret(owner.0, &state.current_agent_token()?).map_err(str::to_owned)
+        clipboard::copy_secret(owner.0, &secret).map_err(str::to_owned)
     }
     #[cfg(not(windows))]
     {
-        let _ = (window, state);
-        Err("请从令牌文件手动复制".into())
+        let _ = window;
+        clipboard::copy_secret(&secret).map_err(str::to_owned)
     }
 }
 #[tauri::command]
@@ -249,6 +253,7 @@ async fn pick_directory(
         let mut dialog = app.dialog().file().set_title(language.text(
             "选择允许 Muse 访问的目录",
             "Choose a folder Muse can access",
+            "Muse がアクセスできるフォルダーを選択",
         ));
         if profile.onboarding_qa {
             dialog = dialog.set_directory(profile.home.join("files"));
@@ -354,7 +359,7 @@ async fn export_logs(
         let picked = app
             .dialog()
             .file()
-            .set_title(language.text("导出日志", "Export logs"))
+            .set_title(language.text("导出日志", "Export logs", "ログをエクスポート"))
             .set_file_name(&file_name)
             .add_filter(filter_name, &[ext])
             .blocking_save_file();
@@ -447,14 +452,29 @@ async fn restore_legacy(state: tauri::State<'_, Services>) -> Result<(), String>
 #[tauri::command]
 fn open_tool_setup(tool: String, app: tauri::AppHandle) -> Result<(), String> {
     let url = match tool.as_str() {
-        "tailscale" => "https://tailscale.com/download/windows",
-        "tailscale_login" => "https://tailscale.com/docs/install/windows",
+        "tailscale" => {
+            if cfg!(target_os = "macos") {
+                "https://tailscale.com/download/mac"
+            } else {
+                "https://tailscale.com/download/windows"
+            }
+        }
+        "tailscale_login" => {
+            if cfg!(target_os = "macos") {
+                "https://tailscale.com/docs/install/mac"
+            } else {
+                "https://tailscale.com/docs/install/windows"
+            }
+        }
         "tailscale_funnel" => "https://tailscale.com/docs/features/tailscale-funnel#enable-funnel",
         "cloudflared" => {
             "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
         }
         "domains" => "https://dash.cloudflare.com/",
         "everything" => "https://www.voidtools.com/support/everything/installing_everything/",
+        "macos_full_disk_access" if cfg!(target_os = "macos") => {
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
+        }
         _ => return Err("未知帮助入口".into()),
     };
     app.opener()
@@ -626,85 +646,6 @@ fn public_http_client() -> Result<reqwest::Client, String> {
         .build()
         .map_err(|_| "无法初始化 TLS 客户端".into())
 }
-fn update_configuration() -> Option<(String, String)> {
-    let endpoint = std::env::var("MUSE_CONNECTOR_UPDATE_ENDPOINT").ok()?;
-    let key = std::env::var("MUSE_CONNECTOR_UPDATE_PUBLIC_KEY").ok()?;
-    parse_update_configuration(endpoint, key)
-}
-fn parse_update_configuration(endpoint: String, key: String) -> Option<(String, String)> {
-    if key.trim().is_empty() {
-        return None;
-    }
-    let parsed = reqwest::Url::parse(&endpoint).ok()?;
-    if parsed.scheme() != "https" || !parsed.username().is_empty() || parsed.password().is_some() {
-        return None;
-    }
-    Some((endpoint, key))
-}
-#[tauri::command]
-async fn check_updates(app: tauri::AppHandle) -> Result<Value, String> {
-    let Some((endpoint, key)) = update_configuration() else {
-        return Ok(
-            json!({"configured":false,"available":false,"message":"自动更新尚未配置，请使用新版安装包更新"}),
-        );
-    };
-    let updater = app
-        .updater_builder()
-        .pubkey(key)
-        .endpoints(vec![endpoint.parse().map_err(|_| "更新源地址无效")?])
-        .map_err(|_| "更新源必须使用 HTTPS")?
-        .timeout(Duration::from_secs(15))
-        .build()
-        .map_err(|_| "更新配置无效")?;
-    match updater
-        .check()
-        .await
-        .map_err(|_| "更新检查失败，请检查来源和网络")?
-    {
-        Some(update) => Ok(
-            json!({"configured":true,"available":true,"version":update.version,"notes":update.body}),
-        ),
-        None => Ok(json!({"configured":true,"available":false,"message":"当前已是最新版本"})),
-    }
-}
-#[tauri::command]
-async fn install_update(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, Services>,
-) -> Result<(), String> {
-    state.profile.require_production()?;
-    let (endpoint, key) = update_configuration().ok_or("更新源尚未配置")?;
-    let updater = app
-        .updater_builder()
-        .pubkey(key)
-        .endpoints(vec![endpoint.parse().map_err(|_| "更新源地址无效")?])
-        .map_err(|_| "更新源配置无效")?
-        .timeout(Duration::from_secs(30))
-        .build()
-        .map_err(|_| "更新配置无效")?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|_| "重新检查更新失败")?
-        .ok_or("没有可安装更新")?;
-    let bytes = update
-        .download(
-            move |_, _| {
-                let _ = app.emit("update-progress", "正在下载并校验更新");
-            },
-            || {},
-        )
-        .await
-        .map_err(|_| "更新下载或签名校验失败，当前连接保持原状态".to_string())?;
-    state.suspend_for_update().await?;
-    match update.install(bytes) {
-        Ok(()) => Ok(()),
-        Err(_) => {
-            state.resume_after_update_failure().await;
-            Err("更新安装失败，已尝试恢复原连接；也可使用安装包更新".into())
-        }
-    }
-}
 #[cfg(test)]
 mod updater_tests {
     use super::*;
@@ -712,41 +653,6 @@ mod updater_tests {
     fn public_tls_client_constructs_without_first_checking_updates() {
         assert!(public_http_client().is_ok());
         assert!(rustls::crypto::CryptoProvider::get_default().is_some());
-    }
-    #[test]
-    fn update_config_and_release_metadata_fail_closed() {
-        assert!(
-            parse_update_configuration("http://example.com/update".into(), "key".into()).is_none()
-        );
-        assert!(
-            parse_update_configuration(
-                "https://user:secret@example.com/update".into(),
-                "key".into()
-            )
-            .is_none()
-        );
-        assert!(
-            parse_update_configuration("https://example.com/update".into(), " ".into()).is_none()
-        );
-        assert!(
-            parse_update_configuration("https://example.com/update".into(), "key".into()).is_some()
-        );
-        let valid = json!({"version":"v0.2.0","platforms":{"windows-x86_64":{"url":"https://example.com/installer.exe","signature":"disposable-invalid-signature"}}});
-        let parsed: tauri_plugin_updater::RemoteRelease = serde_json::from_value(valid).unwrap();
-        assert_eq!(parsed.version.to_string(), "0.2.0");
-        assert!(parsed.download_url("windows-aarch64").is_err());
-        assert!(
-            serde_json::from_value::<tauri_plugin_updater::RemoteRelease>(
-                json!({"version":"invalid"})
-            )
-            .is_err()
-        );
-        assert!(
-            serde_json::from_value::<tauri_plugin_updater::RemoteRelease>(
-                json!({"version":"0.2.0","url":"https://example.com/update.exe"})
-            )
-            .is_err()
-        );
     }
 }
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -820,6 +726,7 @@ pub fn run() {
         })
         .setup(move |app| {
             app.manage(startup.clone());
+            app.manage(updater::UpdaterRuntime::default());
             tray::build_tray(app.handle())?;
             tray::spawn_status_watcher(app.handle().clone(), startup.subscribe());
             let mut status = startup.subscribe();
@@ -950,8 +857,10 @@ pub fn run() {
             open_tool_setup,
             cloudflare_action,
             test_public_connection,
-            check_updates,
-            install_update
+            updater::check_updates,
+            updater::install_update,
+            updater::get_bundled_changelog,
+            updater::fetch_remote_changelog
         ])
         .build(context)
         .expect("桌面应用初始化失败");

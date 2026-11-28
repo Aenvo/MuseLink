@@ -1,11 +1,12 @@
 import { createContext, useCallback, useContext, useEffect, type ReactNode } from "react";
-import { english } from "@/lib/messages";
+import { english, japanese } from "@/lib/messages";
 
-export type Language = "zh-CN" | "en";
+export type Language = "zh-CN" | "en" | "ja";
 type Message = keyof typeof english;
 export type Translate = (message: Message, ...values: (string | number)[]) => string;
 
 const LanguageContext = createContext<Language>("zh-CN");
+const catalogs: Record<Exclude<Language, "zh-CN">, Record<Message, string>> = { en: english, ja: japanese };
 const diagnosticPatterns = [
   [/^读取连接器状态失败：([\s\S]+)$/, "读取连接器状态失败：{0}"],
   [/^本地 API 正常，隧道不可用：([\s\S]+)$/, "本地 API 正常，隧道不可用：{0}"],
@@ -17,7 +18,7 @@ const diagnosticPatterns = [
 export function LanguageProvider({ language, children }: { language: Language; children: ReactNode }) {
   useEffect(() => {
     document.documentElement.lang = language;
-    document.title = language === "en" ? english["Muse连接器"] : "Muse连接器";
+    document.title = language === "zh-CN" ? "Muse连接器" : catalogs[language]["Muse连接器"];
   }, [language]);
 
   return <LanguageContext.Provider value={language}>{children}</LanguageContext.Provider>;
@@ -26,13 +27,13 @@ export function LanguageProvider({ language, children }: { language: Language; c
 export function useLanguage() {
   const language = useContext(LanguageContext);
   const t = useCallback<Translate>((message, ...values) => {
-    const pattern = language === "en" ? english[message] : message;
+    const pattern = language === "zh-CN" ? message : catalogs[language][message];
     return values.length ? pattern.replace(/\{(\d+)\}/g, (placeholder, index) => String(values[Number(index)] ?? placeholder)) : pattern;
   }, [language]);
 
   const diagnostic = useCallback(function formatDiagnostic(message: string): string {
     if (language === "zh-CN") return message;
-    if (Object.prototype.hasOwnProperty.call(english, message)) return t(message as Message);
+    if (Object.prototype.hasOwnProperty.call(catalogs[language], message)) return t(message as Message);
     for (const [pattern, key] of diagnosticPatterns) {
       const match = pattern.exec(message);
       if (match) return t(key, formatDiagnostic(match[1]));

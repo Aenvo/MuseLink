@@ -77,6 +77,9 @@ export interface Snapshot {
   dependencies: { tailscale: boolean; cloudflared: boolean; simulated: boolean };
   capabilities: { enabled: boolean; tools: string[] }; version: string;
   autostart: boolean | null; update_configured: boolean;
+  platform?: "windows" | "macos" | "linux" | string;
+  in_app_update_supported?: boolean;
+  install_kind?: string;
   log_bytes: number;
   log_errors: string[];
 }
@@ -146,7 +149,6 @@ export function useBridge() {
     let disposed = false;
     const subscriptions = isTauri() ? Promise.allSettled([
       listen<Snapshot>("bridge-snapshot", ({ payload }) => { if (!disposed) setSnapshot(previous => previous ? { ...previous, ...payload } : previous); }),
-      listen<string>("update-progress", ({ payload }) => { if (!disposed) toast.info(payload, { id: "update-progress" }); }),
     ]).then(results => {
       const stops = results.flatMap(result => result.status === "fulfilled" ? [result.value] : []);
       if (!disposed && results.some(result => result.status === "rejected")) setError("状态事件订阅失败，已使用定时刷新；请重启连接器恢复实时状态。");

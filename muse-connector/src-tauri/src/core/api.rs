@@ -1878,6 +1878,13 @@ fn file_error(
         handle::Error::Missing => return changed_response(state, parts, root, relative),
         handle::Error::IsDirectory => (400, "target is a directory".to_owned()),
         handle::Error::NotDirectory => (400, "not a directory".to_owned()),
+        handle::Error::Io(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            #[cfg(target_os = "macos")]
+            let message = "macOS denied access to this location; allow MuseLink in System Settings -> Privacy & Security (Files & Folders or Full Disk Access)".to_owned();
+            #[cfg(not(target_os = "macos"))]
+            let message = format!("operating system denied access: {error}");
+            (403, message)
+        }
         handle::Error::Io(error) => (500, error.to_string()),
     };
     respond(

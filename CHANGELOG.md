@@ -6,8 +6,32 @@
 
 ## [Unreleased]
 
+### 安全与稳定性加固
+- **扩大默认读取保护范围**：`.npmrc`、`.pypirc` 由仅写保护升级为读 / 搜索 / 写全面保护；新增对 `.docker`、`.kube`、`.azure`、gcloud 凭证目录以及各平台浏览器凭证库的默认保护（Windows：Chrome / Edge 的 `User Data` 与 Firefox 的 `Profiles`；macOS：Application Support 下的 Chrome / Edge / Firefox，配合既有 `~/Library/Keychains` 保护；Linux：`google-chrome` / `chromium` / `microsoft-edge` 与 `.mozilla/firefox`），避免磁盘授权或主目录授权时令牌与登录数据被读取。
+
+## [v0.3.1] - 2026-11-27
+
+### 问题修复与跨平台适配
+- **修复 macOS / Linux「复制专用令牌」必定失败以及 Windows 剪贴板短暂占用导致复制失败的问题**：
+  - **macOS 原生隐私剪贴板**：通过 AppKit `NSPasteboard` 实现令牌复制，写入 `org.nspasteboard.ConcealedType`、`org.nspasteboard.TransientType` 标记并启用 `CurrentHostOnly` 选项，防止令牌被剪贴板历史工具记录或通过通用剪贴板跨设备同步。
+  - **Linux 剪贴板支持**：支持通过 `wl-copy` / `xclip` / `xsel` 标准输入安全写入系统剪贴板（不经命令行参数传递令牌，并隔离后台守护进程输出管道）。
+  - **Windows 剪贴板稳定性与隐私加固**：为 `OpenClipboard` 增加短退避重试（缓解刚复制完接入说明后剪贴板被系统剪贴板历史/第三方工具瞬时占用的竞态失败），并补全 4 字节 `DWORD(0)` 的 `CanIncludeInClipboardHistory` 与 `CanUploadClipboardData` 隐私标记。
+  - **透出真实错误诊断**：新手指引与接入说明卡片复制令牌失败时展示具体失败原因（同步中/英/日三语），同时保留「定位令牌文件」兜底入口。
+- **修复 macOS / Linux「管理本机磁盘（整机授权）」全部返回 403 且无法读取桌面的问题**：
+  - **实现 Unix 本地根目录发现与校验**：`fixed_local_roots()` 在 macOS 与 Linux 上返回本机系统根目录 `root`（`/`），更新磁盘别名校验与前端磁盘选择器显示（「系统根目录（/）」），并在后端校验中拒绝空的整机根映射，彻底修复 `/agent/v1/roots` 为空与 `/agent/v1/locations/desktop` 返回 403 的问题。
+  - **补齐 macOS / Linux 安全保护与搜索索引边界**：新增 macOS `~/Library/Keychains` 读写搜全保护，以及 macOS/Linux 系统目录、开机自启项（`~/Library/LaunchAgents`、`.config/autostart`）、登录 Shell 脚本（`.zprofile` / `.zshenv` / `.bash_profile`）与 `.app` 应用包的默认写保护；后台搜索索引自动跳过 macOS `/System`（避免重复扫描 `/System/Volumes/Data`）、`/Library`、`/Applications`、`/usr`、`/bin`、`/sbin`、`/private`、`~/Library`（避免触发 iCloud 云盘与第三方 App 容器等延迟隐私弹窗）、照片图库、`/dev`、虚拟目录及非本地挂载卷，以及 Linux `/proc`、`/sys`、`/dev`、`/run`（均不影响直接按路径读取）。
+  - **优化 macOS 隐私权限（TCC）体验与接口报错**：预热索引前主动探测桌面/文稿/下载以消除弹窗间的长时间等待；在 macOS 整机授权界面新增「打开完全磁盘访问权限设置」一键直达按钮；更新三语接入说明中的跨平台桌面表述，并在操作系统拒绝目录访问（`PermissionDenied`）时返回带操作引导的 HTTP 403 响应。
+
+## [v0.3.0] - 2026-11-27
+
 ### 新增功能
+- **应用内自动更新与同步更新日志**：
+  - **一键检查与重启更新（Windows 安装版 & Linux AppImage）**：支持启动静默检查与「关于 → 检查更新」手动检查，通过 GitHub Releases 静态 `latest.json` 与编译期固化的 Minisign 公钥验签（不走受限 REST API）；发现新版本时在右下角弹出可关闭的新版本提醒浮窗，下载与验签阶段保持现有连接不断流并展示绿色实时进度条，确认安装后安全停服（含释放 Windows 随包 `Everything.exe` 文件锁）并自动重启完成升级；Windows 免安装便携版、Linux `.deb` 与 macOS/源码构建统一通过静态 `latest.json` 比对版本号，正常提供新版本提醒、更新详情与直达 GitHub Releases 下载。
+  - **内嵌更新日志与更新详情弹窗**：「关于」页按钮调整为纯文字「更新日志」、「GitHub」与「检查更新」；点击「更新日志」或右下角浮窗的「更新详情」均在应用内弹窗展示，随界面语言自动切换（日语回退英文日志）、自动过滤未发布草稿与跨语言导航头，采用本地内嵌秒开 + 后台静默同步 GitHub 最新日志（并以 `latest.json` 更新说明兜底），标题栏附外链图标直达 GitHub。
+  - **三平台自动发布流水线**：新增 `.github/workflows/release.yml` 与 `generate-updater-manifest.ps1`，推送 `v*` 标签后并行在 Windows、Ubuntu 22.04 与 macOS 上运行测试，自动打包 Windows 便携版、签名 NSIS 安装包、Linux 签名 AppImage / `.deb` 与 macOS Universal `.dmg` / `.app.zip`，统一生成双平台自动更新清单 `latest.json` 与全产物 `SHA256SUMS.txt` 挂载至 Draft Release。
 - **Linux 支持**：MuseLink 现已可在 Linux 上构建和运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置。本机命令执行仍仅支持 Windows。
+- **macOS 支持**：MuseLink 现已可在 macOS（Apple Silicon & Intel）上运行，覆盖文件 API（列出 / 读取 / 写入 / 新建文件夹）与 Tailscale / Cloudflare 隧道配置（自动发现 Tailscale 应用包与 Homebrew 安装），并提供 Universal `.dmg` 与 `.app.zip` 预构建包。本机命令执行仍仅支持 Windows；macOS 包未做 Apple 签名/公证，首次打开需在「系统设置 → 隐私与安全性」中放行。
+- **日语本地化**：新增日语（`ja`）语言选项，界面全部文本（含自动更新与更新日志弹窗）、托盘与接入说明均支持日语显示，可在「设置 → 常规」中切换；并新增日语 README 与界面预览图。
 
 ## [v0.2.2] - 2026-11-27
 

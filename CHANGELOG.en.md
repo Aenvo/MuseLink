@@ -6,8 +6,32 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 
 ## [Unreleased]
 
+### Security & Stability
+- **Expanded default read protection**: `.npmrc` and `.pypirc` are promoted from write-only protection to full protection (read / search / write). Added default protection for `.docker`, `.kube`, `.azure`, gcloud credential directories, and per-platform browser credential stores (Windows: Chrome / Edge `User Data` and Firefox `Profiles`; macOS: Chrome / Edge / Firefox under Application Support alongside existing `~/Library/Keychains` protection; Linux: `google-chrome` / `chromium` / `microsoft-edge` and `.mozilla/firefox`), so tokens and login data cannot be read even under disk-wide or home-folder grants.
+
+## [v0.3.1] - 2026-11-27
+
+### Fixes & Cross-Platform Adaptation
+- **Fixed "Copy dedicated token" always failing on macOS / Linux and transiently failing on Windows**:
+  - **Native macOS secret pasteboard**: Implemented token copying via AppKit `NSPasteboard` with `org.nspasteboard.ConcealedType`, `org.nspasteboard.TransientType`, and `CurrentHostOnly` to keep credentials out of clipboard managers and Universal Clipboard sync.
+  - **Linux clipboard support**: Added stdin-based clipboard writing via `wl-copy`, `xclip`, or `xsel` (never passing tokens on the command line and detaching stdio so background clipboard daemons never hang).
+  - **Windows clipboard retry & privacy flags**: Added short backoff retries around `OpenClipboard` to handle brief contention from Clipboard History or third-party monitors right after copying setup instructions, and standardized 4-byte `DWORD(0)` markers for `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory`, and `CanUploadClipboardData`.
+  - **Actionable failure diagnostics**: Surfaced localized failure reasons (ZH/EN/JA) in both the setup guide and connection card while keeping the **Locate token file** fallback.
+- **Fixed macOS / Linux "Manage local drives (full access)" returning HTTP 403 for Desktop and all requests**:
+  - **Unix local root discovery & validation**: Implemented `fixed_local_roots()` on macOS and Linux to expose the system root (`root` -> `/`), updated disk alias validation and the disk picker UI (`System root (/)`), and failed closed when no local roots exist—fixing empty `/agent/v1/roots` and HTTP 403 responses from `/agent/v1/locations/desktop` and file operations.
+  - **macOS / Linux sensitive-path protection & safe search exclusions**: Added read/search/write protection for macOS `~/Library/Keychains`, default write protection for macOS/Linux system directories, login/autostart paths (`~/Library/LaunchAgents`, `~/.config/autostart`), login shell profiles (`.zprofile`, `.zshenv`, `.bash_profile`), and `.app` bundles; excluded macOS `/System`, `/Library`, `/Applications`, `/usr`, `/bin`, `/sbin`, `/private`, `~/Library` (preventing delayed iCloud Drive / app-container TCC prompt storms), the Photos library, `/dev`, and non-local `/Volumes/*` mounts (and Linux `/proc`, `/sys`, `/dev`, `/run`) from background filename scanning without blocking explicit direct reads.
+  - **macOS privacy permission (TCC) UX & API error clarity**: Primed Desktop, Documents, and Downloads upfront before recursive indexing so permission prompts appear immediately rather than straggling; added a one-click **Open Full Disk Access settings** button in full-access mode on macOS; made Desktop/search wording platform-neutral in trilingual connector instructions; and mapped OS `PermissionDenied` errors to actionable HTTP 403 responses.
+
+## [v0.3.0] - 2026-11-27
+
 ### Added
+- **In-app auto-updater & synced changelog dialog**:
+  - **Check & restart-to-update (Windows installer & Linux AppImage)**: Adds silent startup update checks and a manual **Check for updates** button on the **About** page backed by static GitHub Releases `latest.json` manifests and a compile-time pinned Minisign public key (avoiding anonymous REST API rate limits). New versions surface in a dismissible bottom-right card; downloads display a live green progress bar while keeping active connections uninterrupted; installing cleanly stops services (including managed `Everything.exe` on Windows) and restarts into the new build automatically. Portable Windows builds, Linux `.deb`, and macOS/source builds check the same static `latest.json` via SemVer so they still receive update alerts, release notes, and direct download links.
+  - **In-app synced changelog & release notes modals**: Updates **About** actions to ghost-style **Changelog**, **GitHub**, and **Check for updates**. Both **Changelog** and **Release notes** open in-app modals that follow the UI language (Japanese falls back to the English changelog), hide `[Unreleased]` and header chrome, render instantly from the bundled copy, silently sync from GitHub (with `latest.json` notes fallback), and include a header link icon to GitHub.
+  - **Cross-platform automated release workflow**: Adds `.github/workflows/release.yml` and `generate-updater-manifest.ps1` to run tests and build signed Windows (portable ZIP + NSIS), signed Linux (Ubuntu 22.04 AppImage + `.deb`), and macOS Universal (`.dmg` + `.app.zip`) packages in parallel on `v*` tags, assembling the updater `latest.json` and full `SHA256SUMS.txt` onto a draft GitHub Release.
 - **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
+- **macOS support**: MuseLink now builds and runs on macOS (Apple Silicon & Intel), covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup (discovers the Tailscale app bundle and Homebrew installs), with prebuilt Universal `.dmg` and `.app.zip` packages. Sandboxed command execution remains Windows-only; macOS packages are ad-hoc signed and not notarized (allow under **System Settings → Privacy & Security** on first launch).
+- **Japanese localization**: Added a Japanese (`ja`) locale covering the full UI (including updater and changelog modals), system tray, and Muse setup instructions, selectable under **Settings → General**, along with a Japanese README and preview screenshots.
 
 ## [v0.2.2] - 2026-11-27
 

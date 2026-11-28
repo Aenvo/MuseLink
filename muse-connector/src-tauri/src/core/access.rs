@@ -8,6 +8,8 @@ use super::{config::BridgeConfig, path_guard};
 pub const ERR_NOT_AUTHORIZED: &str = "operation is not authorized";
 pub const ERR_PROTECTED: &str = "protected path";
 pub(super) const ERR_REPARSE: &str = "reparse points are not authorized";
+#[cfg_attr(windows, allow(dead_code))]
+pub const UNIX_ROOT_ALIAS: &str = "root";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,14 +120,9 @@ impl AccessPolicy {
                 return Err("选择指定磁盘需要至少一项操作使用磁盘授权");
             }
             if disks.is_empty()
-                || disks.iter().any(|alias| {
-                    if development_home.is_some() {
-                        return alias != "test-disk";
-                    }
-                    !alias.strip_prefix("drive-").is_some_and(|letter| {
-                        letter.len() == 1 && letter.as_bytes()[0].is_ascii_lowercase()
-                    })
-                })
+                || disks
+                    .iter()
+                    .any(|alias| !valid_disk_alias(alias, development_home.is_some()))
             {
                 return Err("请至少选择一个有效的本机磁盘");
             }
@@ -287,6 +284,29 @@ pub(crate) fn canonicalize_direct(path: &Path) -> Option<PathBuf> {
     {
         return Some(canonical);
     }
+    #[cfg(target_os = "macos")]
+    if reject_reparse_ancestors(path).is_ok()
+        && macos_alias_spelling(path).is_some_and(|spelling| same(&spelling))
+    {
+        return Some(canonical);
+    }
+    None
+}
+
+/// The canonical spelling of a path that goes through one of macOS's
+/// root-owned alias symlinks (/etc, /tmp, /var all point into /private).
+/// Returns None for paths that do not start with one of those aliases.
+#[cfg(target_os = "macos")]
+pub(crate) fn macos_alias_spelling(path: &Path) -> Option<PathBuf> {
+    for (alias, real) in [
+        ("/etc", "/private/etc"),
+        ("/tmp", "/private/tmp"),
+        ("/var", "/private/var"),
+    ] {
+        if let Ok(rest) = path.strip_prefix(alias) {
+            return Some(PathBuf::from(real).join(rest));
+        }
+    }
     None
 }
 
@@ -396,6 +416,14 @@ pub(crate) fn is_drive_root(path: &Path) -> bool {
 
 pub(crate) fn reject_reparse_ancestors(path: &Path) -> Result<(), &'static str> {
     for ancestor in path.ancestors().take_while(|path| path.is_absolute()) {
+        // macOS keeps /etc, /tmp and /var as root-owned symlinks into
+        // /private, and almost every real path (the temp dir included)
+        // passes through one of them. Exempt exactly those OS aliases;
+        // any other symlink ancestor is still rejected.
+        #[cfg(target_os = "macos")]
+        if matches!(ancestor.to_str(), Some("/etc" | "/tmp" | "/var")) {
+            continue;
+        }
         match ancestor.symlink_metadata() {
             Ok(metadata) if is_reparse(&metadata) => return Err(ERR_REPARSE),
             Ok(_) => (),
@@ -450,9 +478,24 @@ pub fn fixed_local_roots() -> BTreeMap<String, PathBuf> {
     roots
 }
 
+fn valid_disk_alias(alias: &str, development: bool) -> bool {
+    if development {
+        return alias == "test-disk";
+    }
+    alias == UNIX_ROOT_ALIAS
+        || alias
+            .strip_prefix("drive-")
+            .is_some_and(|letter| letter.len() == 1 && letter.as_bytes()[0].is_ascii_lowercase())
+}
+
 #[cfg(not(windows))]
 pub fn fixed_local_roots() -> BTreeMap<String, PathBuf> {
-    BTreeMap::new()
+    let root = PathBuf::from("/");
+    if root.is_dir() {
+        BTreeMap::from([(UNIX_ROOT_ALIAS.to_owned(), root)])
+    } else {
+        BTreeMap::new()
+    }
 }
 
 #[cfg(test)]
@@ -669,5 +712,95 @@ mod tests {
             Path::new(r"C:\Users\Agent\.muse-bridge-copy\token"),
             &protected
         ));
+    }
+
+    #[test]
+    fn disk_alias_validation_accepts_unix_root_and_drive_letters() {
+        let mut policy = AccessPolicy {
+            mode: ScopeMode::Full,
+            search: GrantScope::AllLocal,
+            read: GrantScope::AllLocal,
+            write: GrantScope::AllLocal,
+            ..Default::default()
+        };
+        for valid in [UNIX_ROOT_ALIAS, "drive-c", "drive-z"] {
+            policy.disks = Some([valid.to_owned()].into());
+            assert!(policy.validate(&[], None).is_ok(), "should accept {valid}");
+        }
+        for invalid in ["", "drive-", "drive-1", "drive-cc", "test-disk", "../root"] {
+            policy.disks = Some([invalid.to_owned()].into());
+            assert!(
+                policy.validate(&[], None).is_err(),
+                "should reject {invalid}"
+            );
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn unix_fixed_local_roots_exposes_root_and_resolves_paths() {
+        let roots = fixed_local_roots();
+        assert_eq!(
+            roots,
+            BTreeMap::from([(UNIX_ROOT_ALIAS.to_owned(), PathBuf::from("/"))])
+        );
+
+        let home = std::env::temp_dir().join(format!(
+            "muse-unix-root-{}",
+            super::super::token::generate()
+        ));
+        std::fs::create_dir_all(&home).unwrap();
+        let canonical_home = std::fs::canonicalize(&home).unwrap();
+        let protected_dir = canonical_home.join("secret");
+        std::fs::create_dir_all(&protected_dir).unwrap();
+        let relative = canonical_home
+            .strip_prefix("/")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let policy = AccessPolicy {
+            mode: ScopeMode::Full,
+            disks: Some([UNIX_ROOT_ALIAS.to_owned()].into()),
+            search: GrantScope::AllLocal,
+            read: GrantScope::AllLocal,
+            write: GrantScope::AllLocal,
+            ..Default::default()
+        };
+        assert!(policy.validate(&[], None).is_ok());
+        assert_eq!(
+            policy
+                .resolve(
+                    Operation::Read,
+                    &roots,
+                    std::slice::from_ref(&protected_dir),
+                    UNIX_ROOT_ALIAS,
+                    &relative,
+                )
+                .unwrap(),
+            canonical_home
+        );
+        assert_eq!(
+            policy.resolve(
+                Operation::Read,
+                &roots,
+                std::slice::from_ref(&protected_dir),
+                UNIX_ROOT_ALIAS,
+                &format!("{relative}/secret/token"),
+            ),
+            Err(ERR_PROTECTED)
+        );
+        assert_eq!(
+            policy.resolve(
+                Operation::Read,
+                &roots,
+                std::slice::from_ref(&protected_dir),
+                UNIX_ROOT_ALIAS,
+                "../etc/passwd",
+            ),
+            Err(path_guard::ERR_ESCAPE)
+        );
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

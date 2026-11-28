@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "MuseLink",
   "mainBinaryName": "muse-connector",
-  "version": "0.2.2",
+  "version": "0.3.1",
   "identifier": "io.github.aenvo.muselink",
   "build": {
     "beforeDevCommand": "pnpm dev",
@@ -28,8 +28,10 @@
   },
   "bundle": {
     "active": true,
+    "createUpdaterArtifacts": true,
     "targets": [
-      "nsis"
+      "nsis",
+      "app"
     ],
     "icon": [
       "icons/32x32.png",
@@ -39,20 +41,27 @@
       "icons/icon.ico"
     ],
     "windows": {
+      "allowDowngrades": false,
       "nsis": {
         "installMode": "currentUser",
+        "installerHooks": "windows/installer-hooks.nsh",
         "languages": [
           "SimpChinese",
-          "English"
+          "English",
+          "Japanese"
         ]
       }
     }
   },
   "plugins": {
     "updater": {
-      "requireSignedVersion": true,
-      "pubkey": "",
-      "endpoints": []
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ4QTU1NTI1QUFGOUFENzUKUldSMXJmbXFKVldsU0xpaW9OakRwVm1GZzZ5Y0p4alVBZ3A0VnFWblBHWkJDMFArdnJhMmV3VS8K",
+      "endpoints": [
+        "https://github.com/Aenvo/MuseLink/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }
