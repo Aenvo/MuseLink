@@ -21,6 +21,7 @@ const riskTagLabels = {
   shell_cmd: "cmd 命令行",
   system_admin_tool: "系统管理工具",
   obfuscated_command: "疑似编码或混淆命令",
+  download_cradle: "远程下载并直接执行",
   remote_force_push: "强制推送远端仓库",
   remote_push: "推送至远端仓库",
   remote_mutation: "修改远端配置",

@@ -7,6 +7,9 @@
 ## [Unreleased]
 
 ### セキュリティと安定性の強化
+- **コマンド承認における難読化フラグとダウンロード＆即時実行（download cradle）の検知を強化**（[#15](https://github.com/Aenvo/MuseLink/pull/15) · [@KammyAugust11](https://github.com/KammyAugust11)）：PowerShell の `-EncodedCommand` 省略形およびダウンロード内容を直接実行するパターンを検知し、セッション許可ではなく常に単回承認を必須化しました。
+  - `-ec` および長めの `-EncodedCommand` 前方一致（`-enc`・`-enco` など）を常時検知しつつ、短い省略形（`-e`・`-en`）は `powershell` / `pwsh` 呼び出しの引数に限定し、`pip install -e .`・`rg -e`・`node -e` などの通常の開発コマンドの誤検知を防ぎました。
+  - 新規リスクタグ `download_cradle` と 3 言語の承認ダイアログ表示を追加し、`Net.WebClient`（`DownloadString` / `DownloadData` / `DownloadFile`）や `Invoke-WebRequest` / `iwr` / `Invoke-RestMethod` / `irm` / `curl` / `wget` と `iex`・インタプリターへのパイプ実行を検知します（ファイルへの単純なダウンロードは影響を受けません）。
 - **コマンド実行子プロセスから認証情報系の環境変数を既定で除去**（[#14](https://github.com/Aenvo/MuseLink/pull/14) · [@KammyAugust11](https://github.com/KammyAugust11)）：サンドボックス子プロセスの環境構築時に、一般的なサードパーティ製トークンやシークレット系の環境変数を自動で除外し、ホスト環境の認証情報が実行コマンドから読み取られるのを防ぎます。
   - プラットフォーム非依存の `core/env_scrub.rs` を追加して `sandbox.rs` の `build_clean_env` に組み込み、変数名のみを大文字・小文字区別なしで判定します（`GITHUB_TOKEN`・`AWS_SECRET_ACCESS_KEY`・`OPENAI_API_KEY` などの一覧と `TOKEN` / `SECRET` / `PASSWORD` / `PASSWD` / `API_KEY` / `APIKEY` / `PRIVATE_KEY` / `ACCESS_KEY` / `CREDENTIAL` を含む変数名を除外し、値は一切読み取り・記録しません。`PATH`・`SystemRoot`・`TEMP` などの必須変数は維持されます）。
 - **リリース成果物にビルド来歴証明（Build Provenance Attestation）を追加**（[#16](https://github.com/Aenvo/MuseLink/pull/16) · [@KammyAugust11](https://github.com/KammyAugust11)）：リリースワークフローで Windows / Linux / macOS の各配布アセットに対する GitHub ビルド来歴証明を生成するようになり、ダウンロードしたバイナリが本リポジトリのソースコードから GitHub Actions 上でビルドされ、差し替えや改ざんが行われていないことを `gh attestation verify` で検証できるようになりました。

@@ -7,6 +7,9 @@
 ## [Unreleased]
 
 ### 安全与稳定性加固
+- **加固命令审批的混淆命令与远程下载即执行检测**（[#15](https://github.com/Aenvo/MuseLink/pull/15)，感谢 [@KammyAugust11](https://github.com/KammyAugust11)）：命令审批新增识别 PowerShell `-EncodedCommand` 各类前缀缩写与常见下载即执行（download cradle）模式，命中时始终强制单次确认，避免绕过会话级免打扰。
+  - 覆盖 PowerShell `-EncodedCommand` 的长前缀（`-enc` / `-enco` 等）与 `-ec`，并将 `-e` / `-en` 等短缩写限定于 `powershell` / `pwsh` 调用上下文，避免误伤 `pip install -e .`、`rg -e`、`node -e` 等常规开发命令。
+  - 新增 `download_cradle` 风险标签及三语审批弹窗文案，拦截 `Net.WebClient`（`DownloadString` / `DownloadData` / `DownloadFile`）以及 `Invoke-WebRequest` / `iwr` / `Invoke-RestMethod` / `irm` / `curl` / `wget` 结合 `iex` 或管道送入解释器执行的命令；单纯下载到文件保持原审批级别。
 - **受控命令子进程默认剥离凭证类环境变量**（[#14](https://github.com/Aenvo/MuseLink/pull/14)，感谢 [@KammyAugust11](https://github.com/KammyAugust11)）：构建沙箱子进程环境块时自动剔除常见第三方令牌与密钥类环境变量，避免宿主环境凭证被代理执行的命令读取。
   - 新增平台无关模块 `core/env_scrub.rs` 并在 `sandbox.rs` 的 `build_clean_env` 接入，仅按变量名大小写不敏感匹配常见精确清单（如 `GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`、`OPENAI_API_KEY` 等）与敏感子串（`TOKEN` / `SECRET` / `PASSWORD` / `PASSWD` / `API_KEY` / `APIKEY` / `PRIVATE_KEY` / `ACCESS_KEY` / `CREDENTIAL`），绝不读取或记录变量值；`PATH`、`SystemRoot`、`TEMP` 等运行必需变量不受影响。
 - **发布产物增加构建来源证明**（[#16](https://github.com/Aenvo/MuseLink/pull/16)，感谢 [@KammyAugust11](https://github.com/KammyAugust11)）：发布工作流为 Windows / Linux / macOS 三个平台的发布资产生成 GitHub 构建来源证明（build provenance attestation），用户可通过 `gh attestation verify` 校验下载的二进制确实由本仓库源码在 GitHub Actions 中构建，未被替换或篡改。
