@@ -8,6 +8,7 @@
 //! - 下载与签名校验期间保持现有连接不断流；校验通过后先停止隧道、本地 API、命令执行与
 //!   托管 Everything 索引进程，再拉起安装器；若安装器拉起失败则自动尝试恢复服务。
 
+use crate::core::audit::Audit;
 use crate::profile::{Language, RuntimeProfile};
 use crate::service::ServiceController;
 use serde::Serialize;
@@ -175,6 +176,17 @@ fn has_nsis_uninstaller(install_dir: &Path) -> bool {
 
 pub fn is_configured() -> bool {
     true
+}
+
+pub fn debug_auto_check_enabled() -> bool {
+    #[cfg(debug_assertions)]
+    {
+        debug_override().is_some() || debug_install_qa_enabled()
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        false
+    }
 }
 
 #[cfg(any(debug_assertions, test))]
@@ -393,13 +405,22 @@ fn is_newer_version(current: &str, remote: &str) -> bool {
 async fn check_static_manifest(
     current_version: String,
     kind: InstallKind,
-    state: &Arc<ServiceController>,
+    logs: &Audit,
 ) -> Result<UpdateCheckResult, String> {
     let endpoint = debug_override()
         .map(|cfg| cfg.endpoint)
         .unwrap_or_else(|| DEFAULT_MANIFEST_URL.to_owned());
+    check_static_manifest_from_endpoint(&endpoint, current_version, kind, logs).await
+}
+
+async fn check_static_manifest_from_endpoint(
+    endpoint: &str,
+    current_version: String,
+    kind: InstallKind,
+    logs: &Audit,
+) -> Result<UpdateCheckResult, String> {
     let _ = rustls::crypto::ring::default_provider().install_default();
-    let client = reqwest::Client::builder()
+    let mut client_builder = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::custom(|attempt| {
             if attempt.previous().len() >= 5 {
                 return attempt.stop();
@@ -416,19 +437,24 @@ async fn check_static_manifest(
             }
         }))
         .timeout(CHECK_TIMEOUT)
-        .user_agent(concat!("MuseLink/", env!("CARGO_PKG_VERSION")))
+        .user_agent(concat!("MuseLink/", env!("CARGO_PKG_VERSION")));
+    #[cfg(any(debug_assertions, test))]
+    if reqwest::Url::parse(endpoint)
+        .ok()
+        .is_some_and(|url| is_loopback_http(&url))
+    {
+        // 开发/测试本地回环 Mock 不走系统代理，避免被本机 HTTP 代理拦截返回 502。
+        client_builder = client_builder.no_proxy();
+    }
+    let client = client_builder
         .build()
         .map_err(|_| "更新检查暂时不可用，请稍后重试".to_string())?;
-    let mut response = client.get(&endpoint).send().await.map_err(|error| {
-        state
-            .logs
-            .runtime_entry("warn", &format!("更新检查失败：{error}"));
+    let mut response = client.get(endpoint).send().await.map_err(|error| {
+        logs.runtime_entry("warn", &format!("更新检查失败：{error}"));
         "更新检查失败，请检查网络连接后重试".to_string()
     })?;
     if response.status() == reqwest::StatusCode::NOT_FOUND {
-        state
-            .logs
-            .runtime_entry("info", "更新源尚无可用更新清单，按已是最新版本处理");
+        logs.runtime_entry("info", "更新源尚无可用更新清单，按已是最新版本处理");
         return Ok(UpdateCheckResult {
             configured: true,
             available: false,
@@ -443,30 +469,34 @@ async fn check_static_manifest(
         });
     }
     if response.status() != reqwest::StatusCode::OK {
+        logs.runtime_entry(
+            "warn",
+            &format!("更新检查返回异常状态码：{}", response.status()),
+        );
         return Err("更新检查暂时不可用，请稍后重试".into());
     }
     let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|_| "更新检查失败，请检查网络连接后重试".to_string())?
-    {
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        logs.runtime_entry("warn", &format!("更新清单读取中断：{error}"));
+        "更新检查失败，请检查网络连接后重试".to_string()
+    })? {
         if bytes.len() + chunk.len() > MAX_MANIFEST_BYTES {
+            logs.runtime_entry("warn", "更新清单响应超出允许大小");
             return Err("更新检查暂时不可用，请稍后重试".into());
         }
         bytes.extend_from_slice(&chunk);
     }
-    let manifest: StaticReleaseManifest =
-        serde_json::from_slice(&bytes).map_err(|_| "更新检查暂时不可用，请稍后重试".to_string())?;
+    let manifest: StaticReleaseManifest = serde_json::from_slice(&bytes).map_err(|error| {
+        logs.runtime_entry("warn", &format!("更新清单解析失败：{error}"));
+        "更新检查暂时不可用，请稍后重试".to_string()
+    })?;
     let remote_version = manifest
         .version
         .trim()
         .trim_start_matches(['v', 'V'])
         .to_owned();
     if is_newer_version(&current_version, &remote_version) {
-        state
-            .logs
-            .runtime_entry("info", &format!("发现新版本 v{remote_version}"));
+        logs.runtime_entry("info", &format!("发现新版本 v{remote_version}"));
         Ok(UpdateCheckResult {
             configured: true,
             available: true,
@@ -509,7 +539,7 @@ pub async fn check_updates(
         if let Ok(mut pending) = runtime.pending.lock() {
             *pending = None;
         }
-        return check_static_manifest(current_version, kind, state.inner()).await;
+        return check_static_manifest(current_version, kind, state.logs.as_ref()).await;
     }
     let updater = build_updater(&app)?;
     match updater.check().await {
@@ -823,5 +853,94 @@ mod tests {
         assert!(!is_newer_version("0.2.3", "0.2.2"));
         assert!(!is_newer_version("0.2.3", "0.2.3-rc.1"));
         assert!(!is_newer_version("0.2.3", "invalid"));
+    }
+
+    #[tokio::test]
+    async fn static_manifest_check_handles_new_version_404_and_logs_failures() {
+        use axum::{Router, http::StatusCode, routing::get};
+
+        let app = Router::new()
+            .route(
+                "/newer.json",
+                get(|| async {
+                    (
+                        StatusCode::OK,
+                        r#"{"version":"v9.9.9","pub_date":"2026-11-28T00:00:00Z","notes":"release notes"}"#,
+                    )
+                }),
+            )
+            .route("/missing.json", get(|| async { StatusCode::NOT_FOUND }))
+            .route(
+                "/unavailable.json",
+                get(|| async { StatusCode::SERVICE_UNAVAILABLE }),
+            )
+            .route(
+                "/corrupt.json",
+                get(|| async { (StatusCode::OK, "{not-valid-json") }),
+            );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "muselink-updater-manifest-{}",
+            crate::core::token::generate()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log_path = dir.join("server.log");
+        let logs = Audit::runtime(log_path.clone());
+
+        let newer = check_static_manifest_from_endpoint(
+            &format!("http://{addr}/newer.json"),
+            "0.3.1".into(),
+            InstallKind::Unsupported,
+            &logs,
+        )
+        .await
+        .unwrap();
+        assert!(newer.available);
+        assert_eq!(newer.version.as_deref(), Some("9.9.9"));
+        assert!(!newer.can_install_in_app);
+
+        let missing = check_static_manifest_from_endpoint(
+            &format!("http://{addr}/missing.json"),
+            "0.3.1".into(),
+            InstallKind::Unsupported,
+            &logs,
+        )
+        .await
+        .unwrap();
+        assert!(!missing.available);
+
+        let err_503 = check_static_manifest_from_endpoint(
+            &format!("http://{addr}/unavailable.json"),
+            "0.3.1".into(),
+            InstallKind::Unsupported,
+            &logs,
+        )
+        .await
+        .unwrap_err();
+        assert!(err_503.contains("暂时不可用"));
+
+        let err_json = check_static_manifest_from_endpoint(
+            &format!("http://{addr}/corrupt.json"),
+            "0.3.1".into(),
+            InstallKind::Unsupported,
+            &logs,
+        )
+        .await
+        .unwrap_err();
+        assert!(err_json.contains("暂时不可用"));
+
+        let written = std::fs::read_to_string(&log_path).unwrap();
+        assert!(written.contains("发现新版本 v9.9.9"));
+        assert!(written.contains("更新检查返回异常状态码：503"));
+        assert!(written.contains("更新清单解析失败："));
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

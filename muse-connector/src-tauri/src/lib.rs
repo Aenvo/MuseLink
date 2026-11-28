@@ -41,6 +41,8 @@ fn get_snapshot(
     result["platform"] = json!(std::env::consts::OS);
     result["update_configured"] = json!(updater::is_configured());
     result["in_app_update_supported"] = json!(install_kind.can_install_in_app());
+    result["auto_update_check_enabled"] =
+        json!(!state.profile.is_development() || updater::debug_auto_check_enabled());
     result["install_kind"] = json!(install_kind.as_str());
     result
 }

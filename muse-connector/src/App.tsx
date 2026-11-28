@@ -63,7 +63,7 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
   const [guideActivation, setGuideActivation] = useState(0);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [changelogModal, setChangelogModal] = useState<"all" | "release" | null>(null);
-  const updater = useUpdater(s);
+  const updater = useUpdater(s, bridge.windowVisible);
   const scroll = useRef<HTMLDivElement>(null);
   const confirmationTrigger = useRef<HTMLElement | null>(null);
   const clearGuideTestError = useRef(false);
@@ -217,7 +217,18 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
       </Button> : null}
     </header>
     <Tabs value={page} onValueChange={navigate} className="min-h-0 flex-1 gap-0">
-      <nav className="app-shell app-navigation shrink-0" aria-label={t("主导航")}><TabsList className="grid h-10 w-full grid-cols-6">{pages.map(([value, label]) => <TabsTrigger key={value} value={value} title={t(label)} className="min-w-0 overflow-hidden px-1.5 text-center text-xs sm:text-sm"><span className="truncate">{t(label)}</span></TabsTrigger>)}</TabsList></nav>
+      <nav className="app-shell app-navigation shrink-0" aria-label={t("主导航")}><TabsList className="grid h-10 w-full grid-cols-6">{pages.map(([value, label]) => {
+        const showUpdateDot = value === "about" && updater.hasUpdate;
+        const tabTitle = showUpdateDot && updater.result?.version
+          ? `${t(label)} · ${t("发现新版本 v{0}", updater.result.version)}`
+          : t(label);
+        return <TabsTrigger key={value} value={value} title={tabTitle} className="min-w-0 overflow-hidden px-1.5 text-center text-xs sm:text-sm">
+          <span className="inline-flex min-w-0 items-center justify-center gap-1.5">
+            <span className="truncate">{t(label)}</span>
+            {showUpdateDot ? <span className="size-1.5 shrink-0 rounded-full bg-status-success" aria-hidden="true" /> : null}
+          </span>
+        </TabsTrigger>;
+      })}</TabsList></nav>
       <ScrollArea ref={scroll} className="app-scroll min-h-0 flex-1" type="hover" scrollHideDelay={150}>
         <div className="app-shell app-page flex flex-col gap-4">
           {error && !confirmation && !(needsAttention && error === s?.status.note) ? <Notice title={t("操作未完成")} error><p>{diagnostic(error)}</p><Button variant="ghost" size="sm" onClick={() => bridge.setError(null)}><X data-icon="inline-start" />{t("收起提示")}</Button></Notice> : null}

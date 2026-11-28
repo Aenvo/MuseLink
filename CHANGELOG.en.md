@@ -4,6 +4,14 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
+## [Unreleased]
+
+### Fixes & Improvements
+- **Fixed startup auto-update checks being cancelled before running**: Opening MuseLink on macOS, Windows, or Linux now reliably checks for new releases and shows the update notice automatically, and long-running tray sessions also re-check on a cooldown after waking or coming back online.
+  - Fixed a `useUpdater` race where `autoChecked` was set before the 4-second timer fired while the effect depended on the full `snapshot` object—initial `bridge-snapshot` pushes or 1.5s index polling triggered cleanup, clearing the timer and permanently skipping startup checks.
+  - Extracted pure scheduling helpers (`updater-schedule.ts`) wired to window visibility, cooldowns (6 hours after success, 10 minutes after silent failure), `online` retry, and focus wake checks; no timers run while hidden in the tray, silent failures never wipe an already-detected update, and clicking **Check for updates** during an in-flight silent check reuses and upgrades the request.
+  - Added a subtle update indicator dot on the **About** tab alongside the floating notice, logged non-200 HTTP statuses, read interruptions, and manifest parse errors in `updater.rs`, and exposed a debug-only `auto_update_check_enabled` flag for cross-platform loopback mock QA (compiled out in release builds).
+
 ## [v0.3.3] - 2026-11-28
 
 ### Improvements & Added

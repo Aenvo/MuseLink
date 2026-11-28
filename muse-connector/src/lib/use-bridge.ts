@@ -81,6 +81,7 @@ export interface Snapshot {
   autostart: boolean | null; update_configured: boolean;
   platform?: "windows" | "macos" | "linux" | string;
   in_app_update_supported?: boolean;
+  auto_update_check_enabled?: boolean;
   install_kind?: string;
   log_bytes: number;
   log_errors: string[];
