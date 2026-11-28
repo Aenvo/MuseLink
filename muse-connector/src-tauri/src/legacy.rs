@@ -38,11 +38,14 @@ pub struct MigrationRecord {
     pub tasks: Vec<TaskRecord>,
     pub prior_funnel: Option<Value>,
 }
+#[cfg(any(windows, test))]
 trait TaskOps {
     fn read(&self) -> Result<Vec<TaskRecord>, String>;
     fn change(&self, name: &str, action: &str) -> Result<(), String>;
 }
+#[cfg(windows)]
 struct WindowsTasks;
+#[cfg(windows)]
 impl TaskOps for WindowsTasks {
     fn read(&self) -> Result<Vec<TaskRecord>, String> {
         let script = r#"[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false);$ErrorActionPreference='Stop';$items=@();foreach($name in @('MuseFileBridge Watchdog','MuseFileBridge API','MuseFileBridge Tunnel')){$t=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue;if($null -eq $t){$items+=@{name=$name;exists=$false;enabled=$false;running=$false;xml=''}}else{$items+=@{name=$name;exists=$true;enabled=[bool]$t.Settings.Enabled;running=($t.State.ToString() -eq 'Running');xml=(Export-ScheduledTask -TaskName $name)}}};ConvertTo-Json -InputObject $items -Depth 8 -Compress"#;
@@ -94,6 +97,7 @@ impl TaskOps for WindowsTasks {
         }
     }
 }
+#[cfg(windows)]
 fn public_tasks(tasks: Vec<TaskRecord>) -> Vec<TaskInfo> {
     tasks
         .into_iter()
@@ -106,20 +110,50 @@ fn public_tasks(tasks: Vec<TaskRecord>) -> Vec<TaskInfo> {
         .collect()
 }
 pub fn check_legacy(profile: &RuntimeProfile) -> Result<LegacyState, String> {
-    let tasks = WindowsTasks.read()?;
     let port_occupied = std::net::TcpStream::connect_timeout(
         &"127.0.0.1:18790".parse().unwrap(),
         std::time::Duration::from_millis(250),
     )
     .is_ok();
     let record = read_record(profile).ok();
-    Ok(LegacyState {
-        needs_takeover: tasks.iter().any(|t| t.exists),
-        tasks: public_tasks(tasks),
-        port_occupied,
-        can_restore: record.as_ref().is_some_and(|r| r.phase != "restored"),
-        migration_phase: record.map(|r| r.phase),
-    })
+    // macOS never had the Windows scheduled-task bridge, so there is nothing
+    // to take over. (A future Mac release could look for a LaunchAgent
+    // install here instead.)
+    #[cfg(target_os = "macos")]
+    {
+        return Ok(LegacyState {
+            needs_takeover: false,
+            tasks: TASKS
+                .iter()
+                .map(|name| TaskInfo {
+                    name: (*name).into(),
+                    exists: false,
+                    enabled: false,
+                    running: false,
+                })
+                .collect(),
+            port_occupied,
+            can_restore: record.as_ref().is_some_and(|r| r.phase != "restored"),
+            migration_phase: record.as_ref().map(|r| r.phase.clone()),
+        });
+    }
+    #[cfg(windows)]
+    {
+        let tasks = WindowsTasks.read()?;
+        return Ok(LegacyState {
+            needs_takeover: tasks.iter().any(|t| t.exists),
+            tasks: public_tasks(tasks),
+            port_occupied,
+            can_restore: record.as_ref().is_some_and(|r| r.phase != "restored"),
+            migration_phase: record.map(|r| r.phase),
+        });
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = record;
+        let _ = port_occupied;
+        Err("legacy takeover is only supported on Windows".into())
+    }
 }
 fn record_path(profile: &RuntimeProfile) -> std::path::PathBuf {
     profile.home.join("migration-state.json")
@@ -146,6 +180,7 @@ fn read_record(profile: &RuntimeProfile) -> Result<MigrationRecord, String> {
     }
     Ok(record)
 }
+#[cfg(any(windows, test))]
 fn stop_tasks(ops: &impl TaskOps, tasks: &[TaskRecord]) -> Result<(), String> {
     for name in TASKS {
         if !tasks.iter().any(|t| t.name == name && t.exists) {
@@ -176,6 +211,7 @@ fn stop_tasks(ops: &impl TaskOps, tasks: &[TaskRecord]) -> Result<(), String> {
     }
     Ok(())
 }
+#[cfg(any(windows, test))]
 fn restore_tasks(ops: &impl TaskOps, tasks: &[TaskRecord]) -> Result<(), String> {
     for name in [API, TUNNEL, WATCHDOG] {
         let Some(original) = tasks.iter().find(|t| t.name == name && t.exists) else {
@@ -211,45 +247,58 @@ fn restore_tasks(ops: &impl TaskOps, tasks: &[TaskRecord]) -> Result<(), String>
     Ok(())
 }
 pub fn takeover(profile: &RuntimeProfile, prior_funnel: Option<Value>) -> Result<(), String> {
-    profile.require_production()?;
-    if let Ok(existing) = read_record(profile)
-        && existing.phase != "restored"
-        && existing.phase != "rolled_back"
+    #[cfg(target_os = "macos")]
     {
-        return Err("已有未结束的迁移事务，请先恢复旧版".into());
+        let _ = (profile, prior_funnel);
+        return Err("macOS 上没有旧版 Windows 计划任务，无需接管".into());
     }
-    let tasks = WindowsTasks.read()?;
-    if !tasks.iter().any(|t| t.exists) {
-        return Err("没有发现旧计划任务，无需接管".into());
-    }
-    let mut record = MigrationRecord {
-        schema_version: 1,
-        phase: "stopping_legacy".into(),
-        created_at: crate::core::audit::now_iso(),
-        tasks,
-        prior_funnel,
-    };
-    save_record(profile, &record)?;
-    if let Err(error) = stop_tasks(&WindowsTasks, &record.tasks) {
-        let restored = restore_tasks(&WindowsTasks, &record.tasks);
-        record.phase = if restored.is_ok() {
-            "rolled_back"
-        } else {
-            "recovery_required"
+    #[cfg(windows)]
+    {
+        profile.require_production()?;
+        if let Ok(existing) = read_record(profile)
+            && existing.phase != "restored"
+            && existing.phase != "rolled_back"
+        {
+            return Err("已有未结束的迁移事务，请先恢复旧版".into());
         }
-        .into();
+        let tasks = WindowsTasks.read()?;
+        if !tasks.iter().any(|t| t.exists) {
+            return Err("没有发现旧计划任务，无需接管".into());
+        }
+        let mut record = MigrationRecord {
+            schema_version: 1,
+            phase: "stopping_legacy".into(),
+            created_at: crate::core::audit::now_iso(),
+            tasks,
+            prior_funnel,
+        };
         save_record(profile, &record)?;
-        return Err(format!(
-            "接管失败：{error}；{}",
-            if restored.is_ok() {
-                "旧任务状态已恢复"
+        if let Err(error) = stop_tasks(&WindowsTasks, &record.tasks) {
+            let restored = restore_tasks(&WindowsTasks, &record.tasks);
+            record.phase = if restored.is_ok() {
+                "rolled_back"
             } else {
-                "恢复不完整，请查看旧任务状态"
+                "recovery_required"
             }
-        ));
+            .into();
+            save_record(profile, &record)?;
+            return Err(format!(
+                "接管失败：{error}；{}",
+                if restored.is_ok() {
+                    "旧任务状态已恢复"
+                } else {
+                    "恢复不完整，请查看旧任务状态"
+                }
+            ));
+        }
+        record.phase = "legacy_stopped".into();
+        save_record(profile, &record)
     }
-    record.phase = "legacy_stopped".into();
-    save_record(profile, &record)
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = (profile, prior_funnel);
+        Err("legacy takeover is only supported on Windows".into())
+    }
 }
 pub fn mark_active(profile: &RuntimeProfile) -> Result<(), String> {
     let mut record = read_record(profile)?;
@@ -257,16 +306,29 @@ pub fn mark_active(profile: &RuntimeProfile) -> Result<(), String> {
     save_record(profile, &record)
 }
 pub fn restore(profile: &RuntimeProfile) -> Result<MigrationRecord, String> {
-    profile.require_production()?;
-    let mut record = read_record(profile)?;
-    record.phase = "restoring".into();
-    save_record(profile, &record)?;
-    if let Err(e) = restore_tasks(&WindowsTasks, &record.tasks) {
-        record.phase = "recovery_required".into();
-        save_record(profile, &record)?;
-        return Err(e);
+    #[cfg(target_os = "macos")]
+    {
+        let _ = profile;
+        return Err("macOS 上没有旧版 Windows 计划任务，无需恢复".into());
     }
-    Ok(record)
+    #[cfg(windows)]
+    {
+        profile.require_production()?;
+        let mut record = read_record(profile)?;
+        record.phase = "restoring".into();
+        save_record(profile, &record)?;
+        if let Err(e) = restore_tasks(&WindowsTasks, &record.tasks) {
+            record.phase = "recovery_required".into();
+            save_record(profile, &record)?;
+            return Err(e);
+        }
+        Ok(record)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
+    {
+        let _ = profile;
+        Err("legacy restore is only supported on Windows".into())
+    }
 }
 pub fn mark_restored(profile: &RuntimeProfile) -> Result<(), String> {
     let mut record = read_record(profile)?;
@@ -296,7 +358,7 @@ pub async fn restore_funnel(record: &MigrationRecord) -> Result<(), String> {
         if !host.ends_with(":443") {
             return Err("原转发端口不是 443，请人工恢复".into());
         }
-        let exe = crate::tunnel::discover_executable("tailscale.exe")
+        let exe = crate::tunnel::discover_executable(&crate::tunnel::exe_file_name("tailscale"))
             .ok_or("无法找到 Tailscale 恢复原入口")?;
         let current: Value = serde_json::from_str(
             &crate::tunnel::run_cli(&exe, &["funnel", "status", "--json"]).await?,

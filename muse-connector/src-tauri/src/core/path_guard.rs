@@ -15,6 +15,7 @@ pub const ERR_ABSOLUTE: &str = "path must be relative";
 pub const ERR_INVALID: &str = "invalid path";
 pub const ERR_ESCAPE: &str = "path escapes root";
 
+#[cfg(windows)]
 const RESERVED: &[&str] = &[
     "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
     "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
@@ -23,6 +24,9 @@ const RESERVED: &[&str] = &[
 pub(crate) struct Resolved {
     pub(crate) root: PathBuf,
     pub(crate) path: PathBuf,
+    // Only the Windows backend reads this (volume handling); the macOS
+    // backend works from the canonical `root` alone.
+    #[allow(dead_code)]
     pub(crate) requested_root: PathBuf,
     pub(crate) requested_relative: PathBuf,
     pub(crate) reject_reparse: bool,
@@ -37,54 +41,70 @@ pub(crate) fn resolve(
 
     // 绝对路径检测（对齐 Windows ntpath.isabs 的判定面）
     let b = rel.as_bytes();
-    if b.first() == Some(&b'/') || b.first() == Some(&b'\\') {
+    if b.first() == Some(&b'/') {
         return Err(ERR_ABSOLUTE);
     }
-    if b.len() >= 2 && b[1] == b':' {
+    // Windows only: UNC/盘符绝对路径。macOS 上反斜杠是合法文件名字符，
+    // `a:b` 也是合法相对路径，不做绝对判定。
+    #[cfg(windows)]
+    if b.first() == Some(&b'\\') || (b.len() >= 2 && b[1] == b':') {
         return Err(ERR_ABSOLUTE); // 盘符（含 UNC 的 \\.\ 与 \\server\ 形式由首字符反斜杠覆盖）
     }
     if rel.contains('\0') {
         return Err(ERR_INVALID);
     }
 
+    // 路径分隔符：Windows 上 `/` 与 `\` 都是分隔符；macOS 上只有 `/`，
+    // 反斜杠是文件名的一部分。
+    #[cfg(windows)]
+    let parts: Vec<&str> = rel.split(['/', '\\']).collect();
+    #[cfg(not(windows))]
+    let parts: Vec<&str> = rel.split('/').collect();
+
     // 预扫描一：`..` 深度。逃出根 → "path escapes root"（错误串与 Python 实测一致）；
     // 落回根内的 `..` 在组件检查中拒绝（Python 经 realpath 允许 —— 有意收紧为 invalid path）。
     let mut depth: i64 = 0;
-    for comp in rel.split(['/', '\\']) {
-        if comp == ".." {
+    for comp in &parts {
+        if *comp == ".." {
             depth -= 1;
             if depth < 0 {
                 return Err(ERR_ESCAPE);
             }
-        } else if !comp.is_empty() && comp != "." {
+        } else if !comp.is_empty() && *comp != "." {
             depth += 1;
         }
     }
 
     // 组件级预检（修复三缺陷的核心）
     let mut clean: Vec<&str> = Vec::new();
-    for comp in rel.split(['/', '\\']) {
-        if comp.is_empty() || comp == "." {
+    for comp in &parts {
+        if comp.is_empty() || *comp == "." {
             continue;
         }
-        if comp == ".." {
+        if *comp == ".." {
             // Python 允许"落回根内"的 ..；此处一律拒绝 —— 消灭整类穿越，属有意收紧
             return Err(ERR_INVALID);
         }
+        // 以下三项是 Windows 专属：ADS 数据流 / 尾部点空格归一化 / 保留设备名。
+        // macOS（APFS）上 `:`、尾部点空格、`CON` 都是合法文件名，不拒绝。
+        #[cfg(windows)]
         if comp.contains(':') {
             // ADS 数据流 / 设备命名空间 / 残余盘符
             return Err(ERR_INVALID);
         }
+        #[cfg(windows)]
         if comp.ends_with('.') || comp.ends_with(' ') {
             // Win32 剥离尾部点与空格：既造成别名（a.txt. == a.txt），也包含 "..." 穿越
             return Err(ERR_INVALID);
         }
         // 保留设备名（CON、CON.txt 等同形变体）
+        #[cfg(windows)]
         let stem = comp.split('.').next().unwrap_or(comp).to_ascii_uppercase();
+        #[cfg(windows)]
         if RESERVED.contains(&stem.as_str()) {
             return Err(ERR_INVALID);
         }
-        clean.push(comp);
+        clean.push(*comp);
     }
 
     let requested_relative: PathBuf = clean.into_iter().collect();

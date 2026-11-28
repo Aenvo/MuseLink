@@ -31,7 +31,7 @@ export interface TunnelStatus {
   last_check: string; note: string; api_port: number; public_verified: boolean | null; agent_public_verified: boolean | null;
 }
 export type DeviceNameUpdate = { id: string; pending: boolean };
-export type ExecMode = "direct" | "powershell" | "cmd";
+export type ExecMode = "direct" | "powershell" | "cmd" | "shell";
 export type RiskTier = "auto" | "session" | "always";
 export type ApprovalDecision = "allow_once" | "allow_session" | "deny";
 export interface ApprovalView {
@@ -56,7 +56,7 @@ export interface SessionGrantView {
   expires_at_ms: number;
 }
 export interface Snapshot {
-  run_id: string; profile: "development" | "production"; initialized: boolean; fresh_setup: boolean; setup_error: string | null;
+  run_id: string; profile: "development" | "production"; platform: "windows" | "macos" | "other"; initialized: boolean; fresh_setup: boolean; setup_error: string | null;
   file_token_version: string | null;
   file_access: FileAccessPolicy | null;
   ntfs_search_service: boolean | null;
@@ -79,7 +79,6 @@ export interface Snapshot {
   dependencies: { tailscale: boolean; cloudflared: boolean; simulated: boolean };
   capabilities: { enabled: boolean; tools: string[] }; version: string;
   autostart: boolean | null; update_configured: boolean;
-  platform?: "windows" | "macos" | "linux" | string;
   in_app_update_supported?: boolean;
   install_kind?: string;
   log_bytes: number;

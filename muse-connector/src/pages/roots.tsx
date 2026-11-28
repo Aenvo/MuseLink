@@ -28,6 +28,7 @@ export default function Roots({
   const busy = !!bridge.busy;
   const execEnabled = snapshot.exec_enabled;
   const execSessions = snapshot.exec_sessions;
+  const isMac = snapshot.platform === "macos";
 
   return (
     <div className="page-stack">
@@ -44,10 +45,12 @@ export default function Roots({
                       <label htmlFor="exec-enabled-switch" className="text-sm font-medium text-foreground">
                         {t("允许 Muse 执行本机命令")}
                       </label>
-                      <Badge variant="outline">{execEnabled ? t("写受限沙箱") : t("已关闭")}</Badge>
+                      <Badge variant="outline">{execEnabled ? (isMac ? t("受限环境") : t("写受限沙箱")) : t("已关闭")}</Badge>
                     </div>
                     <p className="text-caption text-muted-foreground">
-                      {t("开启后，Muse 可在已授权的非敏感项目文件夹内调用常见开发工具（如 git、cargo、pnpm、python）以及受控 PowerShell/cmd。命令默认运行在 Windows 写受限沙箱中（仅允许写入当前项目目录与隔离临时目录，且受内存、进程数与超时约束）；首次在项目内使用 Shell、安装依赖、推送远端、触碰敏感目录或请求跳出沙箱时，本机将弹出审批窗由你确认。关闭开关会立即停用并终止运行中的命令。")}
+                      {isMac
+                        ? t("开启后，Muse 可在已授权的非敏感项目文件夹内调用常见开发工具（如 git、cargo、pnpm、python）以及受控 zsh。命令默认运行在受限环境中（工作目录、精简环境变量与内存上限；无内核级写隔离）；首次在项目内使用 Shell、安装依赖、推送远端、触碰敏感目录或请求跳出受限环境时，本机将弹出审批窗由你确认。关闭开关会立即停用并终止运行中的命令。")
+                        : t("开启后，Muse 可在已授权的非敏感项目文件夹内调用常见开发工具（如 git、cargo、pnpm、python）以及受控 PowerShell/cmd。命令默认运行在 Windows 写受限沙箱中（仅允许写入当前项目目录与隔离临时目录，且受内存、进程数与超时约束）；首次在项目内使用 Shell、安装依赖、推送远端、触碰敏感目录或请求跳出沙箱时，本机将弹出审批窗由你确认。关闭开关会立即停用并终止运行中的命令。")}
                     </p>
                   </div>
                   <Switch
@@ -58,7 +61,9 @@ export default function Roots({
                       if (next) {
                         confirm({
                           title: t("开启 Muse 本机命令执行？"),
-                          description: t("开启后，持有当前 Muse 专用令牌的请求可在授权项目文件夹内运行开发工具与受控 PowerShell/cmd（默认限制于 Windows 写受限沙箱）。高风险与敏感目录操作仍需本机弹窗确认。开启后请重新复制接入说明发给 Muse。"),
+                          description: isMac
+                            ? t("开启后，持有当前 Muse 专用令牌的请求可在授权项目文件夹内运行开发工具与受控 zsh（默认限制于受限环境；无内核级写隔离）。高风险与敏感目录操作仍需本机弹窗确认。开启后请重新复制接入说明发给 Muse。")
+                            : t("开启后，持有当前 Muse 专用令牌的请求可在授权项目文件夹内运行开发工具与受控 PowerShell/cmd（默认限制于 Windows 写受限沙箱）。高风险与敏感目录操作仍需本机弹窗确认。开启后请重新复制接入说明发给 Muse。"),
                           action: t("开启命令执行"),
                           execute: async () => (await bridge.run(t("正在开启命令执行"), "set_exec_enabled", { enabled: true }, t("命令执行已开启，可重新复制接入说明发给 Muse"))).ok,
                         });

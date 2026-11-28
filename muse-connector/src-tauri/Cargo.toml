@@ -48,6 +48,13 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["NSPasteboard", "NSPasteboardItem", "bitflags"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSData", "NSLocale", "NSString"] }
 
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+# Direct dependency for the macOS port (and the Linux dev-only handle
+# backend): openat-based handle traversal (core/handle), rlimits +
+# process-group control (core/sandbox) and gethostname.
+# Already in Cargo.lock as a transitive dependency, so --locked builds stay offline.
+libc = "0.2"
+
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 

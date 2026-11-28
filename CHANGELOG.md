@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 新增功能
+- **macOS 移植：Spotlight 搜索与受限环境命令执行**：在上游 macOS 支持的基础上，文件搜索改用系统 Spotlight（`mdfind`，按授权目录限定范围），Spotlight 未覆盖的路径回落内置目录遍历索引；命令执行在 macOS 上可用，在受限环境（工作目录锁定、精简环境变量、内存上限、进程组清理）内运行受控 `zsh`。**macOS 没有内核级写隔离**，不要把受限环境当成沙箱信任。完整说明与验证状态见 [MAC-PORT.md](MAC-PORT.md)。
+  - 新增 macOS GitHub Actions 工作流（`.github/workflows/macos.yml`）。
+
+### 问题修复
+- **macOS 不再把 Tailscale 图形应用当命令行工具用**：Tailscale for Mac 的应用包里只有图形界面程序，`/usr/local/bin/tailscale` 也只是包它的外壳脚本；从图形应用里启动它查配置时可能吐不出任何内容（或直接挂住），首次配置 2/4 就会报「无法解析 Tailscale 配置」。现改为只认真正的命令行安装（Homebrew 等），解析失败与工具报错里附上所用工具路径与原始输出，Funnel 一次性授权链接也能在报错里直接看到。
+- **反斜杠穿越测试仅在 Windows 上运行**：Unix 上反斜杠是合法文件名字符，不是穿越语义。
+
 ### 安全与稳定性加固
 - **发布产物增加构建来源证明**：发布工作流为 Windows / Linux / macOS 三个平台的发布资产生成 GitHub 构建来源证明（build provenance attestation），用户可通过 `gh attestation verify` 校验下载的二进制确实由本仓库源码在 GitHub Actions 中构建，未被替换或篡改。
 

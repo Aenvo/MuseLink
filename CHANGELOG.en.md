@@ -6,6 +6,14 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 
 ## [Unreleased]
 
+### New Features
+- **macOS port: Spotlight search and restricted-environment command execution**: On top of upstream macOS support, file search now uses system Spotlight (`mdfind`, scoped to authorized directories), falling back to the built-in directory-walk index for paths Spotlight does not cover; command execution is available on macOS, running controlled `zsh` inside a restricted environment (locked working directory, trimmed environment, memory limit, process-group cleanup). **macOS has no kernel-level write isolation** — do not trust the restricted environment as a sandbox. Full notes and verification status: [MAC-PORT.md](MAC-PORT.md).
+  - Adds a dedicated macOS GitHub Actions workflow (`.github/workflows/macos.yml`).
+
+### Bug Fixes
+- **macOS no longer treats the Tailscale GUI app as a CLI tool**: the Tailscale for Mac app bundle contains only the GUI binary, and `/usr/local/bin/tailscale` is just a wrapper script around it; launching it from the GUI app to read configuration could return nothing or hang, failing first-time setup step 2/4 with "cannot parse Tailscale configuration". Only a real CLI install (e.g. Homebrew) is accepted now, and parse failures and tool errors include the tool path and raw output; the one-time Funnel authorization link is also shown in the error.
+- **Backslash-traversal test runs on Windows only**: on Unix a backslash is a legal filename character, not a traversal.
+
 ### Security & Stability
 - **Build provenance attestation for release artifacts**: The release workflow now generates GitHub build provenance attestations for the Windows / Linux / macOS release assets, so users can verify with `gh attestation verify` that a downloaded binary was built from this repository's source on GitHub Actions and has not been substituted or tampered with.
 

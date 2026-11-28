@@ -12,8 +12,10 @@ mod index_storage;
 #[cfg(windows)]
 pub(crate) mod job;
 pub mod path_guard;
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 pub(crate) mod sandbox;
 pub mod search;
+#[cfg(target_os = "macos")]
+mod spotlight;
 pub mod storage;
 pub mod token;

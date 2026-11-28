@@ -162,7 +162,15 @@ fn copy_agent_token(
         let owner = window.hwnd().map_err(|_| "无法读取连接器窗口")?;
         clipboard::copy_secret(owner.0, &secret).map_err(str::to_owned)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // Native secret pasteboard (`NSPasteboard` with ConcealedType /
+        // TransientType, CurrentHostOnly), so the token stays out of
+        // clipboard history and Universal Clipboard sync.
+        let _ = window;
+        clipboard::copy_secret(&secret).map_err(str::to_owned)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = window;
         clipboard::copy_secret(&secret).map_err(str::to_owned)
@@ -396,7 +404,7 @@ async fn check_legacy(state: tauri::State<'_, Services>) -> Result<legacy::Legac
         .map_err(|_| "旧系统检测未完成".to_string())?
 }
 async fn prior_funnel() -> Option<Value> {
-    let exe = tunnel::discover_executable("tailscale.exe")?;
+    let exe = tunnel::discover_executable(&tunnel::exe_file_name("tailscale"))?;
     serde_json::from_str(
         &tunnel::run_cli(&exe, &["funnel", "status", "--json"])
             .await
@@ -478,6 +486,8 @@ fn open_tool_setup(tool: String, app: tauri::AppHandle) -> Result<(), String> {
     let url = match tool.as_str() {
         "tailscale" => {
             if cfg!(target_os = "macos") {
+                // Standalone app (not the Mac App Store variant): its CLI is
+                // what `tailscale funnel` needs.
                 "https://tailscale.com/download/mac"
             } else {
                 "https://tailscale.com/download/windows"
@@ -495,7 +505,20 @@ fn open_tool_setup(tool: String, app: tauri::AppHandle) -> Result<(), String> {
             "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
         }
         "domains" => "https://dash.cloudflare.com/",
-        "everything" => "https://www.voidtools.com/support/everything/installing_everything/",
+        "everything" => {
+            if cfg!(windows) {
+                "https://www.voidtools.com/support/everything/installing_everything/"
+            } else if cfg!(target_os = "macos") {
+                // Everything is Windows-only; macOS search runs on
+                // Spotlight, which needs no install.
+                return Err(
+                    "Everything 仅支持 Windows；macOS 使用系统自带的 Spotlight 搜索，无需安装"
+                        .into(),
+                );
+            } else {
+                return Err("Everything 仅支持 Windows".into());
+            }
+        }
         "macos_full_disk_access" if cfg!(target_os = "macos") => {
             "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
         }
@@ -513,7 +536,8 @@ async fn cloudflare_action(
     state: tauri::State<'_, Services>,
 ) -> Result<Value, String> {
     state.profile.require_production()?;
-    let exe = tunnel::discover_executable("cloudflared.exe").ok_or("请先安装 cloudflared")?;
+    let exe = tunnel::discover_executable(&tunnel::exe_file_name("cloudflared"))
+        .ok_or("请先安装 cloudflared")?;
     match action.as_str() {
         "login" => {
             let mut cmd = tunnel::command(&exe);

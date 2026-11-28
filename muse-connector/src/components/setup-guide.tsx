@@ -90,7 +90,8 @@ export default function SetupGuide({
   const waiting = status.health === "Starting" || status.health === "Stopping";
   const tailscale = kind === "tailscale";
   const installed = providerToolAvailable(snapshot);
-  const instructions = address && deviceName.canCopy ? connectorBrief(language, address, trial.instruction, deviceName.saved, snapshot.exec_enabled) : null;
+  const isMac = snapshot.platform === "macos";
+  const instructions = address && deviceName.canCopy ? connectorBrief(language, address, trial.instruction, deviceName.saved, snapshot.exec_enabled, snapshot.platform) : null;
 
   useEffect(() => setCopied(null), [deviceName.saved]);
 
@@ -235,7 +236,7 @@ export default function SetupGuide({
       content = <>
         {readConfirmed && !desktop.desired_enabled ? <p>{t("首次试用已确认，当前连接已暂停。")}</p> : null}
         <p>{tailscale
-          ? installed ? t("在 Windows 托盘登录 Tailscale，按提示完成首次 Funnel 授权。") : t("先下载安装 Tailscale for Windows，完成后重新检测。")
+          ? installed ? (isMac ? t("在 macOS 菜单栏登录 Tailscale，按提示完成首次 Funnel 授权。") : t("在 Windows 托盘登录 Tailscale，按提示完成首次 Funnel 授权。")) : (isMac ? t("先下载安装 Tailscale for Mac，完成后重新检测。") : t("先下载安装 Tailscale for Windows，完成后重新检测。"))
           : installed ? t("当前使用 {0}。开启连接后会生成公网地址。", t(providerLabels[kind])) : t("先安装 Cloudflare 的 cloudflared 工具，完成后重新检测。")}</p>
         {desktop.desired_enabled && status.note !== actionError?.message ? <p className="break-words" role="status">{diagnostic(status.note)}</p> : null}
         <div className="flex flex-wrap gap-2">
@@ -247,7 +248,7 @@ export default function SetupGuide({
         {tailscale && installed ? <>
           <Button className="self-start px-0" size="sm" variant="link" aria-expanded={showTailscaleHelp} aria-controls="setup-tailscale-help" onClick={() => setShowTailscaleHelp(value => !value)}>{t("查看登录与 Funnel 授权")}</Button>
           {showTailscaleHelp ? <div id="setup-tailscale-help" className="flex flex-wrap gap-2">
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => openSetup("tailscale_login")}>{t("Windows 登录说明")}<ExternalLink data-icon="inline-end" /></Button>
+            <Button size="sm" variant="outline" disabled={busy} onClick={() => openSetup("tailscale_login")}>{isMac ? t("macOS 登录说明") : t("Windows 登录说明")}<ExternalLink data-icon="inline-end" /></Button>
             <Button size="sm" variant="outline" disabled={busy} onClick={() => openSetup("tailscale_funnel")}>{t("Funnel 授权说明")}<ExternalLink data-icon="inline-end" /></Button>
           </div> : null}
         </> : null}

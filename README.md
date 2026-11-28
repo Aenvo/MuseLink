@@ -30,7 +30,7 @@
 - **跨网远程直连**：无需公网固定 IP 或端口映射，通过 Tailscale Funnel（默认）或自有域名 Cloudflare 命名隧道建立加密 HTTPS 入口，随时随地从 Muse 远程连接本机。
 - **多设备按名调度**：同时部署在家用台式机、办公笔记本、Mac 与 Linux 主机上；每台设备独立命名、独立连接器与独立专用令牌，在 Muse 中按设备名精准点名不串台，支持在线改名与回执同步。
 - **细粒度授权与高速传输**：支持指定文件夹或本机固定磁盘授权，默认保护凭证与敏感系统路径，经内核句柄校验防逃逸，支持快速索引搜索、大文件分片与原生二进制直传。
-- **沙箱命令与本机审批（Windows）**：默认关闭；按需开启后可在每工作区独立 SID 的写受限沙箱内远程运行项目命令，敏感操作自动置顶弹窗审批并实时长轮询回传结果。
+- **沙箱命令与本机审批（Windows 写受限沙箱；macOS 受限环境）**：默认关闭；按需开启后可在每工作区独立 SID 的写受限沙箱内远程运行项目命令，敏感操作自动置顶弹窗审批并实时长轮询回传结果。macOS 上运行在受限环境中（工作目录、精简环境变量与内存上限），**没有内核级写隔离**。
 
 ## 界面预览
 
@@ -63,7 +63,7 @@
 | 多设备协同 | 同时接入多台 Windows / Linux / macOS 电脑；每台设备拥有独立名称、连接器与专用令牌，在 Muse 中按设备名精准点名不串台，支持在线改名与回执自动同步。 |
 | 文件授权 | 选择指定文件夹及其子目录，或从本机固定磁盘中选择授权范围，默认保护凭证与敏感系统路径。 |
 | 远程文件工具 | 让 Muse 快速按文件名检索、列出目录、读取与写入文件及建目录，支持大文件分片读取与 `raw=1` 原生二进制直传。 |
-| 受控命令执行 | 默认关闭；按需开启后，让 Muse 远程在授权项目子目录内运行开发工具与受控 PowerShell/cmd，运行于每工作区独立 SID 的 Windows 写受限沙箱与三档本机审批弹窗下。 |
+| 受控命令执行 | 默认关闭；按需开启后，让 Muse 远程在授权项目子目录内运行开发工具与受控 PowerShell/cmd，运行于每工作区独立 SID 的 Windows 写受限沙箱与三档本机审批弹窗下。macOS 上运行受控 zsh（/bin/zsh -c），使用受限环境（工作目录、精简环境变量与内存上限），**没有内核级写隔离**，详见 [MAC-PORT.md](MAC-PORT.md)。 |
 | 专用凭证 | 在「连接」生成并复制 Muse 接入说明与专用令牌，在「设置 → 数据」轮换、撤销或定位令牌文件，日志自动脱敏令牌。 |
 | 桌面管理 | 按时间、结果、范围与关键词检索日志，在「设置 → 数据」查看占用、清除/导出（JSONL/CSV）日志与管理本机索引；支持应用内检查更新、右下角新版本提醒与同步更新日志弹窗，支持开机静默自启、关闭时最小化到托盘、退出自动回收全部托管子进程，支持简体中文 / English / 日本語。 |
 
@@ -92,7 +92,7 @@
 
 ## 使用指南
 
-默认连接方式需要安装 [Tailscale](https://tailscale.com/download) 并登录。
+默认连接方式需要安装 [Tailscale](https://tailscale.com/download) 并登录。macOS 上请安装 [Tailscale for Mac（standalone 版，不要用 Mac App Store 版）](https://tailscale.com/download/mac)，详见 [MAC-PORT.md](MAC-PORT.md) 第 2 节。
 
 1. 在「概览」或「连接」点击「开始指引」。
 2. 选择要授权的文件夹或磁盘。磁盘模式默认选中所有可用的本机固定磁盘，展开下拉框即可调整。
@@ -107,7 +107,7 @@
 ## 权限与连接边界
 
 - **文件与敏感路径保护**：Muse 的操作受已保存的授权范围和当前系统账户权限约束。默认排除凭证私钥目录、含令牌配置与浏览器凭证库（如 `~/.muse-bridge`、`~/.ssh`、`~/.aws`、`~/.gnupg`、`~/.docker`、`~/.kube`、`~/.azure`、gcloud、`~/.npmrc`、`~/.pypirc`、macOS `~/Library/Keychains` 及 Chrome / Edge / Firefox 凭证容器），并对系统目录、启动项、Shell Profile、`.gitconfig` 与程序自身目录（含 macOS `.app` 包）启用默认写保护；文件读取与原子写入通过已校验的内核句柄完成。
-- **每工作区独立写受限沙箱**：命令执行默认关闭，可在「文件权限」按需开启（开启后请重新复制接入说明发给 Muse）。命令默认运行在 Windows 写受限沙箱（`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` 内存/进程数硬限制；执行超时由运行时轮询强制，并非 JobObject 的时间限制）中，按工作区路径派生独立 SID，写入范围限于当次指定的具体项目子目录与单任务隔离临时目录（禁止直接对盘符根目录执行，不同项目与父子目录之间互不可写）；但需注意，受限令牌同时包含 `Everyone`（S-1-1-0）与 `RESTRICTED`（S-1-5-12）SID，凡对这些 SID 开放写权限的位置（例如对 `Everyone` 可写的共享文件夹或自定义目录）同样可写。沙箱仅限制写入、不隔离读取，读取以当前执行用户的权限进行；同时剥离内部环境变量、失败即拒（绝不静默降级无沙箱）。
+- **每工作区独立写受限沙箱**：命令执行默认关闭，可在「文件权限」按需开启（开启后请重新复制接入说明发给 Muse）。命令默认运行在 Windows 写受限沙箱（`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` 内存/进程数硬限制；执行超时由运行时轮询强制，并非 JobObject 的时间限制）中，按工作区路径派生独立 SID，写入范围限于当次指定的具体项目子目录与单任务隔离临时目录（禁止直接对盘符根目录执行，不同项目与父子目录之间互不可写）；但需注意，受限令牌同时包含 `Everyone`（S-1-1-0）与 `RESTRICTED`（S-1-5-12）SID，凡对这些 SID 开放写权限的位置（例如对 `Everyone` 可写的共享文件夹或自定义目录）同样可写。沙箱仅限制写入、不隔离读取，读取以当前执行用户的权限进行；同时剥离内部环境变量、失败即拒（绝不静默降级无沙箱）。**macOS 没有写受限令牌与 JobObject 的等价物**：Mac 上命令运行在受限环境中（工作目录锁定、精简环境变量、内存上限、进程组清理），但仍以你的 macOS 用户身份运行，**没有内核级写隔离**，不要把它当成沙箱来信任，详见 [MAC-PORT.md](MAC-PORT.md) 第 3 节。
 - **三档风险分流与本机置顶审批**：
   - **自动放行**：项目内常见只读与标准开发构建/测试命令（如 `git status`/`diff`/`log`、`cargo test`/`check`、`pnpm build`、`pytest` 等），快速命令在短等待内直接返回 HTTP 200 与完整输出；纯只读直调命令不触碰工作区写权限。
   - **项目会话免打扰**：首次在某项目目录内使用 `powershell`/`cmd`、安装/变更依赖或 `git push` 时，自动唤醒并临时置顶本机审批窗（120 秒未确认自动拒绝），支持通过 `GET /agent/v1/exec/<job_id>?wait_ms=20000` 长轮询实时感知审批与执行结果（无需回到聊天手动回复），可选择「仅允许这一次」或「本次会话允许该项目」（4 小时有效、按目录严格隔离，可在「文件权限 → 收回会话授权」一键撤销）。
@@ -177,7 +177,26 @@ pnpm -C muse-connector tauri build --bundles app --config '{"bundle":{"createUpd
 
 **配置：** 从官网或 Mac App Store 安装 Tailscale 应用并登录即可；应用会自动发现应用包内的命令行工具（`/Applications/Tailscale.app/Contents/MacOS/Tailscale`），Homebrew 安装的 `tailscale` / `cloudflared`（`/opt/homebrew/bin`）同样会被发现。使用「管理本机磁盘（整机授权）」访问桌面、文稿或下载等受保护目录时，请在系统弹窗中点击允许，或在「系统设置 → 隐私与安全性」为 `MuseLink` 授予对应权限或「完全磁盘访问权限」。
 
-**限制：** 沙箱命令执行（`exec`）目前仅支持 Windows；在 macOS 上保持关闭并以失败收口。macOS 预构建包目前未签名、未公证，从浏览器下载后首次打开会被 Gatekeeper 拦截（请按上方「下载与安装」中的两步指引放行），也可直接按本节步骤本地从源码构建。
+**限制：** 沙箱命令执行（`exec`）在 macOS 上可用，但运行在受限环境中（工作目录锁定、精简环境变量、内存上限、进程组清理），**没有内核级写隔离**，不要把它当成沙箱来信任。macOS 预构建包目前未签名、未公证，从浏览器下载后首次打开会被 Gatekeeper 拦截（请按上方「下载与安装」中的两步指引放行），也可直接按本节步骤本地从源码构建。
+
+### macOS
+
+准备 macOS 13 Ventura 或以上、Xcode Command Line Tools（`xcode-select --install`）、Node.js 22.12 或更新版本、pnpm、Rust 工具链（`rustup.rs`）。在仓库根目录运行下面的命令启动开发环境。
+
+```bash
+pnpm -C muse-connector install --frozen-lockfile
+pnpm -C muse-connector tauri dev
+```
+
+以下命令用于构建前端、运行测试和生成 DMG 安装包。
+
+```bash
+pnpm -C muse-connector build
+cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+pnpm -C muse-connector tauri build --bundles dmg
+```
+
+安装包输出在 `muse-connector/src-tauri/target/release/bundle/dmg/`。应用尚未做 Apple 代码签名与公证，首次打开需在「系统设置 → 隐私与安全性」里点「仍要打开」。macOS 移植的完整说明、限制与验证状态见 [MAC-PORT.md](MAC-PORT.md)。
 
 ## 社区
 

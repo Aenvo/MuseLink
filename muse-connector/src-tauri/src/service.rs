@@ -21,6 +21,10 @@ use std::sync::{
     Arc, RwLock,
     atomic::{AtomicBool, Ordering},
 };
+// `OnceLock` caches the macOS hostname; only the macOS branch of
+// `suggested_device_name` uses it.
+#[cfg(target_os = "macos")]
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{Mutex, watch};
@@ -44,6 +48,9 @@ impl Drop for Runtime {
 pub struct Snapshot {
     pub run_id: String,
     pub profile: crate::profile::ProfileKind,
+    /// OS this build runs on: "windows" | "macos" | "other". The frontend
+    /// uses it to pick platform-specific copy (shell mode, sandbox wording).
+    pub platform: &'static str,
     pub initialized: bool,
     pub connection_configured: bool,
     pub access_configured: bool,
@@ -266,6 +273,13 @@ impl ServiceController {
         Snapshot {
             run_id: self.run_id.clone(),
             profile: self.profile.kind,
+            platform: if cfg!(windows) {
+                "windows"
+            } else if cfg!(target_os = "macos") {
+                "macos"
+            } else {
+                "other"
+            },
             initialized,
             connection_configured: legacy_active || agent_enabled,
             access_configured: legacy_active || file_access.is_some(),
@@ -292,9 +306,7 @@ impl ServiceController {
             home: self.profile.home.to_string_lossy().into(),
             config: self.api.file_view(),
             desktop: self.desktop_state(),
-            suggested_device_name: std::env::var("COMPUTERNAME")
-                .ok()
-                .filter(|name| valid_device_name(name)),
+            suggested_device_name: Self::suggested_device_name(),
             status: self.status(),
             stats: self.api.stats_snapshot(),
             dependencies: self.tool_status(),
@@ -533,6 +545,7 @@ impl ServiceController {
     pub(crate) fn invalidate_tool_status(&self) {
         *self.tools.lock().unwrap() = None;
     }
+
     fn tool_status(&self) -> Value {
         let mut tools = self.tools.lock().unwrap();
         if let Some((checked, status)) = &*tools
@@ -541,13 +554,49 @@ impl ServiceController {
             return status.clone();
         }
         let status = json!({
-            "tailscale": crate::tunnel::discover_executable("tailscale.exe").is_some(),
-            "cloudflared": crate::tunnel::discover_executable("cloudflared.exe").is_some(),
+            "tailscale": crate::tunnel::discover_executable(&crate::tunnel::exe_file_name("tailscale")).is_some(),
+            "cloudflared": crate::tunnel::discover_executable(&crate::tunnel::exe_file_name("cloudflared")).is_some(),
             "simulated": self.profile.is_development(),
         });
         *tools = Some((Instant::now(), status.clone()));
         status
     }
+
+    /// Suggested device name for the setup flow: `COMPUTERNAME` on Windows,
+    /// the local hostname (short form) on macOS.
+    fn suggested_device_name() -> Option<String> {
+        #[cfg(windows)]
+        {
+            std::env::var("COMPUTERNAME")
+                .ok()
+                .filter(|name| valid_device_name(name))
+        }
+        #[cfg(target_os = "macos")]
+        {
+            static HOSTNAME: OnceLock<Option<String>> = OnceLock::new();
+            HOSTNAME
+                .get_or_init(|| {
+                    let mut buf = [0 as libc::c_char; 256];
+                    // SAFETY: `buf` is a 256-byte stack buffer; `gethostname`
+                    // always NUL-terminates within the given length.
+                    if unsafe { libc::gethostname(buf.as_mut_ptr(), buf.len()) } != 0 {
+                        return None;
+                    }
+                    // SAFETY: `gethostname` NUL-terminated the buffer.
+                    let full = unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }
+                        .to_string_lossy()
+                        .into_owned();
+                    let short = full.split('.').next().unwrap_or(&full).to_owned();
+                    Some(short).filter(|name| valid_device_name(name))
+                })
+                .clone()
+        }
+        #[cfg(not(any(windows, target_os = "macos")))]
+        {
+            None
+        }
+    }
+
     pub(crate) fn desktop_state(&self) -> DesktopState {
         self.desktop.read().unwrap().clone()
     }
@@ -1102,7 +1151,18 @@ impl ServiceController {
         self.logs.runtime_entry(
             "info",
             if enabled {
-                "命令执行能力已开启（默认运行于写受限沙箱）"
+                #[cfg(windows)]
+                {
+                    "命令执行能力已开启（默认运行于写受限沙箱）"
+                }
+                #[cfg(target_os = "macos")]
+                {
+                    "命令执行能力已开启（默认运行于受限环境：工作目录、精简环境变量与内存上限；无内核级写隔离）"
+                }
+                #[cfg(not(any(windows, target_os = "macos")))]
+                {
+                    "命令执行能力已开启"
+                }
             } else {
                 "命令执行能力已关闭，待审批项与运行中任务已中止"
             },

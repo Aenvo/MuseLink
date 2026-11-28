@@ -68,7 +68,7 @@ impl TunnelObservation {
 }
 
 /// Platform-specific CLI file name: Windows binaries carry `.exe`, Unix ones do not.
-fn exe_file_name(base: &str) -> String {
+pub(crate) fn exe_file_name(base: &str) -> String {
     if cfg!(windows) {
         format!("{base}.exe")
     } else {
@@ -86,10 +86,40 @@ fn platform_exe_name(name: &str) -> &str {
     }
 }
 
-/// CLI shipped inside the macOS Tailscale app bundle.
+/// On macOS, Tailscale for Mac ships only the GUI executable inside its
+/// app bundle, and /usr/local/bin/tailscale is a shell wrapper around it.
+/// Spawned from a GUI parent neither answers `--json` queries reliably
+/// (empty output, or the call hangs), so `discover_executable` skips both
+/// and prefers a real CLI install (e.g. Homebrew). The bundle path is
+/// deliberately never a discovery candidate.
 #[cfg(target_os = "macos")]
-fn tailscale_app_bundle_exe() -> PathBuf {
-    PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
+fn is_gui_tailscale(path: &std::path::Path) -> bool {
+    use std::io::Read;
+    if path == std::path::Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale") {
+        return true;
+    }
+    if path == std::path::Path::new("/usr/local/bin/tailscale") {
+        // Tailscale for Mac installs a shell wrapper at this path; a
+        // Homebrew install on Intel Macs uses the same path for the real
+        // binary (a symlink into its Cellar). Only the wrapper is skipped.
+        if let Ok(meta) = std::fs::symlink_metadata(path) {
+            if meta.file_type().is_symlink() {
+                return false;
+            }
+        }
+        if let Ok(mut f) = std::fs::File::open(path) {
+            let mut head = [0u8; 2];
+            if f.read_exact(&mut head).is_ok() {
+                return head == *b"#!";
+            }
+        }
+        return true;
+    }
+    false
+}
+#[cfg(not(target_os = "macos"))]
+fn is_gui_tailscale(_path: &std::path::Path) -> bool {
+    false
 }
 
 pub fn discover_executable(name: &str) -> Option<PathBuf> {
@@ -97,11 +127,21 @@ pub fn discover_executable(name: &str) -> Option<PathBuf> {
     if let Some(found) = std::env::var_os("PATH").and_then(|p| {
         std::env::split_paths(&p)
             .map(|d| d.join(name))
-            .find(|p| p.is_file())
+            .find(|p| p.is_file() && !is_gui_tailscale(&p))
     }) {
         return Some(found);
     }
     let mut candidates = vec![];
+    #[cfg(target_os = "macos")]
+    {
+        // Homebrew puts both tools under /opt/homebrew/bin (Apple Silicon)
+        // or /usr/local/bin (Intel); the unix fallback below adds those
+        // paths, and the final find filters out the GUI wrapper that
+        // Tailscale for Mac installs at /usr/local/bin.
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join(".local/bin").join(name));
+        }
+    }
     if name == "tailscale.exe" {
         candidates.push(PathBuf::from(r"C:\Program Files\Tailscale\tailscale.exe"));
     }
@@ -132,29 +172,30 @@ pub fn discover_executable(name: &str) -> Option<PathBuf> {
         }
     }
     if cfg!(unix) {
-        candidates.push(PathBuf::from("/usr/local/bin").join(name));
         // Apple Silicon Homebrew lives here; GUI apps start with a minimal
         // PATH that does not include it, so PATH lookup alone misses brew
         // installs of tailscale / cloudflared.
         candidates.push(PathBuf::from("/opt/homebrew/bin").join(name));
+        candidates.push(PathBuf::from("/usr/local/bin").join(name));
         candidates.push(PathBuf::from("/usr/bin").join(name));
     }
-    // The macOS Tailscale app keeps its CLI inside the bundle under a
-    // capitalised file name; treat it like the Windows Program Files
-    // special case above.
-    #[cfg(target_os = "macos")]
-    if name == "tailscale" {
-        candidates.push(tailscale_app_bundle_exe());
-    }
-    candidates.into_iter().find(|p| p.is_file())
+    // The app-bundle GUI binary is deliberately never a candidate: see
+    // `is_gui_tailscale` above.
+    candidates
+        .into_iter()
+        .find(|p| p.is_file() && !is_gui_tailscale(p))
 }
 pub fn command(exe: &std::path::Path) -> Command {
-    let mut native = std::process::Command::new(exe);
+    // `creation_flags` only exists on Windows: set it via a shadowing
+    // binding there so the plain binding stays immutable elsewhere.
+    let native = std::process::Command::new(exe);
     #[cfg(windows)]
-    {
+    let native = {
         use std::os::windows::process::CommandExt;
+        let mut native = native;
         native.creation_flags(0x08000000);
-    }
+        native
+    };
     let mut cmd = Command::from(native);
     cmd.kill_on_drop(true);
     cmd
@@ -167,15 +208,23 @@ pub async fn run_cli(exe: &std::path::Path, args: &[&str]) -> Result<String, Str
         .map_err(|_| "命令超时，子进程已取消".to_string())?
         .map_err(|e| format!("工具启动失败：{}", e.kind()))?;
     if !out.status.success() {
+        // Keep the first few stderr lines: the Funnel one-time approval URL
+        // is printed a couple of lines after the headline error.
         let stderr = String::from_utf8_lossy(&out.stderr);
-        let first = stderr
+        let lines: Vec<&str> = stderr
             .lines()
-            .find(|l| !l.trim().is_empty())
-            .unwrap_or("请检查工具登录与权限");
+            .filter(|l| !l.trim().is_empty())
+            .take(3)
+            .collect();
+        let detail = if lines.is_empty() {
+            "请检查工具登录与权限".to_string()
+        } else {
+            lines.join(" / ")
+        };
         return Err(format!(
             "工具退出码 {:?}：{}",
             out.status.code(),
-            first.chars().take(300).collect::<String>()
+            detail.chars().take(400).collect::<String>()
         ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
@@ -237,8 +286,13 @@ impl TunnelManager {
                 let exe = discover_executable(&exe_file_name("tailscale"))
                     .ok_or("未检测到 Tailscale，请先安装并登录")?;
                 let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
-                let cfg: Value = serde_json::from_str(&raw)
-                    .map_err(|_| "无法解析 Tailscale 配置，未改变入口")?;
+                let cfg: Value = serde_json::from_str(&raw).map_err(|_| {
+                    format!(
+                        "无法解析 Tailscale 配置，未改变入口（工具：{}，原始输出：{}）",
+                        exe.display(),
+                        raw.chars().take(120).collect::<String>()
+                    )
+                })?;
                 ensure_exclusive_mapping(&cfg, port)?;
                 self.remember(settings, port)?;
                 // 先记归属再执行：超时/崩溃后可以识别本次未完成操作。
@@ -301,8 +355,13 @@ impl TunnelManager {
             let exe = discover_executable(&exe_file_name("tailscale"))
                 .ok_or("Tailscale 工具不可用，无法清理入口")?;
             let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
-            let cfg: Value =
-                serde_json::from_str(&raw).map_err(|_| "无法确认隧道归属，未撤销入口")?;
+            let cfg: Value = serde_json::from_str(&raw).map_err(|_| {
+                format!(
+                    "无法确认隧道归属，未撤销入口（工具：{}，原始输出：{}）",
+                    exe.display(),
+                    raw.chars().take(120).collect::<String>()
+                )
+            })?;
             ensure_exclusive_mapping(&cfg, self.port)?;
             if has_mapping(&cfg, self.port) {
                 run_cli(&exe, &["funnel", "--https=443", "off"]).await?;
@@ -368,10 +427,22 @@ impl TunnelManager {
 pub(crate) async fn observe_tailscale(port: u16) -> Result<TunnelObservation, String> {
     let exe = discover_executable(&exe_file_name("tailscale")).ok_or("未安装 Tailscale")?;
     let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
-    let cfg: Value = serde_json::from_str(&raw).map_err(|_| "Tailscale 状态未知：配置解析失败")?;
+    let cfg: Value = serde_json::from_str(&raw).map_err(|_| {
+        format!(
+            "Tailscale 状态未知：配置解析失败（工具：{}，原始输出：{}）",
+            exe.display(),
+            raw.chars().take(120).collect::<String>()
+        )
+    })?;
     let configured = has_mapping(&cfg, port);
-    let node: Value = serde_json::from_str(&run_cli(&exe, &["status", "--json"]).await?)
-        .map_err(|_| "节点状态解析失败")?;
+    let node_raw = run_cli(&exe, &["status", "--json"]).await?;
+    let node: Value = serde_json::from_str(&node_raw).map_err(|_| {
+        format!(
+            "节点状态解析失败（工具：{}，原始输出：{}）",
+            exe.display(),
+            node_raw.chars().take(120).collect::<String>()
+        )
+    })?;
     let online = node["BackendState"] == "Running" && node["Self"]["Online"] == true;
     let url = cfg["Web"].as_object().and_then(|web| {
         web.iter()
@@ -472,11 +543,13 @@ mod tests {
     use super::*;
     #[cfg(target_os = "macos")]
     #[test]
-    fn tailscale_bundle_path_points_into_the_app() {
-        assert_eq!(
-            tailscale_app_bundle_exe(),
-            PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale")
-        );
+    fn gui_tailscale_binaries_are_skipped() {
+        assert!(is_gui_tailscale(std::path::Path::new(
+            "/Applications/Tailscale.app/Contents/MacOS/Tailscale"
+        )));
+        assert!(!is_gui_tailscale(std::path::Path::new(
+            "/opt/homebrew/bin/tailscale"
+        )));
     }
     #[test]
     fn platform_exe_name_strips_exe_on_unix() {

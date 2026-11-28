@@ -30,7 +30,7 @@ export default function AgentConnection({
   const hasPermission = hasFileGrant(policy);
   const canIssue = hasPermission && !snapshot.setup_error;
   const origin = publicAddress(snapshot);
-  const instructions = ready && origin && deviceName.canCopy ? connectorBrief(language, origin, agentTrial(t, policy).instruction, deviceName.saved, execEnabled) : null;
+  const instructions = ready && origin && deviceName.canCopy ? connectorBrief(language, origin, agentTrial(t, policy).instruction, deviceName.saved, execEnabled, snapshot.platform) : null;
   const version = tokenVersion ?? null;
   const copyResult = instructions && clipboard?.instructions === instructions && clipboard.version === version ? clipboard : null;
   const busy = !!bridge.busy;

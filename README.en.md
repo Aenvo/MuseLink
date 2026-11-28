@@ -30,7 +30,7 @@
 - **Remote access from anywhere**: No static public IP or port forwarding needed—expose an encrypted HTTPS endpoint via Tailscale Funnel (default) or a Cloudflare named tunnel on your own domain so Muse can reach your computer across networks.
 - **Multi-device orchestration**: Deploy on your home desktop, work laptop, Mac, and Linux hosts at the same time. Each computer gets its own device name, connector, and dedicated token so you can target a specific device by name without cross-device mix-ups, with synced rename confirmation.
 - **Scoped file access & fast transfer**: Authorize selected folders or local fixed drives with built-in credential and system-path protection, OS handle verification against path escape, fast indexed search, chunked large-file reads, and raw binary streaming.
-- **Sandboxed commands with local approval (Windows)**: Off by default; when enabled, Muse can run project commands remotely inside a per-workspace write-restricted sandbox with foreground local approval dialogs and real-time long-polling feedback.
+- **Sandboxed commands with local approval (Windows write-restricted sandbox; macOS restricted environment)**: Off by default; when enabled, Muse can run project commands remotely inside a per-workspace write-restricted sandbox with foreground local approval dialogs and real-time long-polling feedback. On macOS commands run in a restricted environment (working directory, trimmed environment, memory limit) with **no kernel-level write isolation**.
 
 ## App preview
 
@@ -63,7 +63,7 @@ These screenshots show the MuseLink interface with sample folders, a demo addres
 | Multi-device collaboration | Connect multiple Windows, Linux, and macOS computers at once; each device has its own name, connector, and dedicated token so you can address it by name in Muse without mix-ups, with online rename and confirmation sync. |
 | File permissions | Authorize selected folders and their subfolders, or choose from local fixed drives, with built-in protection for credentials and sensitive system paths. |
 | Remote file tools | Let Muse search rapidly by file name, list folders, read and write files, and create folders, with chunked large-file reads and `raw=1` raw binary streaming. |
-| Controlled command execution | Off by default; when enabled, lets Muse remotely run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. |
+| Controlled command execution | Off by default; when enabled, lets Muse remotely run developer tools and controlled PowerShell/cmd inside authorized project subfolders under a per-workspace Windows write-restricted sandbox and 3-tier local approval dialog. On macOS it runs controlled zsh (/bin/zsh -c) in a restricted environment (working directory, trimmed environment, memory limit) with **no kernel-level write isolation**; see [MAC-PORT.md](MAC-PORT.md). |
 | Dedicated token | Generate and copy Muse connection instructions and the dedicated token under **Connection**; rotate, revoke, or locate the token under **Settings → Data**, with automatic token redaction in logs. |
 | Desktop controls | Filter and search logs by time range, result, scope, and keyword; inspect disk usage, clear or export logs (`JSONL`/`CSV`), and manage the local file index under **Settings → Data**; supports in-app update checks, dismissible update notices, synced in-app changelog/release-notes modals, silent launch at startup, configurable minimize-to-tray on close, clean child-process teardown on exit, and Simplified Chinese / English / Japanese UI. |
 
@@ -92,7 +92,7 @@ Use `SHA256SUMS.txt` from the same release to verify your download. The MuseLink
 
 ## Quick start
 
-For the default connection method, install [Tailscale](https://tailscale.com/download) and sign in.
+For the default connection method, install [Tailscale](https://tailscale.com/download) and sign in. On macOS, install [Tailscale for Mac (standalone build, not the Mac App Store version)](https://tailscale.com/download/mac); see [MAC-PORT.md](MAC-PORT.md) §2.
 
 1. On **Overview** or **Connection**, select **Start guide**.
 2. Choose the folders or drives to authorize. All available local fixed drives are selected by default in drive mode. Open the menu to narrow the selection.
@@ -107,7 +107,7 @@ File indexing starts in the background after you first save permissions. Manage 
 ## Access and connection boundaries
 
 - **File & sensitive-path protection**: Muse's file operations follow the saved access scope and the current OS account's permissions. Credential directories, token-bearing configs, and browser credential stores (such as `~/.muse-bridge`, `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.docker`, `~/.kube`, `~/.azure`, gcloud, `~/.npmrc`, `~/.pypirc`, macOS `~/Library/Keychains`, and Chrome / Edge / Firefox credential containers) are excluded by default, and system folders, Startup/autostart folders, shell profiles, `.gitconfig`, and the app directory (including macOS `.app` bundles) are write-protected by default. Reads and atomic writes are verified through open OS handles.
-- **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory and process-count hard limits; the execution timeout is enforced by runtime polling, not by a Job Object time limit) with a unique SHA-256-derived SID per workspace. Writes are restricted to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Note, however, that the restricting token also includes the `Everyone` (S-1-1-0) and `RESTRICTED` (S-1-5-12) SIDs, so any location granting write access to those SIDs (such as world-writable shared folders or custom-ACL directories) remains writable too. The sandbox restricts writes only; reads are not isolated and run with the executing user's permissions. Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution.
+- **Per-workspace write-restricted sandbox**: Local command execution is off by default and can be enabled under **File Access** (re-copy the setup instructions to Muse after enabling). Commands run inside a Windows write-restricted sandbox (`CreateRestrictedToken(WRITE_RESTRICTED)` + `JobObject` memory and process-count hard limits; the execution timeout is enforced by runtime polling, not by a Job Object time limit) with a unique SHA-256-derived SID per workspace. Writes are restricted to the targeted project subfolder and an isolated per-job temp directory (bare drive roots are rejected, and sibling or parent folders cannot write into each other). Note, however, that the restricting token also includes the `Everyone` (S-1-1-0) and `RESTRICTED` (S-1-5-12) SIDs, so any location granting write access to those SIDs (such as world-writable shared folders or custom-ACL directories) remains writable too. The sandbox restricts writes only; reads are not isolated and run with the executing user's permissions. Internal environment variables are stripped, and sandbox initialization fails closed without silently falling back to unsandboxed execution. **macOS has no equivalent of write-restricted tokens or JobObjects**: on a Mac, commands run in a restricted environment (locked working directory, trimmed environment, memory limit, process-group cleanup) but still as your macOS user account, with **no kernel-level write isolation** — do not trust it as a sandbox. See [MAC-PORT.md](MAC-PORT.md) §3.
 - **3-tier risk model & auto-elevated approval dialog**:
   - **Auto-allowed**: Standard read-only and project build/test commands (such as `git status`/`diff`/`log`, `cargo test`/`check`, `pnpm build`, `pytest`) run without interrupting you and return HTTP 200 directly when they finish quickly; pure read-only direct commands skip workspace write ACLs entirely.
   - **Per-project session approval**: First-time `powershell`/`cmd` usage, package installs/updates, or `git push` in a project wakes the MuseLink window to the foreground (120-second timeout defaults to deny) with long-polling via `GET /agent/v1/exec/<job_id>?wait_ms=20000` so Muse receives approvals and outputs immediately without waiting for a manual chat reply. Choose **Allow once** or **Allow project this session** (valid for 4 hours, strictly scoped per folder, revocable anytime via **Revoke session grants** in **File Access**).
@@ -177,7 +177,26 @@ The app bundle is written to `muse-connector/src-tauri/target/release/bundle/mac
 
 **Setup:** install the Tailscale app from the website or the Mac App Store and sign in; the app discovers the CLI inside the app bundle (`/Applications/Tailscale.app/Contents/MacOS/Tailscale`) automatically, and Homebrew installs of `tailscale` / `cloudflared` (`/opt/homebrew/bin`) are discovered too. When using **Manage local drives (full access)** to access protected folders such as Desktop, Documents, or Downloads, allow the macOS system prompt or grant `MuseLink` access (or **Full Disk Access**) under **System Settings → Privacy & Security**.
 
-**Limitation:** sandboxed command execution (`exec`) is Windows-only; on macOS it stays disabled and fails closed. Prebuilt macOS bundles are currently ad-hoc signed and not notarized, so browser-downloaded builds trigger Gatekeeper on first launch (follow the two-step instructions under **Download and install** above) or build locally from source using the commands here.
+**Limitation:** sandboxed command execution (`exec`) is available on macOS, but runs in a restricted environment (locked working directory, trimmed environment, memory limit, process-group cleanup) with **no kernel-level write isolation** — do not trust it as a sandbox. Prebuilt macOS bundles are currently ad-hoc signed and not notarized, so browser-downloaded builds trigger Gatekeeper on first launch (follow the two-step instructions under **Download and install** above) or build locally from source using the commands here.
+
+### macOS
+
+You'll need macOS 13 Ventura or later, Xcode Command Line Tools (`xcode-select --install`), Node.js 22.12 or later, pnpm, and the Rust toolchain (`rustup.rs`). Run these commands from the repository root to start development.
+
+```bash
+pnpm -C muse-connector install --frozen-lockfile
+pnpm -C muse-connector tauri dev
+```
+
+The following commands build the frontend, run the tests, and make a DMG installer.
+
+```bash
+pnpm -C muse-connector build
+cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+pnpm -C muse-connector tauri build --bundles dmg
+```
+
+The installer is written to `muse-connector/src-tauri/target/release/bundle/dmg/`. The app is not Apple-signed or notarized yet, so the first launch needs a click on **Open Anyway** in **System Settings → Privacy & Security**. For the full macOS port notes, limitations, and verification status, see [MAC-PORT.md](MAC-PORT.md).
 
 ## Community
 

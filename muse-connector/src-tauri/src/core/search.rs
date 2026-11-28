@@ -526,11 +526,11 @@ pub struct SearchIndex {
     cache_write: Mutex<()>,
     state: Mutex<State>,
     dirty: AtomicBool,
-    #[cfg(windows)]
+    #[cfg(any(windows, target_os = "macos"))]
     external_pages: Mutex<VecDeque<ExternalCursor>>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 struct ExternalCursor {
     token: String,
     signature: u64,
@@ -555,14 +555,14 @@ impl SearchIndex {
             cache_write: Mutex::new(()),
             state: Mutex::new(State::default()),
             dirty: AtomicBool::new(false),
-            #[cfg(windows)]
+            #[cfg(any(windows, target_os = "macos"))]
             external_pages: Mutex::new(VecDeque::new()),
         }
     }
 
     pub fn mark_dirty(&self) {
         self.dirty.store(true, AtomicOrdering::Release);
-        #[cfg(windows)]
+        #[cfg(any(windows, target_os = "macos"))]
         self.external_pages.lock().unwrap().clear();
     }
 
@@ -686,6 +686,142 @@ impl SearchIndex {
             if !add_hit(&mut output, hit, query.limit, &mut bytes) {
                 if !scanning {
                     let token = format!("ev-{}", super::token::generate());
+                    let mut pages = self.external_pages.lock().unwrap();
+                    pages.retain(|page| page.expires > now);
+                    if pages.len() >= 16 {
+                        pages.pop_front();
+                    }
+                    pages.push_back(ExternalCursor {
+                        token: token.clone(),
+                        signature,
+                        scope,
+                        entries: entries.clone(),
+                        position: index,
+                        covered,
+                        backend,
+                        expires: now + CURSOR_TTL,
+                    });
+                    output.next_cursor = Some(token);
+                }
+                break;
+            }
+        }
+        check_cancel(cancel)?;
+        Ok(Some(output))
+    }
+
+    /// macOS mirror of `search_everything`: fast name search via Spotlight.
+    /// Same contract — `Ok(None)` means "engine unavailable or not covering
+    /// this scope", so the caller falls back to the built-in index.
+    #[cfg(target_os = "macos")]
+    pub(super) fn search_spotlight(
+        &self,
+        engine: &super::spotlight::Spotlight,
+        roots: &BTreeMap<String, PathBuf>,
+        authorized_roots: &[PathBuf],
+        excluded: &[PathBuf],
+        request: &SearchRequest,
+        cancel: &AtomicBool,
+        allows: &impl Fn(&str, &str) -> bool,
+    ) -> Result<Option<SearchResponse>, SearchError> {
+        check_cancel(cancel)?;
+        let scope = Arc::new(Scope::new(roots, excluded)?);
+        let query = Query::new(request, &scope)?;
+        let signature = query.signature();
+        let now = Instant::now();
+        let (entries, position, covered, scanning, backend) = if let Some(cursor) = &request.cursor
+        {
+            if !cursor.starts_with("sp-") {
+                return Ok(None);
+            }
+            let pages = self.external_pages.lock().unwrap();
+            let page = pages
+                .iter()
+                .find(|page| {
+                    page.token == *cursor
+                        && page.signature == signature
+                        && page.scope == scope
+                        && page.expires > now
+                })
+                .ok_or(SearchError::CursorExpired)?;
+            (
+                page.entries.clone(),
+                page.position,
+                page.covered,
+                false,
+                page.backend,
+            )
+        } else {
+            // Both the requested and authorized engine scopes must use the same root form.
+            let roots: Vec<_> = roots.values().cloned().collect();
+            let Some(candidates) = engine.query(&roots, authorized_roots, &request.name, cancel)
+            else {
+                return Ok(None);
+            };
+            if !candidates.covered && !candidates.scanning {
+                // The built-in index can keep paging and ranking past the candidate budget.
+                return Ok(None);
+            }
+            let backend = "spotlight";
+            let covered = candidates.covered;
+            let mut unique = BTreeSet::new();
+            let mut entries = Vec::new();
+            for path in candidates.paths {
+                check_cancel(cancel)?;
+                for (root, (alias, base)) in scope.roots.iter().enumerate() {
+                    if let Some(entry) = external_entry(&path, root, alias, base, &scope, allows)
+                        && query.matches(&entry)
+                        && unique.insert((root, entry.path.to_uppercase()))
+                    {
+                        entries.push(entry);
+                    }
+                }
+            }
+            entries.sort_unstable_by(Entry::rank);
+            (Arc::new(entries), 0, covered, candidates.scanning, backend)
+        };
+
+        let state = if scanning {
+            "indexing"
+        } else if covered {
+            "ready"
+        } else {
+            "partial"
+        };
+        let mut output = SearchResponse {
+            hits: Vec::new(),
+            complete: covered && !scanning,
+            scanning,
+            next_cursor: None,
+            backend,
+            scopes: scope
+                .roots
+                .iter()
+                .map(|(root, _)| SearchScope {
+                    root: root.clone(),
+                    state,
+                })
+                .collect(),
+            retry_after_ms: scanning.then_some(3000),
+        };
+        let mut bytes = 512;
+        for (index, entry) in entries.iter().enumerate().skip(position) {
+            check_cancel(cancel)?;
+            let path = scope.roots[entry.root].1.join(&entry.path);
+            if path
+                .parent()
+                .is_none_or(|parent| fs::read_dir(parent).is_err())
+            {
+                continue;
+            }
+            let Some(hit) =
+                live_hit(entry, &scope, allows).filter(|hit| query.matches_time(hit.modified_ms))
+            else {
+                continue;
+            };
+            if !add_hit(&mut output, hit, query.limit, &mut bytes) {
+                if !scanning {
+                    let token = format!("sp-{}", super::token::generate());
                     let mut pages = self.external_pages.lock().unwrap();
                     pages.retain(|page| page.expires > now);
                     if pages.len() >= 16 {
@@ -1053,7 +1189,7 @@ fn live_hit(
     })
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "macos"))]
 fn external_entry(
     path: &Path,
     root: usize,

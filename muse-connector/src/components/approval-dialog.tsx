@@ -17,8 +17,12 @@ import type { ApprovalDecision, ApprovalView, BridgeModel } from "@/lib/use-brid
 const riskTagLabels = {
   sensitive_path: "涉及敏感目录",
   unsandboxed: "跳出写受限沙箱",
+  unsandboxed_mac: "跳出受限环境",
   shell_powershell: "PowerShell 脚本",
   shell_cmd: "cmd 命令行",
+  shell_zsh: "zsh 脚本",
+  privilege_escalation: "提权操作",
+  piped_remote_code: "管道执行远程代码",
   system_admin_tool: "系统管理工具",
   obfuscated_command: "疑似编码或混淆命令",
   remote_force_push: "强制推送远端仓库",
@@ -38,6 +42,7 @@ type RiskTagKey = keyof typeof riskTagLabels;
 function modeLabel(mode: ApprovalView["mode"]) {
   if (mode === "powershell") return "PowerShell";
   if (mode === "cmd") return "cmd";
+  if (mode === "shell") return "zsh";
   return "直调程序";
 }
 
@@ -45,6 +50,7 @@ export default function ApprovalDialog({ bridge }: { bridge: BridgeModel }) {
   const { t } = useLanguage();
   const approvals = bridge.snapshot?.pending_approvals ?? [];
   const current = approvals[0] ?? null;
+  const isMac = bridge.snapshot?.platform === "macos";
   const [now, setNow] = useState(() => Date.now());
   const [submitting, setSubmitting] = useState(false);
 
@@ -110,7 +116,7 @@ export default function ApprovalDialog({ bridge }: { bridge: BridgeModel }) {
         <div className="flex flex-col gap-3 text-sm">
           <div className="flex flex-wrap items-center gap-2">
             <Badge variant={highRisk ? "destructive" : "secondary"}>
-              {current.sandboxed ? t("写受限沙箱") : t("无沙箱（高风险）")}
+              {current.sandboxed ? (isMac ? t("受限环境") : t("写受限沙箱")) : t("无沙箱（高风险）")}
             </Badge>
             <Badge variant="outline">
               {current.mode === "direct" ? t("直调程序") : modeLabel(current.mode)}
@@ -143,11 +149,16 @@ export default function ApprovalDialog({ bridge }: { bridge: BridgeModel }) {
 
           {current.risk_tags.length > 0 ? (
             <div className="flex flex-wrap gap-1.5">
-              {current.risk_tags.map((tag) => (
-                <Badge key={tag} variant="outline">
-                  {tag in riskTagLabels ? t(riskTagLabels[tag as RiskTagKey]) : tag}
-                </Badge>
-              ))}
+              {current.risk_tags.map((tag) => {
+                // macOS copy: the confinement is called a restricted
+                // environment, not a write-restricted sandbox.
+                const labelKey = tag === "unsandboxed" && isMac ? "unsandboxed_mac" : tag;
+                return (
+                  <Badge key={tag} variant="outline">
+                    {labelKey in riskTagLabels ? t(riskTagLabels[labelKey as RiskTagKey]) : tag}
+                  </Badge>
+                );
+              })}
             </div>
           ) : null}
 

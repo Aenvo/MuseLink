@@ -106,9 +106,9 @@ function AccessEditor({ bridge, saved, initialRoots, platform, guided, onSaved }
   bridge: BridgeModel;
   saved: FileAccessPolicy | null;
   initialRoots: FileAccessPolicy["roots"];
-  platform?: string;
   guided: boolean;
   onSaved: () => void;
+  platform: Snapshot["platform"];
 }) {
   const { t, diagnostic } = useLanguage();
   const prefix = useId();

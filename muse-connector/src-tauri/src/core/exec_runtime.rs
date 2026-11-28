@@ -1,6 +1,8 @@
 //! 受控命令执行运行时：异步作业、短等待直返、桌面通用审批队列、项目级会话授权与资源回收。
 
 use std::collections::HashMap;
+// Only `read_bounded` (Windows/macOS) uses `Read`.
+#[cfg(any(windows, target_os = "macos"))]
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +24,8 @@ const MAX_RETAINED_JOBS: usize = 64;
 const JOB_RETENTION: Duration = Duration::from_secs(15 * 60);
 const APPROVAL_TTL: Duration = Duration::from_secs(120);
 const SESSION_TTL: Duration = Duration::from_secs(4 * 60 * 60);
+// Only the Windows/macOS `run_process` implementations read process output.
+#[cfg(any(windows, target_os = "macos"))]
 const MAX_STREAM_BYTES: usize = 128 * 1024;
 pub(crate) const MAX_STATUS_WAIT_MS: u64 = 25_000;
 
@@ -1031,6 +1035,11 @@ fn run_process(
             );
             (cmd_exe, line, format!("cmd: {script}"))
         }
+        // `shell` (zsh) is macOS-only; `validate_request` rejects it on
+        // Windows, but the match must still be exhaustive.
+        ExecMode::Shell => {
+            return Err("shell mode is only supported on macOS".into());
+        }
     };
 
     if cancel.load(Ordering::Acquire) {
@@ -1129,7 +1138,129 @@ fn run_process(
     })
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+fn run_process(
+    req: &ValidatedExec,
+    workspace_dir: &Path,
+    job_temp: &Path,
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<ProcessOutcome, String> {
+    use super::sandbox::{
+        DEFAULT_EXEC_MEMORY_BYTES, JobLimits, SpawnConfig, display_command, resolve_program,
+        shell_executable, spawn,
+    };
+
+    let (application, args, display_cmd) = match req.mode {
+        ExecMode::Direct => {
+            let (resolved, _is_batch) = resolve_program(&req.program)
+                .ok_or_else(|| format!("program not found in PATH: {}", req.program))?;
+            let display = display_command(std::ffi::OsStr::new(&req.program), &req.args);
+            (resolved, req.args.clone(), display)
+        }
+        ExecMode::Shell => {
+            let script = req.command.as_deref().unwrap_or_default();
+            let shell = shell_executable();
+            let shell_name = shell
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "zsh".to_string());
+            (
+                shell,
+                vec!["-c".to_string(), script.to_owned()],
+                format!("{shell_name} -c {script}"),
+            )
+        }
+        // `validate_request` rejects these on macOS; unreachable in practice.
+        ExecMode::Powershell | ExecMode::Cmd => {
+            return Err("powershell and cmd are not available on macOS".into());
+        }
+    };
+
+    let write_workspace = !super::exec_policy::is_read_only_direct(req);
+    let mut proc = match spawn(
+        &SpawnConfig {
+            application,
+            args,
+            cwd: workspace_dir.to_path_buf(),
+            temp_dir: job_temp.to_path_buf(),
+            sandboxed: !req.unsandboxed,
+            write_workspace,
+            limits: JobLimits {
+                memory_bytes: Some(DEFAULT_EXEC_MEMORY_BYTES),
+            },
+        },
+        Some(cancel),
+    ) {
+        Ok(proc) => proc,
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted || cancel.load(Ordering::Acquire) => {
+            return Ok(ProcessOutcome {
+                exit_code: None,
+                stdout: String::new(),
+                stderr: String::new(),
+                truncated: false,
+                timed_out: false,
+                cancelled: true,
+                display_cmd,
+            });
+        }
+        Err(e) => return Err(format!("failed to launch sandboxed command: {e}")),
+    };
+
+    let (mut stdout_file, mut stderr_file) = proc
+        .take_pipes()
+        .ok_or_else(|| "failed to capture command output pipes".to_string())?;
+    let out_reader = std::thread::spawn(move || read_bounded(&mut stdout_file, MAX_STREAM_BYTES));
+    let err_reader = std::thread::spawn(move || read_bounded(&mut stderr_file, MAX_STREAM_BYTES));
+
+    let deadline = Instant::now() + timeout;
+    let mut exit_code = None;
+    let mut timed_out = false;
+    let mut cancelled = false;
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            cancelled = true;
+            proc.terminate();
+            break;
+        }
+        if Instant::now() >= deadline {
+            timed_out = true;
+            proc.terminate();
+            break;
+        }
+        match proc.wait_timeout(50) {
+            Ok(Some(code)) => {
+                exit_code = Some(code);
+                break;
+            }
+            Ok(None) => {}
+            Err(_) => {
+                proc.terminate();
+                break;
+            }
+        }
+    }
+
+    // 主进程已退出或超时/取消：立即清理残留子进程树，
+    // 防止被后台孙进程继承的 stdout/stderr 管道写端保持打开导致读线程永久阻塞。
+    proc.terminate();
+    drop(proc);
+
+    let (stdout_bytes, out_trunc) = out_reader.join().unwrap_or_default();
+    let (stderr_bytes, err_trunc) = err_reader.join().unwrap_or_default();
+
+    Ok(ProcessOutcome {
+        exit_code,
+        stdout: String::from_utf8_lossy(&stdout_bytes).into_owned(),
+        stderr: String::from_utf8_lossy(&stderr_bytes).into_owned(),
+        truncated: out_trunc || err_trunc,
+        timed_out,
+        cancelled,
+        display_cmd,
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn run_process(
     _req: &ValidatedExec,
     _workspace_dir: &Path,
@@ -1137,9 +1268,10 @@ fn run_process(
     _cancel: &AtomicBool,
     _timeout: Duration,
 ) -> Result<ProcessOutcome, String> {
-    Err("sandboxed execution is only supported on Windows".into())
+    Err("sandboxed execution is only supported on Windows and macOS".into())
 }
 
+#[cfg(any(windows, target_os = "macos"))]
 fn read_bounded(reader: &mut impl Read, max_bytes: usize) -> (Vec<u8>, bool) {
     let mut out = Vec::new();
     let mut truncated = false;

@@ -10,18 +10,21 @@ import LogExportDialog from "@/components/log-export-dialog";
 import type { Confirmation } from "@/components/feedback";
 import { hasFileGrant } from "@/lib/agent-setup";
 import type { Language } from "@/lib/i18n";
-import { formatBytes, type BridgeModel, type IndexStatus } from "@/lib/use-bridge";
+import { formatBytes, type BridgeModel } from "@/lib/use-bridge";
 
 const indexLabels = {
   waiting: "等待建立索引",
   indexing: "正在建立索引",
   ready: "NTFS 索引已就绪",
+  ready_mac: "Spotlight 索引已就绪",
   directory_search: "目录索引已就绪",
   unavailable: "索引暂不可用",
   clearing: "正在清除索引",
   cleared: "索引已清除，自动建库已暂停",
   clear_failed: "索引清除失败，自动建库已暂停",
-} as const satisfies Record<IndexStatus["state"], string>;
+} as const;
+
+type IndexLabelKey = keyof typeof indexLabels;
 
 export default function Settings({
   bridge,
@@ -47,10 +50,13 @@ export default function Settings({
   const legacyApiEnabled = s.legacy_api_enabled;
   const canToggleLegacyApi = legacyApiEnabled || s.legacy_api_can_enable;
 
+  // On macOS the "ready" state means the Spotlight backend is usable, not
+  // NTFS, so the label switches accordingly.
+  const indexLabelKey: IndexLabelKey = indexStatus.state === "ready" && s.platform === "macos" ? "ready_mac" : indexStatus.state;
   const indexDescription = `${
     !savedSearch && indexStatus.state === "waiting"
       ? t("保存搜索授权后，连接器会在后台建立索引。")
-      : t(indexLabels[indexStatus.state])
+      : t(indexLabels[indexLabelKey])
   }${indexStatus.bytes != null ? t(" · 占用 {0}", formatBytes(indexStatus.bytes)) : ""}`;
 
   return (

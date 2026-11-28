@@ -1,0 +1,73 @@
+name: macOS
+
+on:
+  push:
+    branches:
+      - main
+      - "codex/**"
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    name: Build and test
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: "1"
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: muse-connector/pnpm-lock.yaml
+
+      - name: Add macOS Rust targets
+        run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+
+      - name: Show toolchain
+        run: |
+          node --version
+          pnpm --version
+          rustc -vV
+          cargo fmt --version
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: muse-connector/src-tauri
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path muse-connector/src-tauri/Cargo.toml --all -- --check
+
+      - name: Install locked dependencies
+        run: pnpm -C muse-connector install --frozen-lockfile
+
+      - name: Build frontend
+        run: pnpm -C muse-connector build
+
+      - name: Run Rust tests
+        run: cargo test --manifest-path muse-connector/src-tauri/Cargo.toml --locked
+
+      - name: Check Apple Silicon target
+        run: cargo check --manifest-path muse-connector/src-tauri/Cargo.toml --locked --target aarch64-apple-darwin
+
+      - name: Check Intel target
+        run: cargo check --manifest-path muse-connector/src-tauri/Cargo.toml --locked --target x86_64-apple-darwin

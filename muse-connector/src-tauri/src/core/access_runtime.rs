@@ -103,6 +103,8 @@ pub(crate) struct AccessRuntime {
     index_lifecycle: Arc<Mutex<IndexLifecycle>>,
     #[cfg(windows)]
     everything: Option<super::everything::Everything>,
+    #[cfg(target_os = "macos")]
+    spotlight: Option<super::spotlight::Spotlight>,
     search_slot: Arc<Semaphore>,
     pub(crate) legacy_requests: RwLock<()>,
 }
@@ -202,6 +204,8 @@ impl AccessRuntime {
                     &profile.home,
                     !profile.is_development(),
                 ),
+                #[cfg(target_os = "macos")]
+                spotlight: super::spotlight::Spotlight::discover(&profile.home),
                 search_slot: Arc::new(Semaphore::new(1)),
                 legacy_requests: RwLock::new(()),
             }),
@@ -554,7 +558,10 @@ impl AccessRuntime {
             IndexPhase::Indexing
         } else if !result.complete {
             IndexPhase::Unavailable
-        } else if matches!(result.backend, "everything_ntfs" | "everything_mixed") {
+        } else if matches!(
+            result.backend,
+            "everything_ntfs" | "everything_mixed" | "spotlight"
+        ) {
             IndexPhase::Ready
         } else {
             IndexPhase::DirectorySearch
@@ -587,6 +594,11 @@ impl AccessRuntime {
     pub(crate) fn stop_search_engine(&self) {
         #[cfg(windows)]
         if let Some(engine) = &self.everything {
+            engine.stop_managed();
+        }
+        // macOS: Spotlight has no managed instance; `stop_managed` is a no-op.
+        #[cfg(target_os = "macos")]
+        if let Some(engine) = &self.spotlight {
             engine.stop_managed();
         }
     }
@@ -1005,6 +1017,20 @@ impl AccessRuntime {
         {
             return Ok(response);
         }
+        #[cfg(target_os = "macos")]
+        if let Some(engine) = &self.spotlight
+            && let Some(response) = index.search_spotlight(
+                engine,
+                roots,
+                _authorized_roots,
+                &excluded,
+                request,
+                cancel,
+                allows,
+            )?
+        {
+            return Ok(response);
+        }
         index.search(roots, &excluded, request, cancel, allows)
     }
 }
@@ -1353,6 +1379,24 @@ fn production_protection(env: &SensitiveRoots) -> (Vec<PathBuf>, Vec<PathBuf>) {
         }
     }
 
+    // macOS: persistence mechanisms and the system itself. (The Windows
+    // branches above no-op here — their env vars are absent on Mac — but
+    // these paths need explicit protection.)
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = &env.user_home {
+            push_unique(&mut write_protected, home.join("Library/LaunchAgents"));
+        }
+        for path in [
+            "/Library/LaunchAgents",
+            "/Library/LaunchDaemons",
+            "/System",
+            "/private/etc/sudoers.d",
+        ] {
+            push_unique(&mut write_protected, PathBuf::from(path));
+        }
+    }
+
     (protected, write_protected)
 }
 
@@ -1447,10 +1491,18 @@ mod tests {
     #[tokio::test]
     async fn cleared_index_stays_cleared_on_restart_and_policy_change() {
         let fixture = Fixture::new();
+        // `mut` is only needed on Windows/macOS (to clear the search engine
+        // below); on Linux the binding is never mutated.
+        #[allow(unused_mut)]
         let mut access = fixture.open();
         #[cfg(windows)]
         {
             Arc::get_mut(&mut access).unwrap().everything = None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // Spotlight doesn't index the test temp dir; force the built-in index.
+            Arc::get_mut(&mut access).unwrap().spotlight = None;
         }
         access.save(Fixture::full_search(), false).unwrap();
         access.issue_agent_token(|_| {}).unwrap();
@@ -1471,10 +1523,17 @@ mod tests {
         assert_eq!(access.index_status().bytes, Some(0));
         drop(access);
 
+        // `mut` is only needed on Windows/macOS (to clear the search engine
+        // below); on Linux the binding is never mutated.
+        #[allow(unused_mut)]
         let mut access = fixture.open();
         #[cfg(windows)]
         {
             Arc::get_mut(&mut access).unwrap().everything = None;
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Arc::get_mut(&mut access).unwrap().spotlight = None;
         }
         assert_eq!(access.index_status().state, IndexPhase::Cleared);
         access.save(Fixture::full_search(), false).unwrap();
@@ -2019,5 +2078,46 @@ mod tests {
         assert!(!protected_path(&project.join("main.rs"), &write_protected));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn production_protection_blocks_macos_persistence_paths() {
+        // macOS: LaunchAgents/LaunchDaemons, /System and sudoers.d are
+        // write-protected even though the Windows-only paths above no-op.
+        let home = std::env::temp_dir().join(format!("muse-macos-protect-{}", token::generate()));
+        std::fs::create_dir_all(&home).unwrap();
+        let env = SensitiveRoots {
+            profile_home: home.join(".muse-bridge"),
+            user_home: Some(home.clone()),
+            roaming_app_data: None,
+            local_app_data: None,
+            documents: None,
+            desktop: None,
+            downloads: None,
+            program_data: None,
+            system_root: None,
+            program_files: vec![],
+            current_exe: None,
+        };
+        let (_protected, write_protected) = production_protection(&env);
+        for target in [
+            home.join("Library/LaunchAgents/com.example.agent.plist"),
+            PathBuf::from("/Library/LaunchAgents/com.example.agent.plist"),
+            PathBuf::from("/Library/LaunchDaemons/com.example.daemon.plist"),
+            PathBuf::from("/System/Library/Extensions/evil.kext"),
+            PathBuf::from("/private/etc/sudoers.d/evil"),
+        ] {
+            assert!(
+                protected_path(&target, &write_protected),
+                "{target:?} should be write-protected"
+            );
+        }
+        // Ordinary project files stay writable.
+        assert!(!protected_path(
+            &home.join("Projects/demo/main.rs"),
+            &write_protected
+        ));
+        std::fs::remove_dir_all(&home).unwrap();
     }
 }

@@ -2548,11 +2548,11 @@ mod tests {
     #[tokio::test]
     async fn traversal_matrix() {
         let e = setup(false, default_opts());
-        // 逃逸型：报错串与 Python 一致
+        // 逃逸型：报错串与 Python 一致（反斜杠分隔符只在 Windows 上成立，
+        // 见下面的 traversal_matrix_backslash）。
         for uri in [
             "/api/read?root=r&path=../../escape.txt",
             "/api/read?root=r&path=..%2f..%2fescape.txt",
-            "/api/read?root=r&path=..%5c..%5cescape.txt",
             "/api/read?root=r&path=%2e%2e%2f%2e%2e%2fescape.txt",
             "/api/read?root=r&path=..",
             "/api/write", // 见下：POST 用 body 测
@@ -2576,7 +2576,7 @@ mod tests {
         assert_eq!(c, 400);
         assert_eq!(v["error"], "invalid path");
         // 写入穿越
-        for path in ["../escape_write.txt", "..\\..\\escape_w.txt"] {
+        for path in ["../escape_write.txt"] {
             let body = json!({"root":"r","path":path,"content":"x"}).to_string();
             let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
             assert_eq!(c, 400, "write {path}");
@@ -2587,13 +2587,39 @@ mod tests {
         assert!(!e.root.parent().unwrap().join("escape_w.txt").exists());
     }
 
+    // 反斜杠穿越只在 Windows 上成立：Unix 上反斜杠是合法文件名字符。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn traversal_matrix_backslash() {
+        let e = setup(false, default_opts());
+        let uri = "/api/read?root=r&path=..%5c..%5cescape.txt";
+        let (c, v, _) = call(&e.app, "GET", uri, Some(&e.token), "").await;
+        assert_eq!(c, 400, "GET {uri}");
+        assert_eq!(v["error"], "path escapes root", "GET {uri}");
+        let body = json!({"root":"r","path":"..\\..\\escape_w.txt","content":"x"}).to_string();
+        let (c, v, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
+        assert_eq!(c, 400, "write backslash");
+        assert_eq!(v["error"], "path escapes root", "write backslash");
+        assert!(!e.root.parent().unwrap().join("escape_w.txt").exists());
+    }
+
+    // 绝对路径在所有平台都拒绝；盘符/UNC 只在 Windows 上是绝对路径语义。
+    #[tokio::test]
+    async fn absolute_paths_rejected() {
+        let e = setup(false, default_opts());
+        let uri = "/api/read?root=r&path=%2fetc%2fpasswd";
+        let (c, v, _) = call(&e.app, "GET", uri, Some(&e.token), "").await;
+        assert_eq!(c, 400);
+        assert_eq!(v["error"], "path must be relative");
+    }
+
+    #[cfg(windows)]
     #[tokio::test]
     async fn absolute_unc_device_paths() {
         let e = setup(false, default_opts());
         for path in [
             "C:\\Windows\\win.ini",
             "C:/Windows/win.ini",
-            "/etc/passwd",
             "\\\\127.0.0.1\\c$\\Windows\\win.ini",
             "\\\\.\\C:\\Windows\\win.ini",
             "\\\\?\\C:\\Windows\\win.ini",
@@ -2605,6 +2631,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn reserved_device_names() {
         let e = setup(false, default_opts());
@@ -2618,6 +2645,7 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
     #[tokio::test]
     async fn ads_and_trailing_dot_space() {
         let e = setup(false, default_opts());
@@ -2681,8 +2709,43 @@ mod tests {
         outside
     }
 
+    #[cfg(target_os = "macos")]
+    fn link_fixture(e: &Env) -> PathBuf {
+        let outside = e.root.parent().unwrap().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("sentinel.txt"), "outside").unwrap();
+        outside
+    }
+
     /// 重解析点必须被授权闸门挡住：读取与写入都不得触及根外文件。
     #[cfg(windows)]
+    async fn assert_link_rejected(e: &Env, kind: &str, outside: &Path) {
+        let uri = format!("/api/list?root=r&path={kind}");
+        let (code, _, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
+        assert_eq!(code, 400, "{kind} 列目录未被拒绝");
+        let uri = format!("/api/read?root=r&path={kind}%2fsentinel.txt");
+        let (code, body, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
+        assert_eq!(code, 400, "{kind} 读取未被拒绝");
+        assert_eq!(body["error"], "path escapes root", "{kind}");
+        let body = json!({"root":"r","path":format!("{kind}/sentinel.txt"),"content":"changed"})
+            .to_string();
+        let (code, _, _) = call(&e.app, "POST", "/api/write", Some(&e.token), &body).await;
+        assert_eq!(code, 400, "{kind} 写入未被拒绝");
+        assert_eq!(
+            std::fs::read_to_string(outside.join("sentinel.txt")).unwrap(),
+            "outside",
+            "{kind} 改写了根外文件"
+        );
+        // 建目录同样不得穿过重解析点。
+        let body = json!({"root":"r","path":format!("{kind}/newdir")}).to_string();
+        let (code, _, _) = call(&e.app, "POST", "/api/mkdir", Some(&e.token), &body).await;
+        assert_eq!(code, 400, "{kind} 建目录未被拒绝");
+        assert!(!outside.join("newdir").exists(), "{kind} 在根外建了目录");
+    }
+
+    /// macOS mirror of the Windows helper: symlinks need no privilege here,
+    /// so the test runs unconditionally.
+    #[cfg(target_os = "macos")]
     async fn assert_link_rejected(e: &Env, kind: &str, outside: &Path) {
         let uri = format!("/api/list?root=r&path={kind}");
         let (code, _, _) = call(&e.app, "GET", &uri, Some(&e.token), "").await;
@@ -2752,6 +2815,19 @@ mod tests {
         }
         assert_link_rejected(&e, "symlink", &outside).await;
         std::fs::remove_dir(&link).unwrap();
+    }
+
+    /// macOS: symlinks need no privilege, so the escape matrix runs
+    /// unconditionally (same assertions as the Windows test).
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn symlink_escape() {
+        let e = setup(false, default_opts());
+        let outside = link_fixture(&e);
+        let link = e.root.join("symlink");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        assert_link_rejected(&e, "symlink", &outside).await;
+        std::fs::remove_file(&link).unwrap();
     }
 
     // ---- 读写功能矩阵 ----
