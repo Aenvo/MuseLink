@@ -4,8 +4,11 @@ param(
     [string]$OutputPath,
     [string]$Repository = 'Aenvo/MuseLink',
     [string]$GeneratedNotesPath,
+    [string]$PreviousTag,
+    [switch]$FetchGitHubNotes,
     [switch]$ValidateSync,
-    [switch]$AllowMissingChangelog
+    [switch]$AllowMissingChangelog,
+    [switch]$StrictPrCoverage
 )
 
 $ErrorActionPreference = 'Stop'
@@ -190,6 +193,62 @@ function Is-UnreleasedHeading {
     return $lower -in @('unreleased', '未发布', '未公開', '未リリース', '未發布')
 }
 
+function Get-MarkdownRefNumbers {
+    param([string]$Text)
+
+    if ([string]::IsNullOrWhiteSpace($Text)) {
+        return @()
+    }
+
+    # Strip inline code spans so hex colors (e.g. `#48C52C`) or code literals are never misread as PR/Issue refs.
+    $withoutCode = [regex]::Replace($Text, '`[^`]*`', ' ')
+    $numbers = New-Object 'System.Collections.Generic.HashSet[int]'
+
+    foreach ($m in [regex]::Matches($withoutCode, 'https://github\.com/[^/\s)]+/[^/\s)]+/(?:pull|issues)/(\d+)')) {
+        $null = $numbers.Add([int]$m.Groups[1].Value)
+    }
+    foreach ($m in [regex]::Matches($withoutCode, '(?<![A-Za-z0-9_])#(\d+)(?![A-Za-z0-9_])')) {
+        $null = $numbers.Add([int]$m.Groups[1].Value)
+    }
+
+    return @($numbers | Sort-Object)
+}
+
+function Parse-GitHubGeneratedPrs {
+    param([string]$GeneratedNotes)
+
+    if ([string]::IsNullOrWhiteSpace($GeneratedNotes)) {
+        return @()
+    }
+
+    $prs = @()
+    $seen = New-Object 'System.Collections.Generic.HashSet[int]'
+    $pattern = '(?m)^[*-]\s+(?<title>.+?)\s+by\s+@(?<author>[A-Za-z0-9-]+(?:\[bot\])?)\s+in\s+(?<url>https://github\.com/[^/\s]+/[^/\s]+/pull/(?<number>\d+))\s*$'
+    foreach ($m in [regex]::Matches($GeneratedNotes, $pattern)) {
+        $num = [int]$m.Groups['number'].Value
+        if ($seen.Add($num)) {
+            $prs += [pscustomobject]@{
+                Number = $num
+                Author = $m.Groups['author'].Value
+                Title  = $m.Groups['title'].Value.Trim()
+                Url    = $m.Groups['url'].Value
+            }
+        }
+    }
+    return @($prs)
+}
+
+function Write-CiWarning {
+    param([Parameter(Mandatory)][string]$Message)
+
+    if ($env:GITHUB_ACTIONS -eq 'true') {
+        $escaped = $Message -replace '%', '%25' -replace "`r", '%0D' -replace "`n", '%0A'
+        Write-Host "::warning::$escaped"
+    } else {
+        Write-Warning $Message
+    }
+}
+
 function Parse-ChangelogDocument {
     param([Parameter(Mandatory)][string]$Path)
 
@@ -198,22 +257,25 @@ function Parse-ChangelogDocument {
     $title = if ($titleMatch.Success) { $titleMatch.Groups[1].Value.Trim() } else { $null }
 
     $versions = [ordered]@{}
+    $unreleased = ''
     $matches = [regex]::Matches($text, '(?ms)^##\s+\[([^\]]+)\][^\n]*\n(.*?)(?=^##\s+\[|\z)')
     foreach ($m in $matches) {
         $rawVer = $m.Groups[1].Value.Trim()
+        $body = $m.Groups[2].Value.Trim()
         if (Is-UnreleasedHeading -Name $rawVer) {
+            $unreleased = $body
             continue
         }
         $normalizedVer = $rawVer -replace '^[vV]', ''
-        $body = $m.Groups[2].Value.Trim()
         # Demote ### subheadings to #### so they nest cleanly under ### 本版本更新 / ### What's new.
         $demoted = [regex]::Replace($body, '(?m)^###(\s+)', '####$1')
         $versions[$normalizedVer] = $demoted
     }
 
     return [pscustomobject]@{
-        Title    = $title
-        Versions = $versions
+        Title      = $title
+        Unreleased = $unreleased
+        Versions   = $versions
     }
 }
 
@@ -258,6 +320,7 @@ function Discover-Changelogs {
             FullPath       = $file.FullName
             ReadmeFileName = $readmeName
             Title          = $parsed.Title
+            Unreleased     = $parsed.Unreleased
             Versions       = $parsed.Versions
         }
     }
@@ -334,6 +397,42 @@ foreach ($entry in $changelogs) {
     }
 }
 
+# Cross-check: PR / Issue references (#N) in published versions must stay aligned across all discovered locales.
+foreach ($verKey in $baselineVersions) {
+    $baseRefs = @(Get-MarkdownRefNumbers -Text $baseline.Versions[$verKey])
+    foreach ($entry in $changelogs) {
+        if ($entry.FileName -eq $baseline.FileName -or -not $entry.Versions.Contains($verKey)) {
+            continue
+        }
+        $entryRefs = @(Get-MarkdownRefNumbers -Text $entry.Versions[$verKey])
+        $missingRefs = @($baseRefs | Where-Object { $_ -notin $entryRefs } | ForEach-Object { "#$_" })
+        $extraRefs = @($entryRefs | Where-Object { $_ -notin $baseRefs } | ForEach-Object { "#$_" })
+        if ($missingRefs.Count -gt 0) {
+            $syncErrors += "$($entry.FileName) [v$verKey] is missing PR/Issue reference(s) present in $($baseline.FileName): $($missingRefs -join ', ')"
+        }
+        if ($extraRefs.Count -gt 0) {
+            $syncErrors += "$($entry.FileName) [v$verKey] has extra PR/Issue reference(s) absent from $($baseline.FileName): $($extraRefs -join ', ')"
+        }
+    }
+}
+
+# Advisory check for [Unreleased]: warn if PR/Issue references drift across locales without blocking external PRs.
+$baseUnreleasedRefs = @(Get-MarkdownRefNumbers -Text $baseline.Unreleased)
+foreach ($entry in $changelogs) {
+    if ($entry.FileName -eq $baseline.FileName) {
+        continue
+    }
+    $entryUnreleasedRefs = @(Get-MarkdownRefNumbers -Text $entry.Unreleased)
+    $missingUnreleased = @($baseUnreleasedRefs | Where-Object { $_ -notin $entryUnreleasedRefs } | ForEach-Object { "#$_" })
+    $extraUnreleased = @($entryUnreleasedRefs | Where-Object { $_ -notin $baseUnreleasedRefs } | ForEach-Object { "#$_" })
+    if ($missingUnreleased.Count -gt 0 -or $extraUnreleased.Count -gt 0) {
+        $details = @()
+        if ($missingUnreleased.Count -gt 0) { $details += "missing $($missingUnreleased -join ', ')" }
+        if ($extraUnreleased.Count -gt 0) { $details += "extra $($extraUnreleased -join ', ')" }
+        Write-CiWarning "$($entry.FileName) [Unreleased] PR/Issue references differ from $($baseline.FileName) ($($details -join '; ')). Sync all CHANGELOG*.md files before tagging a release."
+    }
+}
+
 if ($syncErrors.Count -gt 0 -and -not $AllowMissingChangelog) {
     throw ("Multilingual changelog sync check failed:`n- " + ($syncErrors -join "`n- "))
 }
@@ -351,7 +450,7 @@ if (-not [string]::IsNullOrWhiteSpace($version)) {
 }
 
 if ($ValidateSync -and [string]::IsNullOrWhiteSpace($OutputPath)) {
-    Write-Host ("Multilingual changelog sync check passed: {0} locale(s), {1} published version(s)." -f $changelogs.Count, $baselineVersions.Count)
+    Write-Host ("Multilingual changelog sync check passed: {0} locale(s), {1} published version(s), PR/Issue references aligned." -f $changelogs.Count, $baselineVersions.Count)
     exit 0
 }
 
@@ -360,6 +459,82 @@ if (-not [string]::IsNullOrWhiteSpace($GeneratedNotesPath) -and (Test-Path -Lite
     $rawGenerated = (Get-Content -Raw -Encoding UTF8 -LiteralPath $GeneratedNotesPath) -replace "`r`n", "`n"
     if (-not [string]::IsNullOrWhiteSpace($rawGenerated)) {
         $generatedSection = $rawGenerated.Trim()
+    }
+} elseif ($FetchGitHubNotes -and -not [string]::IsNullOrWhiteSpace($Tag)) {
+    $ghArgs = @('api', '--method', 'POST', "repos/$Repository/releases/generate-notes", '-f', "tag_name=$Tag", '--jq', '.body')
+    if (-not [string]::IsNullOrWhiteSpace($PreviousTag)) {
+        $ghArgs += @('-f', "previous_tag_name=$PreviousTag")
+    }
+    $prevErrorAction = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    $generatedLines = & gh @ghArgs 2>$null
+    $apiExit = $LASTEXITCODE
+    $ErrorActionPreference = $prevErrorAction
+    if ($apiExit -eq 0) {
+        $rawGenerated = (($generatedLines | ForEach-Object { "$_" }) -join "`n").Trim()
+        if (-not [string]::IsNullOrWhiteSpace($rawGenerated)) {
+            $generatedSection = $rawGenerated
+        }
+    } else {
+        Write-CiWarning "Failed to fetch GitHub generated release notes for $Tag (exit $apiExit); continuing with CHANGELOG-based notes only."
+    }
+}
+
+# Audit merged PR & external contributor credit coverage against all localized CHANGELOG sections for this tag.
+$mergedPrs = @(Parse-GitHubGeneratedPrs -GeneratedNotes $generatedSection)
+$repoOwner = ($Repository -split '/')[0]
+if ($mergedPrs.Count -gt 0 -and -not [string]::IsNullOrWhiteSpace($version)) {
+    $prCoverageErrors = @()
+    $summaryRows = @()
+    foreach ($pr in $mergedPrs) {
+        $isExternal = -not [string]::Equals($pr.Author, $repoOwner, [System.StringComparison]::OrdinalIgnoreCase) -and ($pr.Author -notmatch '\[bot\]$')
+        $missingPrLocales = @()
+        $missingAuthorLocales = @()
+        foreach ($entry in $changelogs) {
+            $body = if ($entry.Versions.Contains($version)) { [string]$entry.Versions[$version] } else { '' }
+            $refs = @(Get-MarkdownRefNumbers -Text $body)
+            if ($pr.Number -notin $refs) {
+                $missingPrLocales += $entry.FileName
+            }
+            if ($isExternal -and ($body -notmatch "(?i)@$([regex]::Escape($pr.Author))\b")) {
+                $missingAuthorLocales += $entry.FileName
+            }
+        }
+
+        if ($missingPrLocales.Count -gt 0) {
+            $msg = "Merged PR #$($pr.Number) (@$($pr.Author): $($pr.Title)) is not referenced in [$Tag] of: $($missingPrLocales -join ', ')."
+            $prCoverageErrors += $msg
+            Write-CiWarning $msg
+        } elseif ($missingAuthorLocales.Count -gt 0) {
+            $msg = "External contributor @$($pr.Author) (PR #$($pr.Number)) is not credited in [$Tag] of: $($missingAuthorLocales -join ', ')."
+            $prCoverageErrors += $msg
+            Write-CiWarning $msg
+        }
+
+        $prStatus = if ($missingPrLocales.Count -eq 0) { 'Referenced' } else { "Missing in $($missingPrLocales -join ', ')" }
+        $creditStatus = if (-not $isExternal) { 'Maintainer' } elseif ($missingAuthorLocales.Count -eq 0) { 'Credited' } else { "Missing @$($pr.Author)" }
+        $safeTitle = $pr.Title -replace '\|', '\|'
+        $summaryRows += "| [#$($pr.Number)]($($pr.Url)) | @$($pr.Author) | $safeTitle | $prStatus | $creditStatus |"
+    }
+
+    Write-Host ("PR credit audit for {0}: checked {1} merged PR(s) across {2} locale(s) ({3} warning(s))." -f $Tag, $mergedPrs.Count, $changelogs.Count, $prCoverageErrors.Count)
+
+    if (-not [string]::IsNullOrWhiteSpace($env:GITHUB_STEP_SUMMARY)) {
+        $localeSummary = ($changelogs | ForEach-Object { "$($_.Locale) ($($_.FileName))" }) -join ', '
+        $summaryBlock = @(
+            "### Release Notes & PR Credit Audit ($Tag)"
+            ''
+            "- Locales: $localeSummary"
+            "- Merged PRs checked: $($mergedPrs.Count)"
+            ''
+            '| PR | Author | Title | Changelog Ref | Contributor Credit |'
+            '| --- | --- | --- | --- | --- |'
+        ) + $summaryRows + @('')
+        Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value ($summaryBlock -join "`n") -Encoding UTF8
+    }
+
+    if ($StrictPrCoverage -and $prCoverageErrors.Count -gt 0) {
+        throw ("PR credit coverage check failed:`n- " + ($prCoverageErrors -join "`n- "))
     }
 }
 

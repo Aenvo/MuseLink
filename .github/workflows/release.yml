@@ -408,31 +408,12 @@ jobs:
           $tag = "${{ needs.build-windows.outputs.tag }}"
           $version = "${{ needs.build-windows.outputs.version }}"
           $assetsDir = Join-Path $env:RUNNER_TEMP "release-final-$version"
-          $ghNotesPath = Join-Path $env:RUNNER_TEMP "gh-generated-notes-$version.md"
           $releaseNotesPath = Join-Path $env:RUNNER_TEMP "release-notes-$version.md"
-          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-          $prevErrorAction = $ErrorActionPreference
-          $ErrorActionPreference = 'Continue'
-          $generatedLines = & gh api --method POST "repos/${{ github.repository }}/releases/generate-notes" -f "tag_name=$tag" --jq .body 2>$null
-          $apiExit = $LASTEXITCODE
-          $ErrorActionPreference = $prevErrorAction
-          if ($apiExit -eq 0) {
-            $generatedBody = (($generatedLines | ForEach-Object { "$_" }) -join "`n").Trim()
-            if (-not [string]::IsNullOrWhiteSpace($generatedBody)) {
-              [IO.File]::WriteAllText($ghNotesPath, $generatedBody + "`n", $utf8NoBom)
-            }
-          } else {
-            Write-Warning "Failed to fetch GitHub generated release notes for $tag (exit $apiExit); continuing with CHANGELOG-based notes only."
-          }
-          $notesArgs = @{
-            Tag = $tag
-            OutputPath = $releaseNotesPath
-            Repository = "${{ github.repository }}"
-          }
-          if (Test-Path -LiteralPath $ghNotesPath -PathType Leaf) {
-            $notesArgs['GeneratedNotesPath'] = $ghNotesPath
-          }
-          & ./muse-connector/scripts/generate-release-notes.ps1 @notesArgs
+          & ./muse-connector/scripts/generate-release-notes.ps1 `
+            -Tag $tag `
+            -OutputPath $releaseNotesPath `
+            -Repository "${{ github.repository }}" `
+            -FetchGitHubNotes
           $assets = Get-ChildItem -LiteralPath $assetsDir -File | ForEach-Object { $_.FullName }
           gh release create $tag --draft --title "MuseLink $tag" --notes-file $releaseNotesPath @assets
           if ($LASTEXITCODE -ne 0) {

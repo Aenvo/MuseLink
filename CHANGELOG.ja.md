@@ -7,7 +7,7 @@
 ## [Unreleased]
 
 ### セキュリティと安定性の強化
-- **リリース成果物にビルド来歴証明（Build Provenance Attestation）を追加**：リリースワークフローで Windows / Linux / macOS の各配布アセットに対する GitHub ビルド来歴証明を生成するようになり、ダウンロードしたバイナリが本リポジトリのソースコードから GitHub Actions 上でビルドされ、差し替えや改ざんが行われていないことを `gh attestation verify` で検証できるようになりました。
+- **リリース成果物にビルド来歴証明（Build Provenance Attestation）を追加**（[#16](https://github.com/Aenvo/MuseLink/pull/16) · [@KammyAugust11](https://github.com/KammyAugust11)）：リリースワークフローで Windows / Linux / macOS の各配布アセットに対する GitHub ビルド来歴証明を生成するようになり、ダウンロードしたバイナリが本リポジトリのソースコードから GitHub Actions 上でビルドされ、差し替えや改ざんが行われていないことを `gh attestation verify` で検証できるようになりました。
 
 ## [v0.3.2] - 2026-11-28
 
@@ -20,26 +20,27 @@
   - CI・リリースワークフローをすべての `CHANGELOG*.md`・`README*.md` を自動検出する構成へ拡張し、言語間のバージョン整合性チェックと全言語リリースノートの自動生成に対応しました。
 
 ### セキュリティと安定性の強化
-- **旧 `/api` 互換インターフェースを既定オフ化し、「設定 → 互換性」から必要に応じて有効化可能に**：新規インストールおよび `/agent/v1` 利用中の環境では既定で旧 `/api/*` を 404 として公開トークンの露出面を縮小し、旧 File Bridge のみを利用中の環境はアップグレード後も自動で互換性を維持します。
+- **旧 `/api` 互換インターフェースを既定オフ化し、「設定 → 互換性」から必要に応じて有効化可能に**（[#10](https://github.com/Aenvo/MuseLink/pull/10) · [@KammyAugust11](https://github.com/KammyAugust11)）：新規インストールおよび `/agent/v1` 利用中の環境では既定で旧 `/api/*` を 404 として公開トークンの露出面を縮小し、旧 File Bridge のみを利用中の環境はアップグレード後も自動で互換性を維持します。
   - **既存ユーザーの精密移行と初回状態の保護**：`desktop-state.json` に `legacy_api_enabled` が未記録の場合、既存の `config.json`・`token` があり `agent-token` 未発行の旧 File Bridge 環境のみ自動でオンを維持します（`desktop-state.json` は先行作成しません）。新規の指定フォルダー設定では旧 `config.json` / `token` を生成しなくなりました。
   - **「設定 → 互換性」カードとライフサイクル整備**：「設定 → 互換性」に互換スイッチ（既存の旧設定または指定フォルダー権限がある場合のみ有効化でき、ドライブ全体モードへは拡張しません）と旧トークンのローテーション／フォルダー表示を追加。オフ時もローカルの旧トークンファイルは保持し、有効な接続面がなくなった場合は自動で接続を一時停止します。
   - **ヘルスチェック整合とレート制限・統計の一貫性**：無効化された `/api/*` は認証前に 404 を返してファイルアクティビティ統計を汚染せず、未認証レート制限は維持します。内蔵ヘルスチェックは Agent トークンがある場合に `/agent/v1/roots` の JSON 応答を検証し、旧サービスの引き継ぎ時は旧 API を自動で有効化（ロールバック時に復元）します。
-- **デフォルトの認証情報保護範囲を拡大**：主要なクラウド・コンテナ認証情報フォルダやブラウザのログイン情報ストアをデフォルトで読み取り・検索・書き込みから保護し、ドライブ全体やホームディレクトリの許可時にも漏えいを防ぎます。
+- **デフォルトの認証情報保護範囲を拡大**（[#9](https://github.com/Aenvo/MuseLink/pull/9) · [@KammyAugust11](https://github.com/KammyAugust11)）：主要なクラウド・コンテナ認証情報フォルダやブラウザのログイン情報ストアをデフォルトで読み取り・検索・書き込みから保護し、ドライブ全体やホームディレクトリの許可時にも漏えいを防ぎます。
   - `.npmrc`・`.pypirc` を書き込み保護のみから全面保護へ引き上げ、`.docker`・`.kube`・`.azure`・gcloud 認証情報ディレクトリを追加しました。
   - 各プラットフォームのブラウザ認証情報ストアを保護対象に追加しました：Windows（Chrome / Edge の `User Data`・Firefox の `Profiles`）、macOS（既存の `~/Library/Keychains` に加え Application Support 配下の Chrome / Edge / Firefox）、Linux（`google-chrome` / `chromium` / `microsoft-edge`・`.mozilla/firefox`）。
 
 ## [v0.3.1] - 2026-11-27
 
 ### 不具合修正とクロスプラットフォーム対応
-- **全プラットフォームで「専用トークンをコピー」が失敗する問題を修正**：macOS のネイティブ秘密クリップボード、Linux のシステムクリップボード連携、Windows の競合リトライおよび詳細な失敗表示を実装しました。
+- **全プラットフォームで「専用トークンをコピー」が失敗する問題を修正**（[#12](https://github.com/Aenvo/MuseLink/pull/12)）：macOS のネイティブ秘密クリップボード、Linux のシステムクリップボード連携、Windows の競合リトライおよび詳細な失敗表示を実装しました。
   - **macOS ネイティブ秘密クリップボード**：AppKit の `NSPasteboard` に `org.nspasteboard.ConcealedType`・`org.nspasteboard.TransientType` と `CurrentHostOnly` を付与し、履歴ツールへの記録やユニバーサルクリップボード同期を防止しました。
   - **Linux クリップボード対応**：`wl-copy` / `xclip` / `xsel` の標準入力経由で安全に書き込み、コマンドライン引数へのトークン露出とバックグラウンドデーモンによるハングを防止しました。
   - **Windows クリップボードの安定性とプライバシー強化**：`OpenClipboard` に短いバックオフリトライを追加して一時占有による競合を緩和し、`ExcludeClipboardContentFromMonitorProcessing`・`CanIncludeInClipboardHistory`・`CanUploadClipboardData` を 4 バイト `DWORD(0)` 形式で統一しました。
   - **詳細な失敗原因の表示**：初回ガイドと接続カードで失敗原因を 3 言語表示し、「トークンファイルの場所を開く」フォールバック導線を維持しました。
-- **macOS / Linux の「ローカルドライブ管理（フルアクセス）」で HTTP 403 になりデスクトップを読み取れない問題を修正**：システムルート `/` の検出、Unix 機密パス保護、macOS プライバシー設定導線を整備しました。
+- **macOS / Linux の「ローカルドライブ管理（フルアクセス）」で HTTP 403 になりデスクトップを読み取れない問題を修正**（[#12](https://github.com/Aenvo/MuseLink/pull/12)）：システムルート `/` の検出、Unix 機密パス保護、macOS プライバシー設定導線を整備しました。
   - **Unix ローカルルート検出と検証**：macOS / Linux の `fixed_local_roots()` で `root`（`/`）を返すようにし、エイリアス検証とドライブ選択 UI（「システムルート（/）」）を更新、空ルートマップをフェイルクローズ拒否して `/agent/v1/roots` と `/agent/v1/locations/desktop` の 403 を解消しました。
   - **macOS / Linux の機密パス保護と安全な検索除外境界**：macOS の `~/Library/Keychains` を全面保護し、システムディレクトリ・自動起動（`~/Library/LaunchAgents`・`~/.config/autostart`）・ログインシェル設定（`.zprofile` / `.zshenv` / `.bash_profile`）・`.app` バンドルをデフォルト書き込み保護にしました。バックグラウンド検索からは macOS の `/System`・`/Library`・`/Applications`・`/usr`・`/bin`・`/sbin`・`/private`・`~/Library`（iCloud や他アプリコンテナの TCC 確認連鎖を回避）・写真ライブラリ・`/dev`・非ローカル `/Volumes/*`、Linux の `/proc`・`/sys`・`/dev`・`/run` を除外しました（直接パス読み取りは可能）。
   - **macOS プライバシー権限（TCC）体験とエラー応答の改善**：インデックス前にデスクトップ・書類・ダウンロードを事前プローブし、「フルディスクアクセス設定を開く」ワンクリックボタンを追加。3 言語の接続手順表記を中立化し、`PermissionDenied` を操作案内付きの HTTP 403 にマッピングしました。
+- **README の Windows サンドボックス境界記述を修正し 3 言語メタデータを同期**（[#11](https://github.com/Aenvo/MuseLink/pull/11) · [@KammyAugust11](https://github.com/KammyAugust11)）：サンドボックスのタイムアウト制御と `Everyone` / `RESTRICTED` SID の書き込み範囲の記述を正確化し、日英中のヘッダー・プラットフォームバッジ・パッケージメタデータを同期しました。
 
 ## [v0.3.0] - 2026-11-27
 
@@ -48,15 +49,15 @@
   - **ワンクリック確認と再起動更新**：静的 `latest.json` とコンパイル時固定の Minisign 公開鍵で検証（レート制限のある REST API は不使用）。右下の通知カードと緑色の進捗バーで既存接続を保ったままダウンロードし、サービス（Windows 同梱 `Everything.exe` を含む）を安全に停止して自動再起動します。Windows ポータブル版・Linux `.deb`・macOS / ソースビルドも同じ `latest.json` で通知・詳細表示・直行リンクを提供します。
   - **アプリ内変更履歴ダイアログ**：「このアプリについて」に「変更履歴」「GitHub」「更新を確認」を配置し、同梱コピーで即時表示しつつバックグラウンドで GitHub 最新ログへ同期します。
   - **3 プラットフォーム自動リリースパイプライン**：`.github/workflows/release.yml` と `generate-updater-manifest.ps1` を追加し、`v*` タグで 3 プラットフォームのビルド・テストと `latest.json`・`SHA256SUMS.txt` 生成を自動化しました。
-- **Linux および macOS（Apple Silicon & Intel）に対応**：3 プラットフォームすべてでファイル API と Tailscale / Cloudflare トンネル設定が動作し、ビルド済みパッケージを提供します。
+- **Linux および macOS（Apple Silicon & Intel）に対応**（[#3](https://github.com/Aenvo/MuseLink/pull/3)・[#7](https://github.com/Aenvo/MuseLink/pull/7) · [@eightman999](https://github.com/eightman999)、[#6](https://github.com/Aenvo/MuseLink/issues/6) を解決）：3 プラットフォームすべてでファイル API と Tailscale / Cloudflare トンネル設定が動作し、ビルド済みパッケージを提供します。
   - **Linux 対応**：ファイル API（検索 / 一覧 / 読み取り / 書き込み / フォルダ作成）とトンネル設定をカバーし、署名済み AppImage と `.deb` を提供します（ローカルコマンド実行は Windows 専用）。
   - **macOS 対応**：Universal `.dmg` / `.app.zip` を提供し、`Tailscale.app` と Homebrew を自動検出します。Apple 公証未実施のため初回起動時は「システム設定 → プライバシーとセキュリティ」で許可が必要です（ローカルコマンド実行は Windows 専用）。
-- **日本語ローカライズ（`ja`）を追加**：UI 全体、システムトレイ、Muse 接続手順、日本語 README に対応し、「設定 → 一般」から切り替えられます。
+- **日本語ローカライズ（`ja`）を追加**（[#8](https://github.com/Aenvo/MuseLink/pull/8) · [@eightman999](https://github.com/eightman999)）：UI 全体、システムトレイ、Muse 接続手順、日本語 README に対応し、「設定 → 一般」から切り替えられます。
 
 ## [v0.2.2] - 2026-11-27
 
 ### 改善と新機能
-- **ファイル読み取り上限の引き上げ、チャンク読み取り・生バイナリ直接転送に対応（#4 を解決）**：単一ファイル上限を 10 MiB に拡大し、大容量ファイルや高解像度画像の高速・分割転送に対応しました。
+- **ファイル読み取り上限の引き上げ、チャンク読み取り・生バイナリ直接転送に対応**（[#4](https://github.com/Aenvo/MuseLink/issues/4) を解決）：単一ファイル上限を 10 MiB に拡大し、大容量ファイルや高解像度画像の高速・分割転送に対応しました。
   - **単一ファイル JSON 読み取り上限を 10 MiB に拡大**：書き込み上限と揃え、既存設定のまま高解像度画像を読み取れるようにしました。超過時はチャンク・`raw` 推奨値を含む HTTP `413` を返し、旧 `/api/read` は 2 MiB 互換を維持します。
   - **`offset` / `limit` チャンク読み取り（総サイズ上限なし）**：検証済み OS ハンドルから分割読み取り（JSON 標準 2 MiB・最大 4 MiB）し、`etag` と `if_match` / `If-Match` をサポート（途中変更時は HTTP `409`）。
   - **`raw=1` 生バイナリ直接転送**：Base64 の 33% 膨張を排除し（トンネル経由で実測約 40% 高速化、1 リクエスト最大 32 MiB、チャンク併用可）、`ETag` と `X-File-*` ヘッダーを返却します。
@@ -89,11 +90,11 @@
   - 「ファイル権限 → Muse ファイルツール」に総スイッチとリスク確認を追加し、`/agent/v1/exec`・状態確認・キャンセル API を提供（ドライブルート直下は拒否）。
   - **ワークスペースごとの書き込み制限付きサンドボックス**：`CreateRestrictedToken(WRITE_RESTRICTED)` と正規パス SHA-256 由来の固有 SID により対象サブディレクトリと専用一時領域以外への書き込みを遮断し、`JobObject` のメモリ・プロセス数・タイムアウト制限とフェイルクローズを強制します。
   - **3 段階リスク分類と最前面承認ダイアログ**：読み取りや標準ビルド・テストは自動許可、初回シェル利用・依存変更・`git push` は 120 秒の承認ダイアログ（単発または 4 時間セッション許可）を表示し、機密パス・`..`・強制プッシュ・再帰削除・管理ツール・難読化スクリプト・`unsandboxed` は毎回単発承認を必須とします。
-- **デバイス命名と名称変更レシート**：複数 PC に固有のデバイス名を設定でき、名称変更手順と Muse 確認レシートを生成できます。
+- **デバイス命名と名称変更レシート**（[#1](https://github.com/Aenvo/MuseLink/pull/1)）：複数 PC に固有のデバイス名を設定でき、名称変更手順と Muse 確認レシートを生成できます。
 - **コマンド実行ログフィルターと変更履歴ボタン**：ログに「コマンド実行」フィルターを、「このアプリについて」に「変更履歴」ボタンを追加しました。
 
 ### セキュリティと安定性の強化
-- **ハンドルベースのファイル検証と機密パス保護**：OS ハンドルで実パスと属性を再検証してシンボリックリンク脱出・TOCTOU 差し替えを防御し、認証情報とシステムパスをデフォルト保護します。
+- **ハンドルベースのファイル検証と機密パス保護**（[#2](https://github.com/Aenvo/MuseLink/pull/2)）：OS ハンドルで実パスと属性を再検証してシンボリックリンク脱出・TOCTOU 差し替えを防御し、認証情報とシステムパスをデフォルト保護します。
   - `~/.muse-bridge`・`~/.ssh`・`~/.aws`・`~/.gnupg` をデフォルト遮断し、システムディレクトリ・スタートアップ・シェルプロファイル・`.gitconfig`・アプリディレクトリを書き込み保護にしました。
   - `Everything.exe`・`cloudflared`・コマンド子プロセスを Windows `JobObject` で管理し終了時に一括回収します。
   - `mfa_` トークンのログマスキング、モード切替時の権限保持、Base64 書き込み 10 MiB 検証修正、CSP 厳格化、`RUSTSEC-2026-0592` 対応、機能オフ時の HTTP 403 `exec_disabled` を整備しました。
