@@ -158,14 +158,20 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
     const agent = fromGuide || s.agent_ready;
     if (agent && !s.agent_ready) return;
     if (!agent && !(s.legacy_api_enabled && s.initialized)) return;
+    const tailnetOnly = s.desktop.provider.kind === "tailscale_serve";
     clearGuideTestError.current = fromGuide;
     confirm({
-      title: t("测试此公网入口？"),
+      title: tailnetOnly ? t("测试此 Tailnet 入口？") : t("测试此公网入口？"),
       description: agent
         ? t("将使用 Muse 专用令牌检查 {0} 的文件权限接口。通过后即可接入 Muse。", address)
         : t("将使用文件令牌检查 {0} 的 File Bridge 健康接口。", address),
-      action: t("测试公网健康"),
-      execute: async () => (await bridge.run(t("正在测试公网"), "test_public_connection", { agent }, t("公网健康接口已验证"))).ok,
+      action: tailnetOnly ? t("测试 Tailnet 连接") : t("测试公网健康"),
+      execute: async () => (await bridge.run(
+        tailnetOnly ? t("正在测试 Tailnet 连接") : t("正在测试公网"),
+        "test_public_connection",
+        { agent },
+        tailnetOnly ? t("Tailnet 健康接口已验证") : t("公网健康接口已验证"),
+      )).ok,
     });
   };
   const triggerInstallUpdate = () => {
@@ -216,7 +222,7 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
         <div className="app-shell app-page flex flex-col gap-4">
           {error && !confirmation && !(needsAttention && error === s?.status.note) ? <Notice title={t("操作未完成")} error><p>{diagnostic(error)}</p><Button variant="ghost" size="sm" onClick={() => bridge.setError(null)}><X data-icon="inline-start" />{t("收起提示")}</Button></Notice> : null}
           {s?.setup_error && !s.fresh_setup ? <Notice title={t("配置需要修复")} tone="warning">{diagnostic(s.setup_error)}</Notice> : null}
-          {needsAttention && !guiding ? <Notice title={s.status.health === "Conflict" ? t("本地端口冲突") : t("连接需要处理")} tone={presentation.tone === "error" ? "error" : "warning"}>{s.agent_ready && s.status.agent_public_verified === false && s.status.health === "Up" ? t("Muse 专用令牌的公网验证未通过，请重试。") : diagnostic(s.status.note)}</Notice> : null}
+          {needsAttention && !guiding ? <Notice title={s.status.health === "Conflict" ? t("本地端口冲突") : t("连接需要处理")} tone={presentation.tone === "error" ? "error" : "warning"}>{s.agent_ready && s.status.agent_public_verified === false && s.status.health === "Up" ? (s.desktop.provider.kind === "tailscale_serve" ? t("Muse 专用令牌的 Tailnet 验证未通过，请重试。") : t("Muse 专用令牌的公网验证未通过，请重试。")) : diagnostic(s.status.note)}</Notice> : null}
           {s?.log_errors?.length ? <Notice title={t("日志未能完整保存")} error>{s.log_errors.map(diagnostic).join(" · ")}</Notice> : null}
           {s ? <>
             <TabsContent value="overview"><Overview bridge={bridge} confirm={confirm} guideVisible={guideVisible} guiding={guiding} onStartGuide={expandGuide} onOpenConnection={() => navigate("connection", "muse-agent-connection")} onTestPublicConnection={() => testPublicConnection()} /></TabsContent>

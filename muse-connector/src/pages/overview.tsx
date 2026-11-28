@@ -34,6 +34,7 @@ export default function Overview({ bridge, confirm, guideVisible, guiding, onSta
   </Card>;
   if (!s.connection_configured) return s.access_configured ? accessCard : null;
   const development = s.profile === "development";
+  const tailnetOnly = s.desktop.provider.kind === "tailscale_serve";
   const verified = s.agent_ready ? s.status.agent_public_verified : s.status.public_verified;
   const stats = s.stats.file_activity;
   const timeLabel = (value: string | null) => value ? formatTime(value, language) : t("尚无记录");
@@ -44,14 +45,14 @@ export default function Overview({ bridge, confirm, guideVisible, guiding, onSta
       <p>{t("接管前会保存原状态，先停止看门狗，再切换文件服务。旧任务保留，可按快照恢复。")}</p>
       <div className="flex flex-wrap gap-3"><Button size="sm" disabled={!!busy || !s.initialized} onClick={() => confirm({ title: t("接管旧文件服务？"), description: t("将保存当前任务状态，停用旧看门狗与文件服务，并由本程序接管。失败会尝试按快照恢复。"), action: t("确认接管"), execute: async () => (await run(t("正在接管旧服务"), "takeover_legacy", undefined, t("接管完成，仍需 Muse 实际读写验收"))).ok })}>{t("接管旧系统")}</Button></div>
     </Notice> : null}
-    <Card><CardHeader><CardTitle>{t("连接入口")}</CardTitle><CardDescription>{t(providerLabels[s.desktop.provider.kind])}</CardDescription></CardHeader>
+    <Card><CardHeader><CardTitle>{t("连接入口")}</CardTitle><CardDescription>{t(providerLabels[s.desktop.provider.kind])}{s.desktop.provider.kind !== "cloudflare_named" && (s.desktop.provider.https_port ?? 443) !== 443 ? ` · HTTPS :${s.desktop.provider.https_port}` : ""}</CardDescription></CardHeader>
       <CardContent className="flex flex-col gap-5">
         {s.status.url ? (
           <div className="flex min-w-0 items-center gap-3">
             <code className="flex min-h-10 min-w-0 flex-1 items-center select-text break-all rounded-md border border-input bg-transparent px-3 py-2 text-sm font-normal">{s.status.url}</code>
             <Button
               variant="outline"
-              aria-label={t("复制公网地址")}
+              aria-label={tailnetOnly ? t("复制 Tailnet 地址") : t("复制公网地址")}
               onClick={async () => {
                 try {
                   await navigator.clipboard.writeText(s.status.url!);
@@ -70,11 +71,11 @@ export default function Overview({ bridge, confirm, guideVisible, guiding, onSta
         <dl className="detail-grid">
           <div><dt className="flex items-center gap-2 text-muted-foreground"><Server className="size-4" />{t("本地文件服务")}</dt><dd className="flex flex-wrap items-center gap-x-3 gap-y-1"><span>{s.status.api_up ? t("运行中") : t("已停止监听")}</span>{s.status.api_up ? <span className="tabular-nums">127.0.0.1:{s.status.api_port}</span> : null}</dd></div>
           <div><dt className="flex items-center gap-2 text-muted-foreground"><Link2 className="size-4" />{t("入口状态")}</dt><dd>{development ? s.status.funnel_up ? t("模拟入口就绪") : t("模拟入口已暂停") : s.status.funnel_up ? t("转发已配置") : s.desktop.desired_enabled ? t("尚未就绪") : t("已暂停")}</dd></div>
-          <div className="min-[600px]:col-span-2"><dt className="flex items-center gap-2 text-muted-foreground"><Globe className="size-4" />{t("公网健康检查")}</dt><dd>{development ? t("开发隔离，不执行") : verified === true ? t("检查已通过") : verified === false ? t("检查未通过，请重试") : t("尚未进行公网健康检查")}</dd></div>
+          <div className="min-[600px]:col-span-2"><dt className="flex items-center gap-2 text-muted-foreground"><Globe className="size-4" />{tailnetOnly ? t("Tailnet 连接检查") : t("公网健康检查")}</dt><dd>{development ? t("开发隔离，不执行") : verified === true ? t("检查已通过") : verified === false ? t("检查未通过，请重试") : tailnetOnly ? t("尚未进行 Tailnet 连接检查") : t("尚未进行公网健康检查")}</dd></div>
           <div><dt className="text-muted-foreground">{t("最近探测")}</dt><dd className="tabular-nums">{timeLabel(s.status.last_check)}</dd></div>
           <div><dt className="text-muted-foreground">{t("最近文件访问（已鉴权）")}</dt><dd className="tabular-nums">{timeLabel(stats.last_request)}</dd></div>
         </dl>
-        {!guiding ? <div className="flex flex-wrap gap-3"><Button variant="outline" size="sm" disabled={!!busy || development || !s.status.api_up || !s.status.funnel_up || !s.status.url || (!s.agent_ready && !(s.legacy_api_enabled && s.initialized))} onClick={onTestPublicConnection}><ShieldCheck data-icon="inline-start" />{t("测试公网健康")}</Button><Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void bridge.refresh()}><RefreshCw data-icon="inline-start" />{t("刷新状态")}</Button></div> : null}
+        {!guiding ? <div className="flex flex-wrap gap-3"><Button variant="outline" size="sm" disabled={!!busy || development || !s.status.api_up || !s.status.funnel_up || !s.status.url || (!s.agent_ready && !(s.legacy_api_enabled && s.initialized))} onClick={onTestPublicConnection}><ShieldCheck data-icon="inline-start" />{tailnetOnly ? t("测试 Tailnet 连接") : t("测试公网健康")}</Button><Button size="sm" variant="ghost" disabled={!!busy} onClick={() => void bridge.refresh()}><RefreshCw data-icon="inline-start" />{t("刷新状态")}</Button></div> : null}
       </CardContent>
     </Card>
     <Card><CardHeader><CardTitle>{t("本次会话的文件活动")}</CardTitle><CardDescription>{t("统计目录列表、读取、写入和新建目录，包含失败请求，不含健康探测。")}</CardDescription></CardHeader><CardContent className="flex flex-col gap-5">

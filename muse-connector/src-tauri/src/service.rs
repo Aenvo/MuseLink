@@ -12,9 +12,12 @@ use crate::core::{
     token,
 };
 use crate::profile::{
-    DesktopState, DeviceNameUpdate, Language, ProviderSettings, RuntimeProfile, valid_device_name,
+    DesktopState, DeviceNameUpdate, Language, ProviderKind, ProviderSettings, RuntimeProfile,
+    valid_device_name,
 };
-use crate::tunnel::{Health, TunnelManager, TunnelObservation, TunnelStatus, observe_tailscale};
+use crate::tunnel::{
+    Health, TunnelManager, TunnelObservation, TunnelStatus, observe_tailscale_target,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::{
@@ -635,23 +638,23 @@ impl ServiceController {
         }
     }
     async fn supervise(&self) {
-        self.supervise_with(|port| async move {
+        self.supervise_with(|port, kind, https_port| async move {
             if !self.probe_owned(port).await {
                 return None;
             }
             Some(if self.profile.is_development() {
                 Ok(TunnelObservation::simulated(true))
             } else {
-                observe_tailscale(port).await
+                observe_tailscale_target(port, &kind, https_port).await
             })
         })
         .await;
     }
-    async fn supervise_with<Fut>(&self, probe: impl FnOnce(u16) -> Fut)
+    async fn supervise_with<Fut>(&self, probe: impl FnOnce(u16, ProviderKind, u16) -> Fut)
     where
         Fut: std::future::Future<Output = Option<Result<TunnelObservation, String>>>,
     {
-        let (generation, port) = {
+        let (generation, port, kind, https_port) = {
             let mut runtime = self.runtime.lock().await;
             if self.exiting.load(Ordering::Relaxed) || self.maintenance.load(Ordering::Relaxed) {
                 return;
@@ -671,19 +674,26 @@ impl ServiceController {
             {
                 return;
             }
-            if !runtime.tunnel.is_live_tailscale(runtime.actual_port)
-                || runtime
-                    .api_task
-                    .as_ref()
-                    .is_none_or(|task| task.is_finished())
+            let Some((kind, https_port)) =
+                runtime.tunnel.live_tailscale_target(runtime.actual_port)
+            else {
+                let result = self.start_locked(&mut runtime).await;
+                self.record_retry(&mut runtime, result);
+                return;
+            };
+            if runtime
+                .api_task
+                .as_ref()
+                .is_none_or(|task| task.is_finished())
             {
                 let result = self.start_locked(&mut runtime).await;
                 self.record_retry(&mut runtime, result);
                 return;
             }
-            (runtime.generation, runtime.actual_port)
+            (runtime.generation, runtime.actual_port, kind, https_port)
         };
-        self.finish_observation(generation, probe(port).await).await;
+        self.finish_observation(generation, probe(port, kind, https_port).await)
+            .await;
     }
     async fn finish_observation(
         &self,
@@ -794,8 +804,7 @@ impl ServiceController {
             Ok(o)
                 if runtime.tunnel.is_owned()
                     && o.online
-                    && (o.configured
-                        || provider.kind != crate::profile::ProviderKind::Tailscale) =>
+                    && (o.configured || !provider.kind.is_tailscale()) =>
             {
                 Ok(o)
             }
@@ -2050,7 +2059,7 @@ mod tests {
                 let controller = controller.clone();
                 async move {
                     controller
-                        .supervise_with(|_| async {
+                        .supervise_with(|_, _, _| async {
                             started.send(()).unwrap();
                             pending.await.unwrap()
                         })
@@ -2074,6 +2083,7 @@ mod tests {
                                 kind: ProviderKind::CloudflareNamed,
                                 tunnel_id: "test-tunnel".into(),
                                 hostname: "muse.example.com".into(),
+                                ..ProviderSettings::default()
                             })
                             .await
                             .unwrap();

@@ -6,6 +6,12 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 
 ## [Unreleased]
 
+### Improvements & Added
+- **Added Tailscale Serve (Tailnet-only) connection provider and configurable HTTPS ports**: When Muse and the target device share the same Tailnet, switch to Tailscale Serve under **Connection** for managed private HTTPS forwarding without degraded warnings, and choose an alternate HTTPS port when port 443 is occupied by other services.
+  - Added the `tailscale_serve` provider and `https_port` setting (`tunnel.rs`, `profile.rs`, `service.rs`): Tailscale Funnel supports ports `443` (default), `8443`, and `10000`, while Tailscale Serve supports `443`, `8443`, `10000`, or any custom port (`1–65535`). Manages `--https=<port>` start/stop and per-port exclusivity checks without touching other ports, and reuses existing matching `tailscale serve` mappings (omitting `:443` and preserving `:port` for custom ports).
+  - **Two-way exposure safeguards**: `Tailscale Funnel` mode refuses to auto-upgrade an existing matching `tailscale serve` rule on the chosen port into a public Funnel and prompts you to switch providers; `Tailscale Serve` mode likewise refuses to take over a port where public Funnel is active.
+  - Added the HTTPS port selector, always-visible provider descriptions, and a Tailnet-only connection guide card (with MagicDNS / HTTPS Certificates tooltips and quick links to the Tailscale DNS console) under **Connection**, plus localized Tailnet wording across Overview, Setup Guide, and health checks (`zh-CN` / `en` / `ja`).
+
 ### Security & Stability
 - **Hardened command approval against obfuscated flags and download cradles** ([#15](https://github.com/Aenvo/MuseLink/pull/15) by [@KammyAugust11](https://github.com/KammyAugust11)): Command approval now detects PowerShell `-EncodedCommand` prefix abbreviations and inline download-and-execute (download cradle) patterns, always requiring single-use confirmation instead of session grants.
   - Matches `-ec` and longer `-EncodedCommand` prefixes (`-enc`, `-enco`, etc.) globally while scoping short prefixes (`-e`, `-en`) to `powershell` / `pwsh` invocations so normal developer commands like `pip install -e .`, `rg -e`, and `node -e` are not falsely escalated.

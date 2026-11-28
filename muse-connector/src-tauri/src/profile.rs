@@ -23,15 +23,49 @@ pub enum ProviderKind {
     #[default]
     #[serde(alias = "cloudflare_quick")]
     Tailscale,
+    TailscaleServe,
     CloudflareNamed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+impl ProviderKind {
+    pub fn is_tailscale(&self) -> bool {
+        matches!(self, Self::Tailscale | Self::TailscaleServe)
+    }
+}
+
+pub fn default_tailscale_https_port() -> u16 {
+    443
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct ProviderSettings {
     pub kind: ProviderKind,
     pub tunnel_id: String,
     pub hostname: String,
+    #[serde(default = "default_tailscale_https_port")]
+    pub https_port: u16,
+}
+
+impl Default for ProviderSettings {
+    fn default() -> Self {
+        Self {
+            kind: ProviderKind::default(),
+            tunnel_id: String::new(),
+            hostname: String::new(),
+            https_port: default_tailscale_https_port(),
+        }
+    }
+}
+
+impl ProviderSettings {
+    pub fn effective_https_port(&self) -> u16 {
+        if self.https_port == 0 {
+            default_tailscale_https_port()
+        } else {
+            self.https_port
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -565,6 +599,23 @@ mod tests {
         let legacy = profile.load_desktop().unwrap();
         assert!(!legacy.close_to_tray);
         assert_eq!(legacy.provider.kind, ProviderKind::Tailscale);
+        std::fs::write(
+            profile.state_path(),
+            r#"{"provider":{"kind":"tailscale_serve"}}"#,
+        )
+        .unwrap();
+        let serve = profile.load_desktop().unwrap();
+        assert_eq!(serve.provider.kind, ProviderKind::TailscaleServe);
+        assert!(serve.provider.kind.is_tailscale());
+        assert_eq!(serve.provider.https_port, 443);
+        std::fs::write(
+            profile.state_path(),
+            r#"{"provider":{"kind":"tailscale_serve","https_port":8443}}"#,
+        )
+        .unwrap();
+        let serve_custom = profile.load_desktop().unwrap();
+        assert_eq!(serve_custom.provider.kind, ProviderKind::TailscaleServe);
+        assert_eq!(serve_custom.provider.https_port, 8443);
         std::fs::remove_file(profile.state_path()).unwrap();
         std::fs::remove_dir(home).unwrap();
     }

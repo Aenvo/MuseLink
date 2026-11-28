@@ -491,6 +491,8 @@ fn open_tool_setup(tool: String, app: tauri::AppHandle) -> Result<(), String> {
             }
         }
         "tailscale_funnel" => "https://tailscale.com/docs/features/tailscale-funnel#enable-funnel",
+        "tailscale_serve" => "https://tailscale.com/docs/features/tailscale-serve",
+        "tailscale_dns" => "https://login.tailscale.com/admin/dns",
         "cloudflared" => {
             "https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/"
         }
@@ -554,6 +556,7 @@ async fn cloudflare_action(
                 kind: profile::ProviderKind::CloudflareNamed,
                 tunnel_id: name.ok_or("请选择隧道")?,
                 hostname: hostname.ok_or("请输入主机名")?,
+                ..ProviderSettings::default()
             };
             tunnel::validate_provider(&settings)?;
             tunnel::run_cli(
@@ -582,8 +585,19 @@ async fn test_public_connection(
     if !status.api_up || !status.funnel_up {
         return Err("请先开启并配置连接".into());
     }
-    let url = status.url.as_ref().ok_or("尚未取得公网地址")?;
-    let parsed = reqwest::Url::parse(&url).map_err(|_| "公网地址无效")?;
+    let tailnet_only = state.desktop_state().provider.kind == profile::ProviderKind::TailscaleServe;
+    let url = status.url.as_ref().ok_or(if tailnet_only {
+        "尚未取得 Tailnet 地址"
+    } else {
+        "尚未取得公网地址"
+    })?;
+    let parsed = reqwest::Url::parse(&url).map_err(|_| {
+        if tailnet_only {
+            "Tailnet 地址无效"
+        } else {
+            "公网地址无效"
+        }
+    })?;
     if parsed.scheme() != "https"
         || parsed.username() != ""
         || parsed.password().is_some()
@@ -591,7 +605,7 @@ async fn test_public_connection(
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        return Err("公网测试只允许经过 TLS 的已配置入口".into());
+        return Err("连接测试只允许经过 TLS 的已配置入口".into());
     }
     let client = public_http_client()?;
     let agent_context = if agent.unwrap_or(false) {
@@ -606,26 +620,57 @@ async fn test_public_connection(
         Some((token, _)) => ("/agent/v1/roots", token.clone()),
         None => ("/api/health", state.api.token()),
     };
-    let endpoint = parsed.join(route).map_err(|_| "公网地址无效")?;
+    let endpoint = parsed.join(route).map_err(|_| {
+        if tailnet_only {
+            "Tailnet 地址无效"
+        } else {
+            "公网地址无效"
+        }
+    })?;
     let result = async {
         let mut response = client
             .get(endpoint)
             .bearer_auth(&credential)
             .send()
             .await
-            .map_err(|_| "公网请求失败，请检查网络、DNS 和证书")?;
+            .map_err(|_| {
+                if tailnet_only {
+                    "Tailnet 请求失败，请检查 Tailscale 登录、DNS 和证书"
+                } else {
+                    "公网请求失败，请检查网络、DNS 和证书"
+                }
+            })?;
         if response.status() != reqwest::StatusCode::OK {
-            return Err("公网入口没有返回成功健康响应");
+            return Err(if tailnet_only {
+                "Tailnet 入口没有返回成功健康响应"
+            } else {
+                "公网入口没有返回成功健康响应"
+            });
         }
         let mut bytes = Vec::new();
-        while let Some(chunk) = response.chunk().await.map_err(|_| "公网响应读取失败")? {
+        while let Some(chunk) = response.chunk().await.map_err(|_| {
+            if tailnet_only {
+                "Tailnet 响应读取失败"
+            } else {
+                "公网响应读取失败"
+            }
+        })? {
             if bytes.len() + chunk.len() > 65536 {
-                return Err("公网响应超出健康接口限制");
+                return Err(if tailnet_only {
+                    "Tailnet 响应超出健康接口限制"
+                } else {
+                    "公网响应超出健康接口限制"
+                });
             }
             bytes.extend_from_slice(&chunk);
         }
-        let body: Value =
-            serde_json::from_slice(&bytes).map_err(|_| "公网响应不是文件服务 JSON")?;
+        let body: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            if tailnet_only {
+                "Tailnet 响应不是文件服务 JSON"
+            } else {
+                "公网响应不是文件服务 JSON"
+            }
+        })?;
         let matches_protocol = if agent_context.is_some() {
             body["version"] == "1"
                 && ["search", "read", "write"]
@@ -635,7 +680,11 @@ async fn test_public_connection(
             body["ok"] == true && body["version"] == "0.3"
         };
         if !matches_protocol {
-            return Err("公网响应与文件协议不匹配");
+            return Err(if tailnet_only {
+                "Tailnet 响应与文件协议不匹配"
+            } else {
+                "公网响应与文件协议不匹配"
+            });
         }
         Ok(())
     }
@@ -645,7 +694,15 @@ async fn test_public_connection(
             .mark_agent_public_result(&status, &token, &policy, result.is_ok())
             .await?;
         return result
-            .map(|()| json!({"message":"Muse 专用令牌的公网验证通过"}))
+            .map(|()| {
+                json!({
+                    "message": if tailnet_only {
+                        "Muse 专用令牌的 Tailnet 验证通过"
+                    } else {
+                        "Muse 专用令牌的公网验证通过"
+                    }
+                })
+            })
             .map_err(str::to_owned);
     }
     match result {
@@ -653,9 +710,19 @@ async fn test_public_connection(
             state.mark_public_result(
                 &status,
                 true,
-                "公网健康接口已验证；仍需 Muse 来源端读写验收",
+                if tailnet_only {
+                    "Tailnet 健康接口已验证；仍需 Muse 来源端读写验收"
+                } else {
+                    "公网健康接口已验证；仍需 Muse 来源端读写验收"
+                },
             )?;
-            Ok(json!({"message":"公网健康接口验证通过，尚未代替 Muse 读写验收"}))
+            Ok(json!({
+                "message": if tailnet_only {
+                    "Tailnet 健康接口验证通过，尚未代替 Muse 读写验收"
+                } else {
+                    "公网健康接口验证通过，尚未代替 Muse 读写验收"
+                }
+            }))
         }
         Err(e) => {
             state.mark_public_result(&status, false, e)?;

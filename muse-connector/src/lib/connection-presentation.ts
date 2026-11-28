@@ -16,7 +16,9 @@ export function connectionPresentation(t: Translate, snapshot: Snapshot | null, 
   if (status.health === "Degraded") return { label: t("连接需要检查"), tone: "warning", pending: false };
   if (status.health === "Paused") return { label: t("已暂停"), tone: "neutral", pending: false };
   if (status.health === "Up" && status.api_up && status.funnel_up) {
-    if ((snapshot.agent_ready ? status.agent_public_verified : status.public_verified) === false) return { label: t("公网检查未通过"), tone: "warning", pending: false };
+    if ((snapshot.agent_ready ? status.agent_public_verified : status.public_verified) === false) {
+      return { label: snapshot.desktop.provider.kind === "tailscale_serve" ? t("连接检查未通过") : t("公网检查未通过"), tone: "warning", pending: false };
+    }
     return { label: snapshot.profile === "development" ? t("模拟已连接") : t("已连接"), tone: "success", pending: false };
   }
   return { label: status.health === "Unknown" ? t("状态待确认") : t("连接尚未就绪"), tone: "warning", pending: false };

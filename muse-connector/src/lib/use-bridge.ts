@@ -5,8 +5,8 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import type { Language } from "@/lib/i18n";
 
-export type ProviderKind = "tailscale" | "cloudflare_named";
-export interface ProviderSettings { kind: ProviderKind; tunnel_id: string; hostname: string }
+export type ProviderKind = "tailscale" | "tailscale_serve" | "cloudflare_named";
+export interface ProviderSettings { kind: ProviderKind; tunnel_id: string; hostname: string; https_port?: number }
 export interface BridgeConfig { port: number; read_only: boolean; roots: Record<string, string> }
 export type FileAccessMode = "folders" | "full";
 export type FileGrantScope = "off" | "folders" | "all_local";
@@ -182,6 +182,10 @@ export function useBridge() {
   return { snapshot, error, setError, busy, run, refresh: refreshNow, legacy, windowVisible };
 }
 export type BridgeModel = ReturnType<typeof useBridge>;
-export const providerLabels = { tailscale: "Tailscale Funnel", cloudflare_named: "Cloudflare 命名隧道（自有域名）" } as const satisfies Record<ProviderKind, string>;
+export const providerLabels = {
+  tailscale: "Tailscale Funnel",
+  tailscale_serve: "Tailscale Serve（仅 Tailnet 内网）",
+  cloudflare_named: "Cloudflare 命名隧道（自有域名）",
+} as const satisfies Record<ProviderKind, string>;
 export const formatTime = (value: string, language: Language) => new Date(value).toLocaleString(language, { hour12: false });
 export function formatBytes(value: number) { if (value < 1024) return `${value} B`; if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`; return `${(value / 1024 / 1024).toFixed(2)} MiB`; }

@@ -302,7 +302,7 @@ pub async fn restore_funnel(record: &MigrationRecord) -> Result<(), String> {
             &crate::tunnel::run_cli(&exe, &["funnel", "status", "--json"]).await?,
         )
         .map_err(|_| "无法确认当前入口")?;
-        crate::tunnel::ensure_exclusive_mapping(&current, target)?;
+        crate::tunnel::ensure_exclusive_mapping(&current, target, 443)?;
         crate::tunnel::run_cli(
             &exe,
             &["funnel", "--bg", "--https=443", &target.to_string()],

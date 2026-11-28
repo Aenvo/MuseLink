@@ -25,6 +25,13 @@ const diagnosticPatterns = [
   [/^文件服务无法监听：([\s\S]+)$/, "文件服务无法监听：{0}"],
   [/^文件服务已停止，隧道清理失败：([\s\S]+)$/, "文件服务已停止，隧道清理失败：{0}"],
   [/^端口 (\d+) 被其他进程占用；本应用未取得服务归属$/, "端口 {0} 被其他进程占用；本应用未取得服务归属"],
+  [/^检测到 HTTPS 端口 (\d+) 已配置 Tailscale Serve（仅内网），已拒绝自动开启公网 Funnel；如需仅 Tailnet 内网访问，请在连接页切换为 Tailscale Serve$/, "检测到 HTTPS 端口 {0} 已配置 Tailscale Serve（仅内网），已拒绝自动开启公网 Funnel；如需仅 Tailnet 内网访问，请在连接页切换为 Tailscale Serve"],
+  [/^HTTPS 端口 (\d+) 当前已开启公网 Tailscale Funnel，已拒绝按仅内网模式接管；请先关闭 Funnel 或切换至 Tailscale Funnel 模式$/, "HTTPS 端口 {0} 当前已开启公网 Tailscale Funnel，已拒绝按仅内网模式接管；请先关闭 Funnel 或切换至 Tailscale Funnel 模式"],
+  [/^检测到 HTTPS 端口 (\d+) 已配置 Tailscale Serve（仅内网）；如需仅 Tailnet 访问，请在连接页切换为 Tailscale Serve$/, "检测到 HTTPS 端口 {0} 已配置 Tailscale Serve（仅内网）；如需仅 Tailnet 访问，请在连接页切换为 Tailscale Serve"],
+  [/^HTTPS 端口 (\d+) 当前已开启公网 Funnel，与仅 Tailnet 内网模式不符$/, "HTTPS 端口 {0} 当前已开启公网 Funnel，与仅 Tailnet 内网模式不符"],
+  [/^HTTPS 端口 (\d+) 含其他应用的转发，已拒绝覆盖或撤销$/, "HTTPS 端口 {0} 含其他应用的转发，已拒绝覆盖或撤销"],
+  [/^HTTPS 端口 (\d+) 路由结构未知，未改变转发$/, "HTTPS 端口 {0} 路由结构未知，未改变转发"],
+  [/^HTTPS 端口 (\d+) 正被其他 TCP 转发使用$/, "HTTPS 端口 {0} 正被其他 TCP 转发使用"],
 ] as const satisfies readonly (readonly [RegExp, Message])[];
 
 export function LanguageProvider({ language, children }: { language: Language; children: ReactNode }) {

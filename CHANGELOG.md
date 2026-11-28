@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+### 优化与新增
+- **新增 Tailscale Serve（仅 Tailnet 内网）连接方式与可配置 HTTPS 端口**：当 Muse 与目标设备位于同一 Tailnet 时，可在「连接」页切换为 Tailscale Serve 自动托管纯内网 HTTPS 转发、消除手动配置 `tailscale serve` 的黄色报警，并支持自定义对外 HTTPS 端口以避开 443 端口冲突。
+  - 新增 `tailscale_serve` 提供方与 `https_port` 配置（`tunnel.rs`、`profile.rs`、`service.rs`）：Tailscale Funnel 支持 `443`（默认）/ `8443` / `10000`，Tailscale Serve 支持 `443` / `8443` / `10000` 及 `1–65535` 自定义端口；自动托管 `--https=<port>` 启停与按端口隔离的独占检查，不干涉其他端口上的既有服务，并无缝复用同端口手动 `tailscale serve`（443 省略端口、非 443 自动保留 `:port`）。
+  - **双向防误暴露保护**：在 `Tailscale Funnel` 模式下检测到所选端口已存在同目标纯内网 `tailscale serve` 映射时，拒绝自动覆盖升级为公网 Funnel 并给出切换指引；在 `Tailscale Serve` 模式下检测到该端口已开启公网 Funnel 时，同样拒绝按纯内网接管。
+  - 连接页新增 HTTPS 端口选择器、常显提供方说明与 `Tailscale Serve` 内网说明卡片（内置 MagicDNS / HTTPS Certificates 悬停解释与 Tailscale DNS 管理台快捷入口）；概览页、首次配置指引与入口健康测试同步适配 Tailnet 语境与中 / 英 / 日三语文案。
+
 ### 安全与稳定性加固
 - **加固命令审批的混淆命令与远程下载即执行检测**（[#15](https://github.com/Aenvo/MuseLink/pull/15)，感谢 [@KammyAugust11](https://github.com/KammyAugust11)）：命令审批新增识别 PowerShell `-EncodedCommand` 各类前缀缩写与常见下载即执行（download cradle）模式，命中时始终强制单次确认，避免绕过会话级免打扰。
   - 覆盖 PowerShell `-EncodedCommand` 的长前缀（`-enc` / `-enco` 等）与 `-ec`，并将 `-e` / `-en` 等短缩写限定于 `powershell` / `pwsh` 调用上下文，避免误伤 `pip install -e .`、`rg -e`、`node -e` 等常规开发命令。

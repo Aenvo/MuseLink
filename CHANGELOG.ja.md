@@ -6,6 +6,12 @@
 
 ## [Unreleased]
 
+### 改善と新機能
+- **Tailscale Serve（Tailnet 内のみ・非公開）接続方式と HTTPS ポート設定を追加**：Muse 側と接続先が同一 Tailnet にある場合、「接続」から Tailscale Serve を選ぶだけでインターネットへ公開せず HTTPS 転送を自動管理でき、ポート 443 が他サービスで使用中の場合も別ポートへ変更できます。
+  - `tailscale_serve` プロバイダーと `https_port` 設定（`tunnel.rs`、`profile.rs`、`service.rs`）を追加：Tailscale Funnel は `443`（既定）・`8443`・`10000`、Tailscale Serve は `443`・`8443`・`10000` および任意のポート（`1–65535`）に対応します。選択したポート単位で `--https=<port>` の起動・停止と排他チェックを行い、別ポートのサービスに影響を与えず、手動構成済みの同一ポート `tailscale serve` もそのまま引き継ぎます（443 はポート省略、その他は `:port` を保持）。
+  - **誤公開を防ぐ双方向ガード**：`Tailscale Funnel` モードで選択ポートに同一ローカルポート向けの `tailscale serve` 設定を検出した場合は、自動で公開 Funnel へ昇格させず切り替えを案内します。逆に `Tailscale Serve` モードでも、そのポートで公開 Funnel が有効な場合は非公開モードとしての引き継ぎを拒否します。
+  - 「接続」画面に HTTPS ポート選択、常時表示のプロバイダー説明、Tailnet 内接続ガイドカード（MagicDNS / HTTPS Certificates のツールチップと Tailscale DNS 管理画面へのリンク付き）を追加し、概要・初回設定ガイド・接続テストの 3 言語文言を統一しました。
+
 ### セキュリティと安定性の強化
 - **コマンド承認における難読化フラグとダウンロード＆即時実行（download cradle）の検知を強化**（[#15](https://github.com/Aenvo/MuseLink/pull/15) · [@KammyAugust11](https://github.com/KammyAugust11)）：PowerShell の `-EncodedCommand` 省略形およびダウンロード内容を直接実行するパターンを検知し、セッション許可ではなく常に単回承認を必須化しました。
   - `-ec` および長めの `-EncodedCommand` 前方一致（`-enc`・`-enco` など）を常時検知しつつ、短い省略形（`-e`・`-en`）は `powershell` / `pwsh` 呼び出しの引数に限定し、`pip install -e .`・`rg -e`・`node -e` などの通常の開発コマンドの誤検知を防ぎました。

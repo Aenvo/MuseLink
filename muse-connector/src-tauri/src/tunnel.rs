@@ -184,6 +184,8 @@ pub async fn run_cli(exe: &std::path::Path, args: &[&str]) -> Result<String, Str
 struct Owner {
     port: u16,
     provider: ProviderKind,
+    #[serde(default = "crate::profile::default_tailscale_https_port")]
+    https_port: u16,
 }
 
 pub struct TunnelManager {
@@ -216,6 +218,7 @@ impl TunnelManager {
             &serde_json::to_vec(&Owner {
                 port,
                 provider: settings.kind.clone(),
+                https_port: settings.effective_https_port(),
             })
             .map_err(|e| e.to_string())?,
         )
@@ -232,25 +235,55 @@ impl TunnelManager {
             self.owned = true;
             return self.observe().await;
         }
+        validate_provider(settings)?;
         match settings.kind {
             ProviderKind::Tailscale => {
+                let https_port = settings.effective_https_port();
+                let https_flag = format!("--https={https_port}");
                 let exe = discover_executable(&exe_file_name("tailscale"))
                     .ok_or("未检测到 Tailscale，请先安装并登录")?;
                 let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
                 let cfg: Value = serde_json::from_str(&raw)
                     .map_err(|_| "无法解析 Tailscale 配置，未改变入口")?;
-                ensure_exclusive_mapping(&cfg, port)?;
+                ensure_exclusive_mapping(&cfg, port, https_port)?;
+                if has_serve_only_mapping(&cfg, port, https_port) {
+                    return Err(format!(
+                        "检测到 HTTPS 端口 {https_port} 已配置 Tailscale Serve（仅内网），已拒绝自动开启公网 Funnel；如需仅 Tailnet 内网访问，请在连接页切换为 Tailscale Serve"
+                    ));
+                }
                 self.remember(settings, port)?;
                 // 先记归属再执行：超时/崩溃后可以识别本次未完成操作。
                 self.current = settings.clone();
                 self.port = port;
                 self.owned = true;
-                run_cli(&exe, &["funnel", "--bg", "--https=443", &port.to_string()]).await?;
+                run_cli(&exe, &["funnel", "--bg", &https_flag, &port.to_string()]).await?;
+            }
+            ProviderKind::TailscaleServe => {
+                let https_port = settings.effective_https_port();
+                let https_flag = format!("--https={https_port}");
+                let exe = discover_executable(&exe_file_name("tailscale"))
+                    .ok_or("未检测到 Tailscale，请先安装并登录")?;
+                let raw = run_cli(&exe, &["serve", "status", "--json"]).await?;
+                let cfg: Value = serde_json::from_str(&raw)
+                    .map_err(|_| "无法解析 Tailscale 配置，未改变入口")?;
+                ensure_exclusive_mapping(&cfg, port, https_port)?;
+                if has_funnel_enabled_on_port(&cfg, https_port) {
+                    return Err(format!(
+                        "HTTPS 端口 {https_port} 当前已开启公网 Tailscale Funnel，已拒绝按仅内网模式接管；请先关闭 Funnel 或切换至 Tailscale Funnel 模式"
+                    ));
+                }
+                self.remember(settings, port)?;
+                // 先记归属再执行：超时/崩溃后可以识别本次未完成操作。
+                self.current = settings.clone();
+                self.port = port;
+                self.owned = true;
+                if !has_serve_only_mapping(&cfg, port, https_port) {
+                    run_cli(&exe, &["serve", "--bg", &https_flag, &port.to_string()]).await?;
+                }
             }
             ProviderKind::CloudflareNamed => {
                 let exe = discover_executable(&exe_file_name("cloudflared"))
                     .ok_or("未检测到 cloudflared，请先安装")?;
-                validate_provider(settings)?;
                 let mut cmd = command(&exe);
                 cmd.arg("tunnel").arg("--no-autoupdate").args([
                     "--url",
@@ -297,15 +330,33 @@ impl TunnelManager {
         {
             self.child_job.take();
         }
-        if self.owned && self.current.kind == ProviderKind::Tailscale {
+        if self.owned && self.current.kind.is_tailscale() {
+            let https_port = self.current.effective_https_port();
+            let https_flag = format!("--https={https_port}");
             let exe = discover_executable(&exe_file_name("tailscale"))
                 .ok_or("Tailscale 工具不可用，无法清理入口")?;
-            let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
-            let cfg: Value =
-                serde_json::from_str(&raw).map_err(|_| "无法确认隧道归属，未撤销入口")?;
-            ensure_exclusive_mapping(&cfg, self.port)?;
-            if has_mapping(&cfg, self.port) {
-                run_cli(&exe, &["funnel", "--https=443", "off"]).await?;
+            match self.current.kind {
+                ProviderKind::Tailscale => {
+                    let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
+                    let cfg: Value =
+                        serde_json::from_str(&raw).map_err(|_| "无法确认隧道归属，未撤销入口")?;
+                    ensure_exclusive_mapping(&cfg, self.port, https_port)?;
+                    if has_mapping(&cfg, self.port, https_port) {
+                        run_cli(&exe, &["funnel", &https_flag, "off"]).await?;
+                    }
+                }
+                ProviderKind::TailscaleServe => {
+                    let raw = run_cli(&exe, &["serve", "status", "--json"]).await?;
+                    let cfg: Value =
+                        serde_json::from_str(&raw).map_err(|_| "无法确认隧道归属，未撤销入口")?;
+                    ensure_exclusive_mapping(&cfg, self.port, https_port)?;
+                    if has_serve_only_mapping(&cfg, self.port, https_port)
+                        && !has_funnel_enabled_on_port(&cfg, https_port)
+                    {
+                        run_cli(&exe, &["serve", &https_flag, "off"]).await?;
+                    }
+                }
+                ProviderKind::CloudflareNamed => {}
             }
         }
         let was_owned = self.owned;
@@ -320,8 +371,10 @@ impl TunnelManager {
         if self.profile.is_development() {
             return Ok(TunnelObservation::simulated(self.owned));
         }
+        let https_port = self.current.effective_https_port();
         match self.current.kind {
-            ProviderKind::Tailscale => observe_tailscale(self.port).await,
+            ProviderKind::Tailscale => observe_tailscale(self.port, https_port).await,
+            ProviderKind::TailscaleServe => observe_tailscale_serve(self.port, https_port).await,
             ProviderKind::CloudflareNamed => {
                 let running = match self.child.as_mut() {
                     Some(child) => child
@@ -351,6 +404,7 @@ impl TunnelManager {
             && let Ok(owner) = serde_json::from_slice::<Owner>(&raw)
             && owner.provider == settings.kind
             && owner.port == port
+            && owner.https_port == settings.effective_https_port()
         {
             self.owned = true;
             self.port = port;
@@ -360,79 +414,228 @@ impl TunnelManager {
     pub fn is_owned(&self) -> bool {
         self.owned
     }
-    pub(crate) fn is_live_tailscale(&self, port: u16) -> bool {
-        self.owned && self.current.kind == ProviderKind::Tailscale && self.port == port
+    pub(crate) fn live_tailscale_target(&self, port: u16) -> Option<(ProviderKind, u16)> {
+        (self.owned && self.current.kind.is_tailscale() && self.port == port).then(|| {
+            (
+                self.current.kind.clone(),
+                self.current.effective_https_port(),
+            )
+        })
     }
 }
 
-pub(crate) async fn observe_tailscale(port: u16) -> Result<TunnelObservation, String> {
+pub(crate) async fn observe_tailscale_target(
+    port: u16,
+    kind: &ProviderKind,
+    https_port: u16,
+) -> Result<TunnelObservation, String> {
+    match kind {
+        ProviderKind::TailscaleServe => observe_tailscale_serve(port, https_port).await,
+        _ => observe_tailscale(port, https_port).await,
+    }
+}
+
+pub(crate) async fn observe_tailscale(
+    port: u16,
+    https_port: u16,
+) -> Result<TunnelObservation, String> {
+    observe_tailscale_mode(port, https_port, true).await
+}
+
+pub(crate) async fn observe_tailscale_serve(
+    port: u16,
+    https_port: u16,
+) -> Result<TunnelObservation, String> {
+    observe_tailscale_mode(port, https_port, false).await
+}
+
+async fn observe_tailscale_mode(
+    port: u16,
+    https_port: u16,
+    require_funnel: bool,
+) -> Result<TunnelObservation, String> {
     let exe = discover_executable(&exe_file_name("tailscale")).ok_or("未安装 Tailscale")?;
-    let raw = run_cli(&exe, &["funnel", "status", "--json"]).await?;
+    let subcommand = if require_funnel { "funnel" } else { "serve" };
+    let raw = run_cli(&exe, &[subcommand, "status", "--json"]).await?;
     let cfg: Value = serde_json::from_str(&raw).map_err(|_| "Tailscale 状态未知：配置解析失败")?;
-    let configured = has_mapping(&cfg, port);
     let node: Value = serde_json::from_str(&run_cli(&exe, &["status", "--json"]).await?)
         .map_err(|_| "节点状态解析失败")?;
     let online = node["BackendState"] == "Running" && node["Self"]["Online"] == true;
-    let url = cfg["Web"].as_object().and_then(|web| {
+    Ok(evaluate_tailscale_status(
+        &cfg,
+        online,
+        port,
+        https_port,
+        require_funnel,
+    ))
+}
+
+fn evaluate_tailscale_status(
+    cfg: &Value,
+    online: bool,
+    port: u16,
+    https_port: u16,
+    require_funnel: bool,
+) -> TunnelObservation {
+    if require_funnel {
+        let configured = has_mapping(cfg, port, https_port);
+        let serve_only = !configured && has_serve_only_mapping(cfg, port, https_port);
+        let url = if configured {
+            extract_tailscale_url(cfg, port, https_port, true)
+        } else {
+            None
+        };
+        TunnelObservation {
+            configured,
+            online,
+            url,
+            note: if !online {
+                "Tailscale 节点未在线".into()
+            } else if serve_only {
+                format!(
+                    "检测到 HTTPS 端口 {https_port} 已配置 Tailscale Serve（仅内网）；如需仅 Tailnet 访问，请在连接页切换为 Tailscale Serve"
+                )
+            } else if !configured {
+                "隧道映射与当前 API 不一致".into()
+            } else {
+                "隧道已配置；公网来源尚未验证".into()
+            },
+        }
+    } else {
+        let funnel_on = has_funnel_enabled_on_port(cfg, https_port);
+        let configured = has_serve_only_mapping(cfg, port, https_port) && !funnel_on;
+        let url = if configured {
+            extract_tailscale_url(cfg, port, https_port, false)
+        } else {
+            None
+        };
+        TunnelObservation {
+            configured,
+            online,
+            url,
+            note: if !online {
+                "Tailscale 节点未在线".into()
+            } else if funnel_on {
+                format!("HTTPS 端口 {https_port} 当前已开启公网 Funnel，与仅 Tailnet 内网模式不符")
+            } else if !configured {
+                "隧道映射与当前 API 不一致".into()
+            } else {
+                "Tailnet 内网转发已配置（不暴露公网）；尚未验证连接".into()
+            },
+        }
+    }
+}
+
+fn proxy_matches_port(value: &Value, port: u16) -> bool {
+    value
+        .as_str()
+        .is_some_and(|raw| raw.trim_end_matches('/') == format!("http://127.0.0.1:{port}"))
+}
+
+fn host_matches_https_port(host: &str, https_port: u16) -> bool {
+    host.ends_with(&format!(":{https_port}"))
+}
+
+fn extract_tailscale_url(
+    cfg: &Value,
+    port: u16,
+    https_port: u16,
+    require_funnel: bool,
+) -> Option<String> {
+    cfg["Web"].as_object().and_then(|web| {
         web.iter()
             .find(|(host, v)| {
-                host.ends_with(":443")
-                    && v["Handlers"]["/"]["Proxy"] == format!("http://127.0.0.1:{}", port)
+                host_matches_https_port(host, https_port)
+                    && proxy_matches_port(&v["Handlers"]["/"]["Proxy"], port)
+                    && if require_funnel {
+                        cfg["AllowFunnel"][host.as_str()] == true
+                    } else {
+                        cfg["AllowFunnel"][host.as_str()] != true
+                    }
             })
-            .map(|(host, _)| format!("https://{}", host.trim_end_matches(":443")))
-    });
-    Ok(TunnelObservation {
-        configured,
-        online,
-        url,
-        note: if !online {
-            "Tailscale 节点未在线".into()
-        } else if !configured {
-            "隧道映射与当前 API 不一致".into()
-        } else {
-            "隧道已配置；公网来源尚未验证".into()
-        },
+            .map(|(host, _)| {
+                if https_port == 443 {
+                    format!("https://{}", host.trim_end_matches(":443"))
+                } else {
+                    format!("https://{host}")
+                }
+            })
     })
 }
 
 pub fn validate_provider(settings: &ProviderSettings) -> Result<(), String> {
-    if settings.kind == ProviderKind::CloudflareNamed {
-        if settings.tunnel_id.is_empty()
-            || settings.tunnel_id.len() > 100
-            || !settings
-                .tunnel_id
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err("请输入有效的隧道 ID 或名称".into());
+    match settings.kind {
+        ProviderKind::Tailscale => {
+            if !matches!(settings.https_port, 443 | 8443 | 10000) {
+                return Err("Tailscale Funnel 仅支持 443、8443 或 10000 端口".into());
+            }
         }
-        let hostname = &settings.hostname;
-        if hostname.len() > 253
-            || !hostname.contains('.')
-            || !hostname.split('.').all(|s| {
-                !s.is_empty()
-                    && s.len() <= 63
-                    && !s.starts_with('-')
-                    && !s.ends_with('-')
-                    && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            })
-        {
-            return Err("请输入不含协议、端口或路径的域名".into());
+        ProviderKind::TailscaleServe => {
+            if settings.https_port == 0 {
+                return Err("请输入 1–65535 之间的有效 HTTPS 端口".into());
+            }
+        }
+        ProviderKind::CloudflareNamed => {
+            if settings.tunnel_id.is_empty()
+                || settings.tunnel_id.len() > 100
+                || !settings
+                    .tunnel_id
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+            {
+                return Err("请输入有效的隧道 ID 或名称".into());
+            }
+            let hostname = &settings.hostname;
+            if hostname.len() > 253
+                || !hostname.contains('.')
+                || !hostname.split('.').all(|s| {
+                    !s.is_empty()
+                        && s.len() <= 63
+                        && !s.starts_with('-')
+                        && !s.ends_with('-')
+                        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                })
+            {
+                return Err("请输入不含协议、端口或路径的域名".into());
+            }
         }
     }
     Ok(())
 }
-fn has_mapping(cfg: &Value, port: u16) -> bool {
-    cfg["TCP"]["443"]["HTTPS"] == true
+fn has_mapping(cfg: &Value, port: u16, https_port: u16) -> bool {
+    let tcp_port = https_port.to_string();
+    cfg["TCP"][&tcp_port]["HTTPS"] == true
         && cfg["Web"].as_object().is_some_and(|web| {
             web.iter().any(|(host, v)| {
-                host.ends_with(":443")
-                    && v["Handlers"]["/"]["Proxy"] == format!("http://127.0.0.1:{port}")
-                    && cfg["AllowFunnel"][host] == true
+                host_matches_https_port(host, https_port)
+                    && proxy_matches_port(&v["Handlers"]["/"]["Proxy"], port)
+                    && cfg["AllowFunnel"][host.as_str()] == true
             })
         })
 }
-pub(crate) fn ensure_exclusive_mapping(cfg: &Value, port: u16) -> Result<(), String> {
+fn has_serve_only_mapping(cfg: &Value, port: u16, https_port: u16) -> bool {
+    let tcp_port = https_port.to_string();
+    cfg["TCP"][&tcp_port]["HTTPS"] == true
+        && cfg["Web"].as_object().is_some_and(|web| {
+            web.iter().any(|(host, v)| {
+                host_matches_https_port(host, https_port)
+                    && proxy_matches_port(&v["Handlers"]["/"]["Proxy"], port)
+                    && cfg["AllowFunnel"][host.as_str()] != true
+            })
+        })
+}
+fn has_funnel_enabled_on_port(cfg: &Value, https_port: u16) -> bool {
+    cfg["AllowFunnel"].as_object().is_some_and(|allow| {
+        allow
+            .iter()
+            .any(|(host, enabled)| host_matches_https_port(host, https_port) && *enabled == true)
+    })
+}
+pub(crate) fn ensure_exclusive_mapping(
+    cfg: &Value,
+    port: u16,
+    https_port: u16,
+) -> Result<(), String> {
     let object = cfg
         .as_object()
         .ok_or("Tailscale 返回了未知结构，未改变转发")?;
@@ -448,22 +651,25 @@ pub(crate) fn ensure_exclusive_mapping(cfg: &Value, port: u16) -> Result<(), Str
     }
     if let Some(web) = cfg["Web"].as_object() {
         for (host, entry) in web {
-            if !host.ends_with(":443") {
+            if !host_matches_https_port(host, https_port) {
                 continue;
             }
             if let Some(handlers) = entry["Handlers"].as_object() {
                 for (path, handler) in handlers {
-                    if path != "/" || handler["Proxy"] != format!("http://127.0.0.1:{port}") {
-                        return Err("443 入口含其他应用的转发，已拒绝覆盖或撤销".into());
+                    if path != "/" || !proxy_matches_port(&handler["Proxy"], port) {
+                        return Err(format!(
+                            "HTTPS 端口 {https_port} 含其他应用的转发，已拒绝覆盖或撤销"
+                        ));
                     }
                 }
             } else {
-                return Err("443 路由结构未知，未改变转发".into());
+                return Err(format!("HTTPS 端口 {https_port} 路由结构未知，未改变转发"));
             }
         }
     }
-    if cfg["TCP"]["443"].get("TCPForward").is_some() {
-        return Err("443 正被其他 TCP 转发使用".into());
+    let tcp_port = https_port.to_string();
+    if cfg["TCP"][&tcp_port].get("TCPForward").is_some() {
+        return Err(format!("HTTPS 端口 {https_port} 正被其他 TCP 转发使用"));
     }
     Ok(())
 }
@@ -488,15 +694,104 @@ mod tests {
     }
     #[test]
     fn mapping_checks_target_and_rejects_foreign_handlers() {
-        assert!(ensure_exclusive_mapping(&json!(null), 18790).is_err());
-        assert!(ensure_exclusive_mapping(&json!({"unexpected":true}), 18790).is_err());
-        assert!(ensure_exclusive_mapping(&json!({"Web":[]}), 18790).is_err());
+        assert!(ensure_exclusive_mapping(&json!(null), 18790, 443).is_err());
+        assert!(ensure_exclusive_mapping(&json!({"unexpected":true}), 18790, 443).is_err());
+        assert!(ensure_exclusive_mapping(&json!({"Web":[]}), 18790, 443).is_err());
         let cfg = json!({"TCP":{"443":{"HTTPS":true}},"Web":{"example.ts.net:443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:18790"}}}},"AllowFunnel":{"example.ts.net:443":true}});
-        assert!(has_mapping(&cfg, 18790));
-        assert!(!has_mapping(&cfg, 18795));
-        assert!(ensure_exclusive_mapping(&cfg, 18795).is_err());
+        assert!(has_mapping(&cfg, 18790, 443));
+        assert!(!has_mapping(&cfg, 18795, 443));
+        assert!(ensure_exclusive_mapping(&cfg, 18795, 443).is_err());
         let foreign = json!({"Web":{"example.ts.net:443":{"Handlers":{"/other":{"Proxy":"http://127.0.0.1:1234"}}}}});
-        assert!(ensure_exclusive_mapping(&foreign, 18790).is_err());
+        assert!(ensure_exclusive_mapping(&foreign, 18790, 443).is_err());
+        // 443 被其他应用占用时，切换至 8443 互不冲突
+        assert!(ensure_exclusive_mapping(&foreign, 18790, 8443).is_ok());
+
+        let serve_only = json!({
+            "TCP": {"443": {"HTTPS": true}},
+            "Web": {"example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:18790/"}}}}
+        });
+        assert!(ensure_exclusive_mapping(&serve_only, 18790, 443).is_ok());
+        assert!(has_serve_only_mapping(&serve_only, 18790, 443));
+        assert!(!has_mapping(&serve_only, 18790, 443));
+        assert!(!has_funnel_enabled_on_port(&serve_only, 443));
+
+        // Tailscale Serve 模式识别纯内网映射并提取 HTTPS 地址（443 省略端口）
+        let serve_obs = evaluate_tailscale_status(&serve_only, true, 18790, 443, false);
+        assert!(serve_obs.configured);
+        assert!(serve_obs.online);
+        assert_eq!(serve_obs.url.as_deref(), Some("https://example.ts.net"));
+        assert!(serve_obs.note.contains("Tailnet"));
+
+        // 自定义非 443 端口：与 443 上的其他服务共存，且 URL 保留端口号
+        let serve_custom = json!({
+            "TCP": {"443": {"HTTPS": true}, "8443": {"HTTPS": true}},
+            "Web": {
+                "example.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:3000"}}},
+                "example.ts.net:8443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:18790"}}}
+            },
+            "AllowFunnel": {"example.ts.net:443": true}
+        });
+        assert!(ensure_exclusive_mapping(&serve_custom, 18790, 8443).is_ok());
+        assert!(!has_funnel_enabled_on_port(&serve_custom, 8443));
+        let custom_obs = evaluate_tailscale_status(&serve_custom, true, 18790, 8443, false);
+        assert!(custom_obs.configured);
+        assert_eq!(
+            custom_obs.url.as_deref(),
+            Some("https://example.ts.net:8443")
+        );
+
+        // Tailscale Funnel 模式遇到仅 Serve 映射时，不判为公网就绪并引导切换
+        let funnel_sees_serve = evaluate_tailscale_status(&serve_only, true, 18790, 443, true);
+        assert!(!funnel_sees_serve.configured);
+        assert_eq!(funnel_sees_serve.url, None);
+        assert!(funnel_sees_serve.note.contains("Tailscale Serve"));
+
+        // Tailscale Serve 模式遇到已开公网 Funnel 时拒绝当作纯内网
+        let serve_sees_funnel = evaluate_tailscale_status(&cfg, true, 18790, 443, false);
+        assert!(!serve_sees_funnel.configured);
+        assert_eq!(serve_sees_funnel.url, None);
+        assert!(serve_sees_funnel.note.contains("Funnel"));
+
+        // 正常 Funnel 模式识别公网地址
+        let funnel_obs = evaluate_tailscale_status(&cfg, true, 18790, 443, true);
+        assert!(funnel_obs.configured);
+        assert_eq!(funnel_obs.url.as_deref(), Some("https://example.ts.net"));
+
+        // 提供方端口校验：Funnel 仅限 443 / 8443 / 10000，Serve 允许 1-65535
+        for ok_port in [443, 8443, 10000] {
+            assert!(
+                validate_provider(&ProviderSettings {
+                    kind: ProviderKind::Tailscale,
+                    https_port: ok_port,
+                    ..ProviderSettings::default()
+                })
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_provider(&ProviderSettings {
+                kind: ProviderKind::Tailscale,
+                https_port: 8080,
+                ..ProviderSettings::default()
+            })
+            .is_err()
+        );
+        assert!(
+            validate_provider(&ProviderSettings {
+                kind: ProviderKind::TailscaleServe,
+                https_port: 18443,
+                ..ProviderSettings::default()
+            })
+            .is_ok()
+        );
+        assert!(
+            validate_provider(&ProviderSettings {
+                kind: ProviderKind::TailscaleServe,
+                https_port: 0,
+                ..ProviderSettings::default()
+            })
+            .is_err()
+        );
     }
     #[cfg(windows)]
     #[tokio::test]

@@ -65,12 +65,15 @@ export default function SetupGuide({
   const agentReady = accessReady && snapshot.agent_ready;
   const address = agentReady ? publicAddress(snapshot) : null;
   const development = snapshot.profile === "development";
-  const stepLabels = (development ? [steps[0], "启动本机模拟", steps[2], steps[3]] as const : steps).map(label => t(label));
+  const { kind, tunnel_id, hostname, https_port } = desktop.provider;
+  const tailscaleFunnel = kind === "tailscale";
+  const tailscaleServe = kind === "tailscale_serve";
+  const usesTailscale = tailscaleFunnel || tailscaleServe;
+  const stepLabels = (development ? [steps[0], "启动本机模拟", steps[2], steps[3]] as const : tailscaleServe ? [steps[0], "准备 Tailnet 连接", steps[2], steps[3]] as const : steps).map(label => t(label));
   const localReady = development && agentReady && status.api_up && status.funnel_up;
-  const { kind, tunnel_id, hostname } = desktop.provider;
   let scope = null;
   if (agentReady && policy && tokenVersion) {
-    const scopeValues = [kind, tunnel_id, hostname, tokenVersion, accessPolicyKey(policy), alias];
+    const scopeValues = [kind, tunnel_id, hostname, https_port ?? 443, tokenVersion, accessPolicyKey(policy), alias];
     // A rename is confirmed separately from the first file-access test.
     scope = JSON.stringify(scopeValues);
   }
@@ -88,7 +91,6 @@ export default function SetupGuide({
     : t("继续配置 · {0}/{1}", recommended + 1, steps.length);
   const busy = !!bridge.busy;
   const waiting = status.health === "Starting" || status.health === "Stopping";
-  const tailscale = kind === "tailscale";
   const installed = providerToolAvailable(snapshot);
   const instructions = address && deviceName.canCopy ? connectorBrief(language, address, trial.instruction, deviceName.saved, snapshot.exec_enabled) : null;
 
@@ -210,7 +212,7 @@ export default function SetupGuide({
   let action: ReactNode;
   if (active === 0) {
     content = <p>{t("选择文件夹或磁盘。Muse 可以在你保存的范围内搜索、读取和写入文件。")}</p>;
-    action = accessReady ? <Button size="sm" onClick={() => showStep(1)}>{t("继续到公网连接")}<ArrowRight data-icon="inline-end" /></Button>
+    action = accessReady ? <Button size="sm" onClick={() => showStep(1)}>{tailscaleServe ? t("继续到 Tailnet 连接") : t("继续到公网连接")}<ArrowRight data-icon="inline-end" /></Button>
       : <Button size="sm" onClick={() => { onNavigate("roots", "setup-file-access"); onCollapse(); }}>{t("去设置文件权限")}<ArrowRight data-icon="inline-end" /></Button>;
   } else if (active === 1) {
     if (!agentReady) {
@@ -226,36 +228,44 @@ export default function SetupGuide({
         </Button>;
     } else if (address) {
       content = <>
-        <p className="break-all">{t("公网地址")} <span className="select-text text-foreground">{address}</span></p>
-        <p role="status">{publicReady ? t("Muse 专用令牌的公网验证已通过。") : status.agent_public_verified === false ? t("公网验证未通过，请重试。") : t("使用 Muse 专用令牌验证此公网入口。")}</p>
+        <p className="break-all">{tailscaleServe ? t("Tailnet 地址") : t("公网地址")} <span className="select-text text-foreground">{address}</span></p>
+        <p role="status">{publicReady
+          ? (tailscaleServe ? t("Muse 专用令牌的 Tailnet 验证已通过。") : t("Muse 专用令牌的公网验证已通过。"))
+          : status.agent_public_verified === false
+            ? (tailscaleServe ? t("Tailnet 验证未通过，请重试。") : t("公网验证未通过，请重试。"))
+            : (tailscaleServe ? t("使用 Muse 专用令牌验证此 Tailnet 入口。") : t("使用 Muse 专用令牌验证此公网入口。"))}</p>
       </>;
       action = publicReady ? <Button size="sm" onClick={() => showStep(handedOff ? 3 : 2)}>{t("继续到 Muse")}<ArrowRight data-icon="inline-end" /></Button>
-        : <Button size="sm" disabled={busy} onClick={onTestPublicConnection}>{status.agent_public_verified === false ? t("重试公网验证") : t("验证公网连接")}</Button>;
+        : <Button size="sm" disabled={busy} onClick={onTestPublicConnection}>{status.agent_public_verified === false ? (tailscaleServe ? t("重试 Tailnet 验证") : t("重试公网验证")) : (tailscaleServe ? t("验证 Tailnet 连接") : t("验证公网连接"))}</Button>;
     } else {
       content = <>
         {readConfirmed && !desktop.desired_enabled ? <p>{t("首次试用已确认，当前连接已暂停。")}</p> : null}
-        <p>{tailscale
+        <p>{tailscaleFunnel
           ? installed ? t("在 Windows 托盘登录 Tailscale，按提示完成首次 Funnel 授权。") : t("先下载安装 Tailscale for Windows，完成后重新检测。")
-          : installed ? t("当前使用 {0}。开启连接后会生成公网地址。", t(providerLabels[kind])) : t("先安装 Cloudflare 的 cloudflared 工具，完成后重新检测。")}</p>
+          : tailscaleServe
+            ? installed ? t("在系统托盘登录 Tailscale。开启后仅通过 Tailnet 内网提供 HTTPS 访问，不暴露公网。") : t("先下载安装 Tailscale，完成后重新检测。")
+            : installed ? t("当前使用 {0}。开启连接后会生成公网地址。", t(providerLabels[kind])) : t("先安装 Cloudflare 的 cloudflared 工具，完成后重新检测。")}</p>
         {desktop.desired_enabled && status.note !== actionError?.message ? <p className="break-words" role="status">{diagnostic(status.note)}</p> : null}
         <div className="flex flex-wrap gap-2">
           {!installed ? <Button size="sm" variant="outline" disabled={busy || refreshing} onClick={() => void refreshTools()}>
             <RefreshCw data-icon="inline-start" />{refreshing ? t("正在检测…") : t("重新检测")}
           </Button> : null}
-          {page !== "connection" && !tailscale ? <Button size="sm" variant="outline" onClick={() => onNavigate("connection", "provider")}>{t("查看连接设置")}</Button> : null}
+          {page !== "connection" && !usesTailscale ? <Button size="sm" variant="outline" onClick={() => onNavigate("connection", "provider")}>{t("查看连接设置")}</Button> : null}
         </div>
-        {tailscale && installed ? <>
-          <Button className="self-start px-0" size="sm" variant="link" aria-expanded={showTailscaleHelp} aria-controls="setup-tailscale-help" onClick={() => setShowTailscaleHelp(value => !value)}>{t("查看登录与 Funnel 授权")}</Button>
+        {usesTailscale && installed ? <>
+          <Button className="self-start px-0" size="sm" variant="link" aria-expanded={showTailscaleHelp} aria-controls="setup-tailscale-help" onClick={() => setShowTailscaleHelp(value => !value)}>{tailscaleServe ? t("查看登录与 Tailscale Serve 说明") : t("查看登录与 Funnel 授权")}</Button>
           {showTailscaleHelp ? <div id="setup-tailscale-help" className="flex flex-wrap gap-2">
             <Button size="sm" variant="outline" disabled={busy} onClick={() => openSetup("tailscale_login")}>{t("Windows 登录说明")}<ExternalLink data-icon="inline-end" /></Button>
-            <Button size="sm" variant="outline" disabled={busy} onClick={() => openSetup("tailscale_funnel")}>{t("Funnel 授权说明")}<ExternalLink data-icon="inline-end" /></Button>
+            {tailscaleServe
+              ? <Button size="sm" variant="outline" disabled={busy} onClick={() => openSetup("tailscale_serve")}>{t("Serve 说明")}<ExternalLink data-icon="inline-end" /></Button>
+              : <Button size="sm" variant="outline" disabled={busy} onClick={() => openSetup("tailscale_funnel")}>{t("Funnel 授权说明")}<ExternalLink data-icon="inline-end" /></Button>}
           </div> : null}
         </> : null}
       </>;
       action = installed ? <Button size="sm" disabled={busy || waiting} onClick={() => void run("startConnection", "toggle_connection", { enable: true })}>
         {waiting || bridge.busy === "startConnection" ? t("正在开启…") : desktop.desired_enabled ? t("重试开启连接") : t("开启连接")}
-      </Button> : <Button size="sm" disabled={busy} onClick={() => openSetup(tailscale ? "tailscale" : "cloudflared")}>
-        {tailscale ? t("下载 Tailscale") : t("下载 cloudflared")}<ExternalLink data-icon="inline-end" />
+      </Button> : <Button size="sm" disabled={busy} onClick={() => openSetup(usesTailscale ? "tailscale" : "cloudflared")}>
+        {usesTailscale ? t("下载 Tailscale") : t("下载 cloudflared")}<ExternalLink data-icon="inline-end" />
       </Button>;
     }
   } else if (active === 2) {

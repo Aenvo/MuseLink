@@ -28,8 +28,8 @@ export function saveSetupVerification(key: string, value: SetupVerification | nu
 }
 
 export function providerToolAvailable(snapshot: Snapshot) {
-  return snapshot.desktop.provider.kind === "tailscale"
-    ? snapshot.dependencies.tailscale : snapshot.dependencies.cloudflared;
+  return snapshot.desktop.provider.kind === "cloudflare_named"
+    ? snapshot.dependencies.cloudflared : snapshot.dependencies.tailscale;
 }
 
 export function publicAddress(snapshot: Snapshot) {

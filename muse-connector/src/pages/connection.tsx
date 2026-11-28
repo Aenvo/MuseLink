@@ -10,21 +10,41 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectGroup, SelectItem } from "@/components/ui/select";
 import { Progress } from "@/components/ui/progress";
 import { Separator } from "@/components/ui/separator";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { Notice, type Confirmation } from "@/components/feedback";
 import DeviceNameField from "@/components/device-name-field";
 import AgentConnection from "@/components/agent-connection";
 import type { DeviceNameModel } from "@/lib/use-device-name";
 import { providerLabels, type BridgeModel, type ProviderKind, type ProviderSettings } from "@/lib/use-bridge";
 
+const tailscalePresetPorts = [443, 8443, 10000] as const;
+const isPresetPort = (port: number) => (tailscalePresetPorts as readonly number[]).includes(port);
+const effectivePort = (port?: number) => (typeof port === "number" && Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 443);
+
 const normalize = (v: ProviderSettings): ProviderSettings => ({
   kind: v.kind,
   tunnel_id: v.kind === "cloudflare_named" ? v.tunnel_id.trim() : "",
   hostname: v.kind === "cloudflare_named" ? v.hostname.trim() : "",
+  https_port: v.kind === "cloudflare_named"
+    ? 443
+    : v.kind === "tailscale"
+      ? (isPresetPort(effectivePort(v.https_port)) ? effectivePort(v.https_port) : 443)
+      : (typeof v.https_port === "number" ? v.https_port : 443),
 });
 const keyOf = (v: ProviderSettings) => JSON.stringify(normalize(v));
 function validate(t: Translate, v: ProviderSettings) {
-  const errors: { tunnel_id?: string; hostname?: string } = {};
-  if (v.kind !== "cloudflare_named") return errors;
+  const errors: { tunnel_id?: string; hostname?: string; https_port?: string } = {};
+  if (v.kind === "tailscale") {
+    if (!isPresetPort(v.https_port ?? 443)) errors.https_port = t("Tailscale Funnel 仅支持 443、8443 或 10000 端口。");
+    return errors;
+  }
+  if (v.kind === "tailscale_serve") {
+    const port = v.https_port;
+    if (typeof port !== "number" || !Number.isInteger(port) || port < 1 || port > 65535) {
+      errors.https_port = t("填写 1–65535 之间的有效端口号。");
+    }
+    return errors;
+  }
   if (!/^[a-zA-Z0-9_-]{1,100}$/.test(v.tunnel_id.trim())) errors.tunnel_id = t("填写 1–100 个字母、数字、连字符或下划线。");
   const host = v.hostname.trim();
   if (host.length > 253 || !host.includes(".") || !host.split(".").every(part => /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/.test(part))) errors.hostname = t("填写有效域名，不含协议、端口或路径。");
@@ -50,12 +70,16 @@ export default function Connection({
 }) {
   const { t } = useLanguage();
   const { snapshot: s, busy, run } = bridge;
-  const current: ProviderSettings = s?.desktop.provider ?? { kind: "tailscale", tunnel_id: "", hostname: "" };
+  const rawCurrent = s?.desktop.provider;
+  const current: ProviderSettings = normalize(rawCurrent ?? { kind: "tailscale", tunnel_id: "", hostname: "", https_port: 443 });
   const [draft, setDraft] = useState<ProviderSettings>(current);
+  const [customPortMode, setCustomPortMode] = useState(() => current.kind === "tailscale_serve" && !isPresetPort(effectivePort(current.https_port)));
+  const [customPortText, setCustomPortText] = useState(() => String(effectivePort(current.https_port)));
   const previous = useRef(current);
-  const [touched, setTouched] = useState({ tunnel_id: false, hostname: false });
+  const [touched, setTouched] = useState({ tunnel_id: false, hostname: false, https_port: false });
   const tunnelInput = useRef<HTMLInputElement>(null);
   const hostnameInput = useRef<HTMLInputElement>(null);
+  const portInput = useRef<HTMLInputElement>(null);
   const [tunnels, setTunnels] = useState<Array<{ id: string; name: string }>>([]);
   const [newName, setNewName] = useState("");
   const [authorized, setAuthorized] = useState(false);
@@ -63,16 +87,23 @@ export default function Connection({
   useEffect(() => {
     const before = previous.current;
     previous.current = current;
-    setDraft(value => keyOf(value) === keyOf(before) ? current : value);
-  }, [current.kind, current.tunnel_id, current.hostname]);
+    setDraft(value => {
+      if (keyOf(value) !== keyOf(before)) return value;
+      const port = effectivePort(current.https_port);
+      setCustomPortMode(current.kind === "tailscale_serve" && !isPresetPort(port));
+      setCustomPortText(String(port));
+      return current;
+    });
+  }, [current.kind, current.tunnel_id, current.hostname, current.https_port]);
   const dirty = keyOf(draft) !== keyOf(current);
   useEffect(() => { onDirtyChange(dirty); }, [dirty, onDirtyChange]);
   if (!s) return null;
   const development = s.profile === "development";
-  const needsCloudflare = draft.kind !== "tailscale";
+  const needsCloudflare = draft.kind === "cloudflare_named";
+  const usesTailscale = draft.kind === "tailscale" || draft.kind === "tailscale_serve";
   const installed = needsCloudflare ? s.dependencies.cloudflared : s.dependencies.tailscale;
   const errors = validate(t, draft);
-  const valid = !errors.tunnel_id && !errors.hostname;
+  const valid = !errors.tunnel_id && !errors.hostname && !errors.https_port;
   const command = async (action: string, extra?: Record<string, string>) => run<{ message?: string; tunnels?: Array<{ id: string; name: string }> }>(t("正在处理 Cloudflare 操作"), "cloudflare_action", { action, ...extra });
   const refreshTunnels = async () => { const result = await command("list"); if (result.ok) { setTunnels(result.data.tunnels ?? []); setAuthorized(true); } };
 
@@ -80,13 +111,27 @@ export default function Connection({
     ? !installed && !development
       ? t("请先安装所需工具，再应用更改。")
       : !valid
-        ? t("填写有效的隧道和主机名后可应用。")
+        ? needsCloudflare
+          ? t("填写有效的隧道和主机名后可应用。")
+          : t("填写有效的 HTTPS 端口后可应用。")
         : s.desktop.desired_enabled
           ? t("切换将短暂中断连接。")
           : t("更改将在下次开启连接时使用。")
     : !installed && !development
       ? t("未检测到所需工具")
       : null;
+
+  const selectedPortValue = draft.kind === "tailscale_serve" && customPortMode
+    ? "custom"
+    : String(effectivePort(draft.https_port));
+
+  const currentPortSuffix = current.kind !== "cloudflare_named" && effectivePort(current.https_port) !== 443
+    ? ` · HTTPS :${effectivePort(current.https_port)}`
+    : "";
+
+  const draftDisplayPort = typeof draft.https_port === "number" && draft.https_port >= 1 && draft.https_port <= 65535
+    ? draft.https_port
+    : 443;
 
   return <div className="page-stack">
     {development ? <Notice title={t("开发隔离模式")}>{t("提供方切换只修改开发配置并使用模拟连接。真实登录、隧道创建、DNS 和公网测试已禁用。")}</Notice> : null}
@@ -139,30 +184,103 @@ export default function Connection({
           <CardTitle>{t("连接方式")}</CardTitle>
           {dirty ? <Badge variant="outline">{t("未应用更改")}</Badge> : null}
         </div>
-        <CardDescription>{t("当前生效：{0}", t(providerLabels[current.kind]))}{current.kind === "cloudflare_named" ? " · " + current.hostname : ""}</CardDescription>
+        <CardDescription>{t("当前生效：{0}", t(providerLabels[current.kind]))}{current.kind === "cloudflare_named" ? " · " + current.hostname : currentPortSuffix}</CardDescription>
       </CardHeader>
       <CardContent><form noValidate className="flex flex-col gap-5" onSubmit={event => {
         event.preventDefault();
         if (!dirty || busy || (!installed && !development)) return;
-        if (!valid) { setTouched({ tunnel_id: true, hostname: true }); (errors.tunnel_id ? tunnelInput : hostnameInput).current?.focus(); return; }
+        if (!valid) {
+          setTouched({ tunnel_id: true, hostname: true, https_port: true });
+          (errors.https_port ? portInput : errors.tunnel_id ? tunnelInput : hostnameInput).current?.focus();
+          return;
+        }
         const provider = normalize(draft);
-        const providerName = t(providerLabels[provider.kind]);
+        const providerName = t(providerLabels[provider.kind]) + (provider.kind !== "cloudflare_named" && effectivePort(provider.https_port) !== 443 ? ` (:${effectivePort(provider.https_port)})` : "");
         const timing = s.desktop.desired_enabled ? t("切换将短暂中断连接。") : t("更改将在下次开启连接时使用。");
         confirm({ title: t("应用连接更改？"), description: t("将使用 {0}。{1}入口地址改变后需要在 Muse 更新地址。", providerName, timing), action: t("应用更改"), execute: async () => {
           const result = await run(t("正在应用连接方式"), "save_provider", { provider }, t("连接方式已应用"));
-          if (result.ok) setDraft(provider);
+          if (result.ok) {
+            setDraft(provider);
+            const savedPort = effectivePort(provider.https_port);
+            setCustomPortMode(provider.kind === "tailscale_serve" && !isPresetPort(savedPort));
+            setCustomPortText(String(savedPort));
+          }
           return result.ok;
         } });
       }}>
         <FieldGroup>
           <Field>
             <FieldLabel htmlFor="provider">{t("提供方")}</FieldLabel>
-            <Select name="provider" value={draft.kind} onValueChange={value => { setDraft(v => ({ ...v, kind: value as ProviderKind })); setRouted(false); }}>
+            <Select name="provider" value={draft.kind} onValueChange={value => {
+              const nextKind = value as ProviderKind;
+              setDraft(v => {
+                const currentPort = effectivePort(v.https_port);
+                const nextPort = nextKind === "tailscale" && !isPresetPort(currentPort) ? 443 : currentPort;
+                setCustomPortMode(nextKind === "tailscale_serve" && !isPresetPort(nextPort));
+                setCustomPortText(String(nextPort));
+                return { ...v, kind: nextKind, https_port: nextPort };
+              });
+              setRouted(false);
+            }}>
               <SelectTrigger id="provider" className="w-full"><SelectValue /></SelectTrigger>
               <SelectContent><SelectGroup>{Object.entries(providerLabels).map(([value, label]) => <SelectItem value={value} key={value}>{t(label)}</SelectItem>)}</SelectGroup></SelectContent>
             </Select>
-            {!development ? <FieldDescription>{draft.kind === "tailscale" ? t("需要 Tailscale 已登录，并具备 Funnel 授权。") : t("需要 Cloudflare 账户下的可用域名与命名隧道。")}</FieldDescription> : null}
+            <FieldDescription>{draft.kind === "tailscale" ? t("需要 Tailscale 已登录，并具备 Funnel 授权。") : draft.kind === "tailscale_serve" ? t("仅限同一 Tailnet 内网访问，不暴露公网；需本机与运行 Muse app 的设备（如 Mac、手机或平板）登录同一 Tailscale 账号。") : t("需要 Cloudflare 账户下的可用域名与命名隧道。")}</FieldDescription>
           </Field>
+          {usesTailscale ? <>
+            <Field data-invalid={touched.https_port && !!errors.https_port}>
+              <FieldLabel htmlFor="tailscale-https-port">{t("HTTPS 端口")}</FieldLabel>
+              <Select value={selectedPortValue} onValueChange={value => {
+                if (value === "custom") {
+                  setCustomPortMode(true);
+                  const currentPort = effectivePort(draft.https_port);
+                  setCustomPortText(String(currentPort));
+                  setDraft(v => ({ ...v, https_port: currentPort }));
+                  requestAnimationFrame(() => portInput.current?.focus());
+                } else {
+                  const port = Number(value);
+                  setCustomPortMode(false);
+                  setCustomPortText(String(port));
+                  setDraft(v => ({ ...v, https_port: port }));
+                }
+              }}>
+                <SelectTrigger id="tailscale-https-port" className="w-full"><SelectValue /></SelectTrigger>
+                <SelectContent><SelectGroup>
+                  <SelectItem value="443">{t("443（默认）")}</SelectItem>
+                  <SelectItem value="8443">8443</SelectItem>
+                  <SelectItem value="10000">10000</SelectItem>
+                  {draft.kind === "tailscale_serve" ? <SelectItem value="custom">{t("自定义端口")}</SelectItem> : null}
+                </SelectGroup></SelectContent>
+              </Select>
+              {draft.kind === "tailscale_serve" && customPortMode ? (
+                <Input
+                  ref={portInput}
+                  id="tailscale-custom-port"
+                  name="https_port"
+                  inputMode="numeric"
+                  autoComplete="off"
+                  spellCheck={false}
+                  value={customPortText}
+                  onBlur={() => setTouched(v => ({ ...v, https_port: true }))}
+                  onChange={event => {
+                    const raw = event.target.value.replace(/[^\d]/g, "").slice(0, 5);
+                    setCustomPortText(raw);
+                    const parsed = raw ? Number(raw) : 0;
+                    setDraft(v => ({ ...v, https_port: parsed }));
+                  }}
+                  aria-invalid={touched.https_port && !!errors.https_port}
+                  aria-describedby={touched.https_port && errors.https_port ? "https-port-error" : "https-port-help"}
+                  placeholder={t("例如 8443 或 18443")}
+                />
+              ) : null}
+              <FieldDescription id="https-port-help">
+                {draft.kind === "tailscale"
+                  ? t("443 已被其他 Tailscale 服务占用时，可改用 8443 或 10000。")
+                  : t("默认 443；如 443 已被其他服务占用，可改用其他端口（1–65535），不会影响其他端口上的服务。")}
+              </FieldDescription>
+              {touched.https_port && errors.https_port ? <FieldError id="https-port-error">{errors.https_port}</FieldError> : null}
+            </Field>
+          </> : null}
           {draft.kind === "cloudflare_named" ? <>
             <Field data-invalid={touched.tunnel_id && !!errors.tunnel_id}>
               <FieldLabel htmlFor="tunnel-id">{t("隧道 ID 或名称")}</FieldLabel>
@@ -184,19 +302,66 @@ export default function Connection({
             {s.desktop.desired_enabled ? t("应用并切换") : t("应用更改")}
           </Button>
           {!guiding || dirty ? (
-            <Button type="button" variant="ghost" disabled={!!busy} onClick={() => void run(t("正在打开工具说明"), "open_tool_setup", { tool: needsCloudflare ? "cloudflared" : installed ? "tailscale_login" : "tailscale" })}>
+            <Button type="button" variant="ghost" disabled={!!busy} onClick={() => void run(t("正在打开工具说明"), "open_tool_setup", { tool: needsCloudflare ? "cloudflared" : installed ? (draft.kind === "tailscale_serve" ? "tailscale_serve" : "tailscale_login") : "tailscale" })}>
               <ExternalLink data-icon="inline-start" />
-              {installed ? t("登录帮助") : t("安装与登录")}
+              {installed ? (draft.kind === "tailscale_serve" ? t("Serve 说明") : t("登录帮助")) : t("安装与登录")}
             </Button>
           ) : null}
           {dirty ? (
-            <Button type="button" variant="ghost" disabled={!!busy} onClick={() => { setDraft(current); setTouched({ tunnel_id: false, hostname: false }); setRouted(false); }}>
+            <Button type="button" variant="ghost" disabled={!!busy} onClick={() => {
+              const resetPort = effectivePort(current.https_port);
+              setDraft(current);
+              setCustomPortMode(current.kind === "tailscale_serve" && !isPresetPort(resetPort));
+              setCustomPortText(String(resetPort));
+              setTouched({ tunnel_id: false, hostname: false, https_port: false });
+              setRouted(false);
+            }}>
               {t("撤销更改")}
             </Button>
           ) : null}
         </div>
       </form></CardContent>
     </Card>
+
+    {draft.kind === "tailscale_serve" ? (
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("Tailnet 内网连接说明")}</CardTitle>
+          <CardDescription>{t("无需手动输入 tailscale serve 命令，由本应用自动托管 HTTPS :{0} 内网转发。", draftDisplayPort)}</CardDescription>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-3 text-sm">
+          <ul className="list-disc space-y-1.5 pl-4 text-caption text-muted-foreground">
+            <li>{t("自动托管与复用：开启连接后自动转发 HTTPS :{0} 到本机文件服务，不暴露公网；若此前已手动运行过同端口的 tailscale serve，开启后会自动识别复用。", draftDisplayPort)}</li>
+            <li>
+              {t("任意可运行 Muse app 的设备（Mac、手机、平板）均可通过同一 Tailscale 账号直连本机，主控端不用装 MuseLink。需在 Tailscale 管理台开启 {magicdns} 与 {https}。（若 Muse 通过云端服务器发起请求，请改用 Tailscale Funnel 或 Cloudflare 命名隧道）")
+                .split(/(\{magicdns\}|\{https\})/)
+                .map((part, index) => {
+                  if (part !== "{magicdns}" && part !== "{https}") return <span key={index}>{part}</span>;
+                  const label = part === "{magicdns}" ? "MagicDNS" : "HTTPS Certificates";
+                  const tip = part === "{magicdns}"
+                    ? t("让主控端能直接解析本机的 .ts.net 专属域名，无需记忆或填写内网 IP。")
+                    : t("让本机自动签发受信任的 HTTPS 证书，避免开启连接或健康检查因证书无效失败。");
+                  return (
+                    <Tooltip key={label}>
+                      <TooltipTrigger asChild>
+                        <button
+                          type="button"
+                          disabled={!!busy}
+                          onClick={() => void run(t("正在打开 Tailscale DNS 设置"), "open_tool_setup", { tool: "tailscale_dns" })}
+                          className="inline cursor-pointer font-medium text-sky-400 underline decoration-sky-400/50 underline-offset-4 transition-colors hover:text-sky-300 focus-visible:outline focus-visible:outline-ring disabled:pointer-events-none disabled:opacity-50"
+                        >
+                          {label}
+                        </button>
+                      </TooltipTrigger>
+                      <TooltipContent className="max-w-64">{tip}</TooltipContent>
+                    </Tooltip>
+                  );
+                })}
+            </li>
+          </ul>
+        </CardContent>
+      </Card>
+    ) : null}
 
     {draft.kind === "cloudflare_named" ? <Card><CardHeader><CardTitle>{t("命名隧道向导")}</CardTitle><CardDescription>{t("授权、隧道、主机名依次配置。没有域名时可保留 Tailscale。")}</CardDescription></CardHeader><CardContent className="flex flex-col gap-5">
       <Progress value={((authorized ? 1 : 0) + (draft.tunnel_id ? 1 : 0) + (routed ? 1 : 0)) / 3 * 100} aria-label={t("域名向导配置进度")} />
