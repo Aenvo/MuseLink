@@ -54,6 +54,8 @@ pub struct Snapshot {
     pub agent_ready: bool,
     pub agent_token_version: Option<String>,
     pub exec_enabled: bool,
+    pub legacy_api_enabled: bool,
+    pub legacy_api_can_enable: bool,
     pub pending_approvals: Vec<ApprovalView>,
     pub exec_sessions: Vec<SessionGrantView>,
     pub fresh_setup: bool,
@@ -100,6 +102,7 @@ pub struct ServiceController {
     runtime: Mutex<Runtime>,
     status: watch::Sender<TunnelStatus>,
     initialized: AtomicBool,
+    legacy_config_loaded: AtomicBool,
     fresh_setup: bool,
     setup_error: RwLock<Option<String>>,
     tools: std::sync::Mutex<Option<(Instant, Value)>>,
@@ -125,38 +128,51 @@ impl ServiceController {
             Ok(config)
         });
         let loaded_token = token::load(&profile.token_path());
-        let initialized = loaded.is_ok() && loaded_token.is_ok();
-        let desktop = profile.load_desktop();
+        let legacy_config_loaded = loaded.is_ok();
+        let initialized = legacy_config_loaded && loaded_token.is_ok();
+        let desktop_result = profile.load_desktop_with_meta();
         let is_missing = |error: &std::io::Error| error.kind() == std::io::ErrorKind::NotFound;
         let fresh_setup = initialization.is_none()
             && loaded.as_ref().is_err_and(is_missing)
             && loaded_token.as_ref().is_err_and(is_missing)
             && matches!(profile.state_path().try_exists(), Ok(false));
-        let mut setup_error = initialization.or_else(|| match (&loaded, &loaded_token) {
-            _ if fresh_setup => Some("请选择开放目录。".into()),
-            (Err(_), Err(_)) => {
-                Some("无法读取现有目录配置和本机令牌，请检查 config.json 与 token 文件。".into())
+        let (access, access_error) = AccessRuntime::open(&profile);
+        let (mut desktop, desktop_error, legacy_api_explicit) = match desktop_result {
+            Ok((state, explicit)) => (state, None, explicit),
+            Err(error) => (DesktopState::default(), Some(error), false),
+        };
+        if desktop_error.is_none() && !legacy_api_explicit && initialized && !access.agent_enabled()
+        {
+            // 方案 A 自动迁移：尚无显式偏好且已存在旧版 config.json + token、
+            // 未启用新版 Agent 的存量用户自动保持旧版 /api 开启，且不提前写盘。
+            desktop.legacy_api_enabled = true;
+        }
+        let mut setup_error = initialization.or(desktop_error).or(access_error);
+        if setup_error.is_none() {
+            if desktop.legacy_api_enabled {
+                setup_error = match (&loaded, &loaded_token) {
+                    (Err(_), Err(_)) => Some(
+                        "无法读取现有目录配置和本机令牌，请检查 config.json 与 token 文件。".into(),
+                    ),
+                    (Err(_), _) => {
+                        Some("无法读取现有目录配置，请检查 config.json 和开放目录。".into())
+                    }
+                    (_, Err(_)) => Some("无法读取本机令牌，请检查 token 文件。".into()),
+                    _ => None,
+                };
+            } else if fresh_setup && access.policy().is_none() {
+                setup_error = Some("请选择开放目录。".into());
+            } else if access.policy().is_none()
+                && loaded.as_ref().is_err_and(|error| !is_missing(error))
+            {
+                setup_error = Some("无法读取现有目录配置，请检查 config.json 和开放目录。".into());
             }
-            (Err(_), _) => Some("无法读取现有目录配置，请检查 config.json 和开放目录。".into()),
-            (_, Err(_)) => Some("无法读取本机令牌，请检查 token 文件。".into()),
-            _ => None,
-        });
+        }
         let config = loaded.unwrap_or_else(|_| BridgeConfig {
             port: profile.default_port(),
             read_only: true,
             roots: Default::default(),
         });
-        let desktop = desktop.unwrap_or_else(|e| {
-            setup_error = Some(e);
-            DesktopState::default()
-        });
-        let (access, access_error) = AccessRuntime::open(&profile);
-        if let Some(error) = access_error {
-            setup_error = Some(error);
-        } else if access.policy().is_some() && !initialized && initialization_files_absent(&profile)
-        {
-            setup_error = None;
-        }
         let paths = BridgePaths {
             config: profile.config_path(),
             token: profile.token_path(),
@@ -169,6 +185,7 @@ impl ServiceController {
             ApiOptions::default(),
         );
         api.attach_access(access.clone());
+        api.set_legacy_api_enabled(desktop.legacy_api_enabled);
         let exec = ExecRuntime::new(&profile.home, desktop.exec_enabled);
         exec.attach_audit(Arc::new(ApiAuditSink(api.clone())));
         api.attach_exec(exec.clone());
@@ -205,6 +222,7 @@ impl ServiceController {
             }),
             status,
             initialized: AtomicBool::new(initialized),
+            legacy_config_loaded: AtomicBool::new(legacy_config_loaded),
             fresh_setup,
             setup_error: RwLock::new(setup_error),
             tools: std::sync::Mutex::new(None),
@@ -225,9 +243,19 @@ impl ServiceController {
     }
     pub fn snapshot(&self) -> Snapshot {
         let initialized = self.initialized.load(Ordering::Relaxed);
+        let legacy_api_enabled = self.api.legacy_api_enabled();
+        let legacy_active = legacy_api_enabled && initialized;
         let file_access = self.access.policy();
         let agent_enabled = self.access.agent_enabled();
         let agent_ready = self.access.agent_ready();
+        let setup_error = self.setup_error.read().unwrap().clone();
+        let legacy_api_can_enable = setup_error.is_none()
+            && (self.legacy_config_loaded.load(Ordering::Relaxed)
+                || file_access.as_ref().is_some_and(|policy| {
+                    policy.mode == ScopeMode::Folders
+                        && policy.read == GrantScope::Folders
+                        && !policy.roots.is_empty()
+                }));
         let ntfs_search_service = self.access.ntfs_search_service();
         let service_running = ntfs_search_service == Some(true);
         if service_running && !self.ntfs_service_observed.swap(true, Ordering::AcqRel) {
@@ -239,8 +267,8 @@ impl ServiceController {
             run_id: self.run_id.clone(),
             profile: self.profile.kind,
             initialized,
-            connection_configured: initialized || agent_enabled,
-            access_configured: initialized || file_access.is_some(),
+            connection_configured: legacy_active || agent_enabled,
+            access_configured: legacy_active || file_access.is_some(),
             fresh_setup: self.fresh_setup && !initialized && file_access.is_none(),
             file_access,
             ntfs_search_service,
@@ -251,10 +279,12 @@ impl ServiceController {
                 .then(|| token::file_version(self.access.agent_token_path()))
                 .flatten(),
             exec_enabled: self.exec.is_enabled(),
+            legacy_api_enabled,
+            legacy_api_can_enable,
             pending_approvals: self.exec.pending_approvals(),
             exec_sessions: self.exec.active_sessions(),
-            setup_error: self.setup_error.read().unwrap().clone(),
-            file_token_version: if initialized {
+            setup_error,
+            file_token_version: if legacy_active {
                 token::file_version(&self.api.paths().token)
             } else {
                 None
@@ -284,8 +314,11 @@ impl ServiceController {
                 .collect(),
         }
     }
+    pub fn legacy_api_ready(&self) -> bool {
+        self.api.legacy_api_enabled() && self.initialized.load(Ordering::Relaxed)
+    }
     fn connection_configured(&self) -> bool {
-        self.initialized.load(Ordering::Relaxed) || self.access.agent_enabled()
+        self.legacy_api_ready() || self.access.agent_enabled()
     }
 
     pub async fn set_agent_access(&self, enabled: bool) -> Result<(), String> {
@@ -313,11 +346,44 @@ impl ServiceController {
         .map_err(|_| "Muse 文件工具凭证更新未完成".to_string())??;
         self.exec.abort_all("Muse 专用令牌已变更");
         self.reset_agent_public_result();
+        if !enabled && self.initialized.load(Ordering::Relaxed) && !self.api.legacy_api_enabled() {
+            // 显式落盘关闭状态，避免旧版 token 仍留在磁盘时重启被误判为纯旧版用户。
+            let _ = self.update_desktop(|state| {
+                state.legacy_api_enabled = false;
+                Ok(true)
+            });
+        }
         if !enabled && !self.connection_configured() && self.desktop_state().desired_enabled {
             self.toggle(false)
                 .await
                 .map_err(|error| format!("Muse 文件工具凭证已撤销，暂停连接时遇到问题：{error}"))?;
         }
+        Ok(())
+    }
+
+    pub fn legacy_token_path(&self) -> Result<std::path::PathBuf, String> {
+        if self.legacy_api_ready() && self.profile.token_path().is_file() {
+            Ok(self.profile.token_path())
+        } else {
+            Err("请先在「设置 → 兼容性」开启旧版 /api 接口".into())
+        }
+    }
+
+    pub async fn rotate_file_token(&self) -> Result<(), String> {
+        let _operation = self.runtime.lock().await;
+        if !self.legacy_api_ready() {
+            return Err("请先在「设置 → 兼容性」开启旧版 /api 接口".into());
+        }
+        let api = self.api.clone();
+        tokio::task::spawn_blocking(move || api.rotate_token())
+            .await
+            .map_err(|_| "文件令牌轮换未完成".to_string())??;
+        self.logs.protect_secret(&self.api.token());
+        self.logs
+            .runtime_entry("info", "文件令牌已轮换，请在本机更新安全卡片");
+        self.status.send_modify(|status| {
+            status.public_verified = None;
+        });
         Ok(())
     }
 
@@ -383,9 +449,11 @@ impl ServiceController {
             return Ok(());
         }
         let initialized = self.initialized.load(Ordering::Relaxed);
+        let legacy_enabled = self.api.legacy_api_enabled();
         let legacy_read_only = initialized && self.api.read_only();
-        // Bootstrap a narrow v0.3 entry only when the user explicitly selects folders.
-        if !initialized
+        // Bootstrap a narrow v0.3 entry only when legacy /api is enabled and the user selects folders.
+        if legacy_enabled
+            && !initialized
             && initialization_files_absent(&self.profile)
             && policy.mode == ScopeMode::Folders
             && policy.read == GrantScope::Folders
@@ -403,7 +471,10 @@ impl ServiceController {
             .map_err(|_| "保存文件授权未完成".to_string())??;
         self.exec.revoke_sessions();
         self.reset_agent_public_result();
-        if self.initialized.load(Ordering::Relaxed) || initialization_files_absent(&self.profile) {
+        if self.initialized.load(Ordering::Relaxed)
+            || initialization_files_absent(&self.profile)
+            || (!legacy_enabled && self.legacy_config_loaded.load(Ordering::Relaxed))
+        {
             *self.setup_error.write().unwrap() = None;
         }
         self.prewarm_file_search();
@@ -552,9 +623,20 @@ impl ServiceController {
             }
         });
     }
+    /// 归属探针与当前启用的表面对齐：有 Agent 令牌时探 /agent/v1/roots，
+    /// 否则仅当旧版 /api 已开启时探 /api/health。
+    async fn probe_owned(&self, port: u16) -> bool {
+        if let Some(agent_token) = self.access.agent_token() {
+            probe_owned_agent_api(port, &agent_token).await
+        } else if self.api.legacy_api_enabled() {
+            probe_owned_api(port, &self.api.token()).await
+        } else {
+            false
+        }
+    }
     async fn supervise(&self) {
         self.supervise_with(|port| async move {
-            if !probe_owned_api(port, &self.api.token()).await {
+            if !self.probe_owned(port).await {
                 return None;
             }
             Some(if self.profile.is_development() {
@@ -688,7 +770,7 @@ impl ServiceController {
             }));
             runtime.shutdown = Some(tx);
         }
-        if !probe_owned_api(runtime.actual_port, &self.api.token()).await {
+        if !self.probe_owned(runtime.actual_port).await {
             self.stop_api(runtime).await;
             self.publish(
                 Health::Down,
@@ -827,6 +909,9 @@ impl ServiceController {
         Ok(self.status())
     }
     pub async fn configure(&self, mut config: BridgeConfig) -> Result<(), String> {
+        if !self.api.legacy_api_enabled() {
+            return Err("请先在「设置 → 兼容性」开启旧版 /api 接口".into());
+        }
         if self.profile.is_development() {
             config.port = 18795;
         }
@@ -858,14 +943,15 @@ impl ServiceController {
             }
             return Err(e);
         }
+        self.legacy_config_loaded.store(true, Ordering::Relaxed);
         if !self.initialized.load(Ordering::Relaxed) {
             if !self.profile.token_path().exists() {
                 token::save(&self.profile.token_path(), &token::generate())
                     .map_err(|_| "初始化令牌失败，请重试")?;
             }
-            self.api.set_token(
-                token::load(&self.profile.token_path()).map_err(|_| "无法读取本机令牌")?,
-            );
+            let loaded = token::load(&self.profile.token_path()).map_err(|_| "无法读取本机令牌")?;
+            self.api.set_token(loaded.clone());
+            self.logs.protect_secret(&loaded);
             self.initialized.store(true, Ordering::Relaxed);
             *self.setup_error.write().unwrap() = None;
         }
@@ -1025,6 +1111,85 @@ impl ServiceController {
         Ok(())
     }
 
+    pub async fn set_legacy_api_enabled(&self, enabled: bool) -> Result<(), String> {
+        let _access_update = self.access_update.lock().await;
+        let mut runtime = self.runtime.lock().await;
+        if enabled {
+            if let Some(error) = self.setup_error.read().unwrap().clone() {
+                return Err(error);
+            }
+            if !self.legacy_config_loaded.load(Ordering::Relaxed) {
+                let Some(policy) = self.access.policy().filter(|policy| {
+                    policy.mode == ScopeMode::Folders
+                        && policy.read == GrantScope::Folders
+                        && !policy.roots.is_empty()
+                }) else {
+                    return Err(
+                        "请先在「文件权限」保存指定文件夹授权（旧版 /api 仅支持指定文件夹）".into(),
+                    );
+                };
+                let mut config = BridgeConfig {
+                    port: self.api.config_snapshot().port,
+                    roots: policy.roots.clone(),
+                    read_only: true,
+                };
+                if self.profile.is_development() {
+                    config.port = 18795;
+                }
+                config.ensure_roots().map_err(|e| e.to_string())?;
+                self.profile.validate_config_scope(&config)?;
+                self.api.update_config(config)?;
+                self.legacy_config_loaded.store(true, Ordering::Relaxed);
+            }
+            let token_value = if self.profile.token_path().exists() {
+                token::load(&self.profile.token_path())
+                    .map_err(|_| "无法读取本机令牌，请检查 token 文件。".to_string())?
+            } else {
+                let generated = token::generate();
+                token::save(&self.profile.token_path(), &generated)
+                    .map_err(|_| "初始化令牌失败，请重试".to_string())?;
+                generated
+            };
+            self.update_desktop(|state| {
+                state.legacy_api_enabled = true;
+                Ok(true)
+            })?;
+            self.api.set_token(token_value.clone());
+            self.logs.protect_secret(&token_value);
+            self.initialized.store(true, Ordering::Relaxed);
+            *self.setup_error.write().unwrap() = None;
+            self.api.set_legacy_api_enabled(true);
+            self.logs
+                .runtime_entry("info", "旧版 /api 兼容接口已开启（使用独立文件令牌）");
+            self.status.send_modify(|status| {
+                status.public_verified = None;
+            });
+            return Ok(());
+        }
+
+        let should_pause = !self.access.agent_enabled()
+            && (self.desktop.read().unwrap().desired_enabled || runtime.api_task.is_some());
+        self.update_desktop(|state| {
+            state.legacy_api_enabled = false;
+            if should_pause {
+                state.desired_enabled = false;
+            }
+            Ok(true)
+        })?;
+        self.api.set_legacy_api_enabled(false);
+        self.logs.runtime_entry("info", "旧版 /api 兼容接口已关闭");
+        if should_pause {
+            self.stop_locked(&mut runtime).await.map_err(|error| {
+                format!("旧版 /api 兼容接口已关闭，暂停连接时遇到问题：{error}")
+            })?;
+        } else {
+            self.status.send_modify(|status| {
+                status.public_verified = None;
+            });
+        }
+        Ok(())
+    }
+
     pub fn resolve_exec_approval(
         &self,
         id: &str,
@@ -1153,6 +1318,35 @@ async fn probe_owned_api(port: u16, token: &str) -> bool {
         let valid=serde_json::from_str::<Value>(body).ok().is_some_and(|v|v["ok"]==true&&v["version"]=="0.3");
         Ok::<bool,std::io::Error>(response.starts_with("HTTP/1.1 200")&&valid)
     }).await.ok().and_then(Result::ok).unwrap_or(false)
+}
+
+async fn probe_owned_agent_api(port: u16, token: &str) -> bool {
+    tokio::time::timeout(Duration::from_secs(3), async {
+        let mut connection = tokio::net::TcpStream::connect(("127.0.0.1", port)).await?;
+        connection
+            .write_all(
+                format!(
+                    "GET /agent/v1/roots HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await?;
+        let mut bytes = Vec::new();
+        connection.take(16384).read_to_end(&mut bytes).await?;
+        let response = String::from_utf8_lossy(&bytes);
+        let body = response.split_once("\r\n\r\n").map(|(_, b)| b).unwrap_or("");
+        let valid = serde_json::from_str::<Value>(body).ok().is_some_and(|v| {
+            v["version"] == "1"
+                && ["search", "read", "write"]
+                    .iter()
+                    .all(|operation| v["roots"][*operation].is_array())
+        });
+        Ok::<bool, std::io::Error>(response.starts_with("HTTP/1.1 200") && valid)
+    })
+    .await
+    .ok()
+    .and_then(Result::ok)
+    .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1301,22 +1495,35 @@ mod tests {
         let first = controller.snapshot();
         assert!(first.fresh_setup && !first.initialized);
         assert!(first.file_token_version.is_none());
+        assert!(!first.legacy_api_enabled && !first.legacy_api_can_enable);
         assert!(profile.home.join("files/hello.txt").is_file());
 
-        let mut config = first.config;
-        config.roots.insert("qa".into(), profile.home.join("files"));
-        controller.configure(config).await.unwrap();
+        controller
+            .save_file_access(AccessPolicy {
+                mode: ScopeMode::Folders,
+                roots: [("qa".into(), profile.home.join("files"))].into(),
+                search: GrantScope::Folders,
+                read: GrantScope::Folders,
+                write: GrantScope::Folders,
+                ..AccessPolicy::default()
+            })
+            .await
+            .unwrap();
+        assert!(!controller.snapshot().initialized);
+        assert!(controller.snapshot().legacy_api_can_enable);
+        controller.set_legacy_api_enabled(true).await.unwrap();
         let saved = controller.snapshot();
-        assert!(saved.initialized && !saved.fresh_setup);
+        assert!(saved.initialized && !saved.fresh_setup && saved.legacy_api_enabled);
         assert!(saved.file_token_version.is_some());
         drop(controller);
 
         let reopened = ServiceController::open_inner(profile.clone(), Some(0));
+        assert!(reopened.snapshot().legacy_api_enabled);
         assert_eq!(
             reopened.snapshot().file_token_version,
             saved.file_token_version
         );
-        reopened.api.rotate_token().unwrap();
+        reopened.rotate_file_token().await.unwrap();
         assert_ne!(
             reopened.snapshot().file_token_version,
             saved.file_token_version
@@ -1464,6 +1671,10 @@ mod tests {
             write: GrantScope::Folders,
         };
         controller.save_file_access(folders.clone()).await.unwrap();
+        assert!(!controller.snapshot().initialized);
+        assert!(!profile.config_path().exists());
+        assert!(!profile.token_path().exists());
+        controller.set_legacy_api_enabled(true).await.unwrap();
         assert!(controller.snapshot().initialized);
         assert!(!controller.api.file_view().read_only);
         let full = AccessPolicy {
@@ -1709,6 +1920,7 @@ mod tests {
             write: GrantScope::Folders,
         };
         controller.save_file_access(policy.clone()).await.unwrap();
+        controller.set_legacy_api_enabled(true).await.unwrap();
         let status = controller.toggle(true).await.unwrap();
         let url = format!("http://127.0.0.1:{}/api/write", status.api_port);
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -1749,6 +1961,7 @@ mod tests {
             let profile = profile();
             let home = profile.home.clone();
             let controller = ServiceController::open_inner(profile, Some(0));
+            assert!(controller.snapshot().legacy_api_enabled);
             let mut config = controller.api.config_snapshot();
             config.read_only = false;
             let (root, path) = config.roots.first_key_value().unwrap();
@@ -2483,5 +2696,199 @@ mod tests {
         controller.shutdown().await;
         drop(controller);
         std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn fresh_folders_setup_survives_restart_without_legacy_files_and_opts_in_cleanly() {
+        let mut folders_profile = profile();
+        folders_profile.onboarding_qa = true;
+        let home = folders_profile.home.clone();
+        let controller = ServiceController::open_inner(folders_profile.clone(), Some(0));
+        assert!(!folders_profile.state_path().exists());
+        assert!(!controller.snapshot().legacy_api_enabled);
+        assert!(controller.rotate_file_token().await.is_err());
+
+        // 1) 新用户选择「指定文件夹模式」：不应提前生成 config.json 或旧版 token。
+        let folders = AccessPolicy {
+            mode: ScopeMode::Folders,
+            roots: [("qa".into(), home.join("files"))].into(),
+            search: GrantScope::Folders,
+            read: GrantScope::Folders,
+            write: GrantScope::Folders,
+            ..AccessPolicy::default()
+        };
+        controller.save_file_access(folders).await.unwrap();
+        assert!(!folders_profile.config_path().exists());
+        assert!(!folders_profile.token_path().exists());
+        assert!(controller.snapshot().setup_error.is_none());
+        assert!(!controller.snapshot().connection_configured);
+        drop(controller);
+
+        // 2) 重启后不应报 token 缺失错误，且可正常生成 Muse 专用令牌并启动服务。
+        let reopened = ServiceController::open_inner(folders_profile.clone(), Some(0));
+        let snap = reopened.snapshot();
+        assert!(snap.setup_error.is_none());
+        assert!(!snap.fresh_setup && !snap.legacy_api_enabled && snap.legacy_api_can_enable);
+        reopened.set_agent_access(true).await.unwrap();
+        let started = reopened.toggle(true).await.unwrap();
+        assert!(started.api_up);
+
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let origin = format!("http://127.0.0.1:{}", started.api_port);
+        let agent_key = reopened.access.agent_token().unwrap();
+        assert_eq!(
+            client
+                .get(format!("{origin}/agent/v1/roots"))
+                .bearer_auth(&agent_key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+        assert_eq!(
+            client
+                .get(format!("{origin}/api/health"))
+                .bearer_auth(&reopened.api.token())
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            404
+        );
+
+        // 3) 运行中显式开启旧版 /api：自动从指定文件夹初始化 config.json 与 token，并立即生效。
+        reopened.set_legacy_api_enabled(true).await.unwrap();
+        assert!(folders_profile.config_path().exists() && folders_profile.token_path().exists());
+        let legacy_key = token::load(&folders_profile.token_path()).unwrap();
+        assert_eq!(
+            client
+                .get(format!("{origin}/api/health"))
+                .bearer_auth(&legacy_key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+
+        // 4) 轮换旧版令牌：旧令牌失效、新令牌生效；随后撤销 Agent 令牌时服务仍靠旧版表面维持。
+        reopened.rotate_file_token().await.unwrap();
+        let rotated_key = token::load(&folders_profile.token_path()).unwrap();
+        assert_ne!(rotated_key, legacy_key);
+        assert_eq!(
+            client
+                .get(format!("{origin}/api/health"))
+                .bearer_auth(&legacy_key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            401
+        );
+        assert_eq!(
+            client
+                .get(format!("{origin}/api/health"))
+                .bearer_auth(&rotated_key)
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            200
+        );
+
+        // 5) 撤销 Agent 后再关闭旧版 /api：因双表面均关闭，连接自动暂停。
+        reopened.set_agent_access(false).await.unwrap();
+        assert!(reopened.status().api_up);
+        reopened.set_legacy_api_enabled(false).await.unwrap();
+        assert!(!reopened.snapshot().legacy_api_enabled);
+        assert!(!reopened.status().api_up);
+        assert!(!reopened.desktop_state().desired_enabled);
+        assert!(folders_profile.token_path().exists());
+        drop(reopened);
+
+        // 6) 纯整机模式（无 config.json）禁止开启旧版 /api。
+        let mut full_profile = profile();
+        full_profile.onboarding_qa = true;
+        let full_home = full_profile.home.clone();
+        let full_ctrl = ServiceController::open_inner(full_profile, Some(0));
+        full_ctrl
+            .save_file_access(AccessPolicy {
+                mode: ScopeMode::Full,
+                search: GrantScope::AllLocal,
+                read: GrantScope::AllLocal,
+                write: GrantScope::AllLocal,
+                ..AccessPolicy::default()
+            })
+            .await
+            .unwrap();
+        assert!(!full_ctrl.snapshot().legacy_api_can_enable);
+        assert!(full_ctrl.set_legacy_api_enabled(true).await.is_err());
+        drop(full_ctrl);
+
+        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(full_home).unwrap();
+    }
+
+    #[tokio::test]
+    async fn legacy_opt_in_migration_keeps_pure_legacy_users_on_and_tightens_v03_agent_users() {
+        // 1) 纯旧版存量用户：存在 config.json + token、无 agent-token、desktop-state 未含该字段 -> 自动开启且不提前写盘。
+        let legacy_profile = profile();
+        let legacy_home = legacy_profile.home.clone();
+        legacy_profile.initialize_development().unwrap();
+        let legacy_ctrl = ServiceController::open_inner(legacy_profile.clone(), Some(0));
+        assert!(legacy_ctrl.snapshot().legacy_api_enabled);
+        assert!(legacy_ctrl.snapshot().connection_configured);
+        assert!(!legacy_profile.state_path().exists());
+        // 显式关闭后重启保持关闭，不再被自动开启。
+        legacy_ctrl.set_legacy_api_enabled(false).await.unwrap();
+        drop(legacy_ctrl);
+        let legacy_reopened = ServiceController::open_inner(legacy_profile.clone(), Some(0));
+        assert!(!legacy_reopened.snapshot().legacy_api_enabled);
+        assert!(!legacy_reopened.snapshot().connection_configured);
+        drop(legacy_reopened);
+
+        // 2) v0.3.x 文件夹模式 Agent 用户：有 config.json + token + agent-token，desktop-state 未含该字段 -> 自动收紧关闭。
+        let agent_profile = profile();
+        let agent_home = agent_profile.home.clone();
+        agent_profile.initialize_development().unwrap();
+        let bootstrap = ServiceController::open_inner(agent_profile.clone(), Some(0));
+        bootstrap
+            .save_file_access(AccessPolicy {
+                mode: ScopeMode::Folders,
+                roots: [("development".into(), agent_home.join("files"))].into(),
+                search: GrantScope::Folders,
+                read: GrantScope::Folders,
+                write: GrantScope::Folders,
+                ..AccessPolicy::default()
+            })
+            .await
+            .unwrap();
+        bootstrap.set_agent_access(true).await.unwrap();
+        drop(bootstrap);
+        // 模拟从旧版本升级：desktop-state.json 存在但尚未记录 legacy_api_enabled 字段。
+        std::fs::write(agent_profile.state_path(), r#"{"desired_enabled":false}"#).unwrap();
+        let upgraded = ServiceController::open_inner(agent_profile.clone(), Some(0));
+        assert!(!upgraded.snapshot().legacy_api_enabled);
+        assert!(upgraded.snapshot().legacy_api_can_enable);
+        assert!(upgraded.snapshot().connection_configured);
+        let started = upgraded.toggle(true).await.unwrap();
+        assert!(started.api_up);
+
+        // 撤销 Agent 令牌后自动暂停，且重启时不会把残留的旧 token 误判回开启状态。
+        upgraded.set_agent_access(false).await.unwrap();
+        assert!(!upgraded.status().api_up);
+        assert!(!upgraded.snapshot().connection_configured);
+        drop(upgraded);
+
+        let after_revoke = ServiceController::open_inner(agent_profile.clone(), Some(0));
+        assert!(!after_revoke.snapshot().legacy_api_enabled);
+        assert!(!after_revoke.snapshot().connection_configured);
+        assert!(after_revoke.snapshot().setup_error.is_none());
+        drop(after_revoke);
+
+        std::fs::remove_dir_all(legacy_home).unwrap();
+        std::fs::remove_dir_all(agent_home).unwrap();
     }
 }

@@ -15,6 +15,10 @@
   - 发布与 CI 工作流升级为自动扫描仓库全部 `CHANGELOG*.md` 与 `README*.md`，自动校验多语言版本一致性并生成全语种 GitHub Release 说明，便于后续零配置扩展新语言。
 
 ### 安全与稳定性加固
+- **旧版 `/api` 兼容接口改为默认关闭并支持在「设置 → 兼容性」按需开启**：新安装与已迁移至新版 Muse 专用令牌的用户默认仅暴露 `/agent/v1`，大幅收紧公网令牌暴露面；纯旧版 File Bridge 存量用户升级后自动保持兼容不中断。
+  - **精准升级迁移与首次配置保护**：未显式配置 `legacy_api_enabled` 时，仅对已存在旧版 `config.json` + `token` 且尚未启用 `agent-token` 的纯旧版用户自动保持开启（不提前写入 `desktop-state.json`，保留首次引导状态）；文件夹模式新用户不再自动生成旧版 `config.json` 与 `token`。
+  - **设置页「兼容性」卡片与完整闭环**：新增「设置 → 兼容性」开关（仅允许在已有旧配置或已保存「指定文件夹」授权时开启，不向整机磁盘模式放开）以及旧版文件令牌轮换与目录定位入口；关闭时保留本地旧令牌文件，且在双表面均关闭时自动暂停连接。
+  - **表面对齐与限流/统计一致性**：关闭旧表面时所有 `/api/*` 在鉴权前直接返回 404 且不污染概览文件活动统计，同时保留未鉴权限流保护；内置归属健康探针改为优先校验 `/agent/v1/roots` 协议体，接管旧系统（`takeover_legacy`）时自动开启旧表面并在回滚时还原。
 - **扩大默认敏感凭证保护范围**：新增对主流云/容器凭证目录与浏览器登录数据目录的默认保护，即使开启整盘或主目录授权也不会被读取或搜索。
   - `.npmrc`、`.pypirc` 由仅写保护升级为读 / 搜索 / 写全面保护，并新增 `.docker`、`.kube`、`.azure` 与 gcloud 凭证目录默认保护。
   - 新增各平台浏览器凭证库默认保护：Windows（Chrome / Edge `User Data`、Firefox `Profiles`）、macOS（Application Support 下 Chrome / Edge / Firefox，配合既有 `~/Library/Keychains` 保护）、Linux（`google-chrome` / `chromium` / `microsoft-edge`、`.mozilla/firefox`）。

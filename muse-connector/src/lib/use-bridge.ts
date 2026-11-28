@@ -67,10 +67,12 @@ export interface Snapshot {
   agent_ready: boolean;
   agent_token_version?: string | null;
   exec_enabled: boolean;
+  legacy_api_enabled: boolean;
+  legacy_api_can_enable: boolean;
   pending_approvals: ApprovalView[];
   exec_sessions: SessionGrantView[];
   home: string; config: BridgeConfig;
-  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; close_to_tray: boolean; permission_mode: string; language: Language; device_name: string; device_name_update?: DeviceNameUpdate | null; exec_enabled?: boolean };
+  desktop: { desired_enabled: boolean; provider: ProviderSettings; start_minimized: boolean; close_to_tray: boolean; permission_mode: string; language: Language; device_name: string; device_name_update?: DeviceNameUpdate | null; exec_enabled?: boolean; legacy_api_enabled?: boolean };
   suggested_device_name: string | null;
   status: TunnelStatus;
   stats: ActivityStats & { file_activity: ActivityStats };

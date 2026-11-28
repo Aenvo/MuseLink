@@ -264,6 +264,7 @@ pub struct DesktopState {
     pub device_name: String,
     pub device_name_update: Option<DeviceNameUpdate>,
     pub exec_enabled: bool,
+    pub legacy_api_enabled: bool,
     pub permission_mode: String,
     pub capabilities: Vec<String>,
     pub agent_token_ref: Option<String>,
@@ -280,6 +281,7 @@ impl Default for DesktopState {
             device_name: String::new(),
             device_name_update: None,
             exec_enabled: false,
+            legacy_api_enabled: false,
             permission_mode: "request_approval".into(),
             capabilities: vec![],
             agent_token_ref: None,
@@ -392,9 +394,18 @@ impl RuntimeProfile {
         if self.is_development() { 18795 } else { 18790 }
     }
     pub fn load_desktop(&self) -> Result<DesktopState, String> {
+        self.load_desktop_with_meta().map(|(state, _)| state)
+    }
+    pub fn load_desktop_with_meta(&self) -> Result<(DesktopState, bool), String> {
         match std::fs::read_to_string(self.state_path()) {
             Ok(raw) => {
-                let state: DesktopState = serde_json::from_str(raw.trim_start_matches('\u{feff}'))
+                let cleaned = raw.trim_start_matches('\u{feff}');
+                let value: serde_json::Value = serde_json::from_str(cleaned)
+                    .map_err(|_| "桌面状态损坏，请先修复或恢复配置".to_string())?;
+                let legacy_api_explicit = value
+                    .as_object()
+                    .is_some_and(|map| map.contains_key("legacy_api_enabled"));
+                let state: DesktopState = serde_json::from_value(value)
                     .map_err(|_| "桌面状态损坏，请先修复或恢复配置".to_string())?;
                 if state.schema_version != 1 {
                     return Err("桌面状态版本不受支持".into());
@@ -406,9 +417,11 @@ impl RuntimeProfile {
                 {
                     return Err("Agent 能力尚未启用，不能通过配置授予权限".into());
                 }
-                Ok(state)
+                Ok((state, legacy_api_explicit))
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(DesktopState::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Ok((DesktopState::default(), false))
+            }
             Err(_) => Err("无法读取桌面状态".into()),
         }
     }

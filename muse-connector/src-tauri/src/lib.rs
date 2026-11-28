@@ -115,6 +115,13 @@ async fn set_exec_enabled(enabled: bool, state: tauri::State<'_, Services>) -> R
     state.set_exec_enabled(enabled).await
 }
 #[tauri::command]
+async fn set_legacy_api_enabled(
+    enabled: bool,
+    state: tauri::State<'_, Services>,
+) -> Result<(), String> {
+    state.set_legacy_api_enabled(enabled).await
+}
+#[tauri::command]
 fn resolve_exec_approval(
     id: String,
     decision: core::exec_runtime::ApprovalDecision,
@@ -134,6 +141,15 @@ fn open_agent_token(
     app.opener()
         .reveal_item_in_dir(state.agent_token_path()?)
         .map_err(|_| "无法找到本机 Muse 文件工具令牌".into())
+}
+#[tauri::command]
+fn open_legacy_token(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Services>,
+) -> Result<(), String> {
+    app.opener()
+        .reveal_item_in_dir(state.legacy_token_path()?)
+        .map_err(|_| "无法找到旧版文件令牌".into())
 }
 #[tauri::command]
 fn copy_agent_token(
@@ -172,14 +188,7 @@ async fn save_provider(
 }
 #[tauri::command]
 async fn rotate_file_token(state: tauri::State<'_, Services>) -> Result<(), String> {
-    let api = state.api.clone();
-    tokio::task::spawn_blocking(move || api.rotate_token())
-        .await
-        .map_err(|_| "文件令牌轮换未完成".to_string())??;
-    state
-        .logs
-        .runtime_entry("info", "文件令牌已轮换，请在本机更新安全卡片");
-    Ok(())
+    state.rotate_file_token().await
 }
 #[tauri::command]
 async fn save_preferences(
@@ -399,11 +408,23 @@ async fn prior_funnel() -> Option<Value> {
 async fn takeover_legacy(state: tauri::State<'_, Services>) -> Result<(), String> {
     state.profile.require_production()?;
     state.toggle(false).await?;
+    let previous_legacy = state.desktop_state().legacy_api_enabled;
+    if !previous_legacy {
+        state.set_legacy_api_enabled(true).await?;
+    }
     let profile = state.profile.clone();
     let old = prior_funnel().await;
-    tauri::async_runtime::spawn_blocking(move || legacy::takeover(&profile, old))
-        .await
-        .map_err(|_| "旧系统接管任务中断".to_string())??;
+    if let Err(error) =
+        tauri::async_runtime::spawn_blocking(move || legacy::takeover(&profile, old))
+            .await
+            .map_err(|_| "旧系统接管任务中断".to_string())
+            .and_then(|res| res)
+    {
+        if !previous_legacy {
+            let _ = state.set_legacy_api_enabled(false).await;
+        }
+        return Err(error);
+    }
     for _ in 0..20 {
         if tokio::net::TcpStream::connect(("127.0.0.1", state.api.config_snapshot().port))
             .await
@@ -415,6 +436,9 @@ async fn takeover_legacy(state: tauri::State<'_, Services>) -> Result<(), String
     }
     if let Err(error) = state.toggle(true).await {
         let _ = state.toggle(false).await;
+        if !previous_legacy {
+            let _ = state.set_legacy_api_enabled(false).await;
+        }
         let profile = state.profile.clone();
         let restored =
             tauri::async_runtime::spawn_blocking(move || legacy::restore(&profile)).await;
@@ -573,6 +597,9 @@ async fn test_public_connection(
     let agent_context = if agent.unwrap_or(false) {
         Some(state.agent_probe_context().await?)
     } else {
+        if !state.legacy_api_ready() {
+            return Err("请先生成 Muse 专用令牌，或在「设置 → 兼容性」开启旧版 /api 接口".into());
+        }
         None
     };
     let (route, credential) = match &agent_context {
@@ -832,9 +859,11 @@ pub fn run() {
             rebuild_search_index,
             set_agent_access,
             set_exec_enabled,
+            set_legacy_api_enabled,
             resolve_exec_approval,
             revoke_exec_sessions,
             open_agent_token,
+            open_legacy_token,
             copy_agent_token,
             search_local_files,
             cancel_local_file_search,

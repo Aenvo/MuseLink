@@ -44,6 +44,8 @@ export default function Settings({
     && indexStatus.state !== "cleared" && indexStatus.state !== "clearing";
   const canRebuildIndex = indexStatus.state === "cleared" && savedSearch;
   const canRotateToken = s.agent_enabled && hasFileGrant(policy) && !s.setup_error;
+  const legacyApiEnabled = s.legacy_api_enabled;
+  const canToggleLegacyApi = legacyApiEnabled || s.legacy_api_can_enable;
 
   const indexDescription = `${
     !savedSearch && indexStatus.state === "waiting"
@@ -223,7 +225,9 @@ export default function Settings({
                 disabled={!!busy || !s.agent_enabled}
                 onClick={() => confirm({
                   title: t("撤销 Muse 专用令牌？"),
-                  description: t("现有 Muse 文件工具的令牌会立即失效。文件权限及旧版 File Bridge 连接仍可单独管理。"),
+                  description: legacyApiEnabled
+                    ? t("现有 Muse 文件工具的令牌会立即失效。文件权限及旧版 File Bridge 连接仍可单独管理。")
+                    : t("现有 Muse 文件工具的令牌会立即失效。已保存的文件权限不会被删除。"),
                   action: t("撤销令牌"),
                   execute: async () => (await run(t("正在撤销 Muse 专用令牌"), "set_agent_access", { enabled: false }, t("Muse 专用令牌已撤销"))).ok,
                 })}
@@ -253,6 +257,80 @@ export default function Settings({
               </Button>
             </div>
           </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>{t("兼容性")}</CardTitle>
+        </CardHeader>
+        <CardContent className="flex flex-col gap-5">
+          <Field orientation="horizontal">
+            <FieldContent>
+              <FieldLabel htmlFor="legacy-api-enabled">{t("旧版 /api 接口")}</FieldLabel>
+              <FieldDescription>
+                {t("仅用于兼容早期 File Bridge（/api/*），需先在「文件权限」保存指定文件夹后才可开启；Muse连接器 v0.1.0 及以上用户无需开启。")}
+              </FieldDescription>
+            </FieldContent>
+            <Switch
+              id="legacy-api-enabled"
+              checked={legacyApiEnabled}
+              disabled={!!busy || !canToggleLegacyApi}
+              onCheckedChange={(next) => {
+                if (next) {
+                  confirm({
+                    title: t("开启旧版 /api 接口？"),
+                    description: t("仅在仍需兼容早期 File Bridge 客户端时开启。开启后将在当前公网入口启用 /api/* 并使用独立的旧版令牌文件。"),
+                    action: t("确认开启"),
+                    execute: async () => (await run(t("正在开启旧版接口"), "set_legacy_api_enabled", { enabled: true }, t("旧版 /api 接口已开启"))).ok,
+                  });
+                } else if (!s.agent_enabled && s.desktop.desired_enabled) {
+                  confirm({
+                    title: t("关闭旧版 /api 接口？"),
+                    description: t("关闭后旧版 /api/* 将立即停止响应并暂停当前连接；旧版令牌在关闭期间完全失效，本地文件会保留以便日后重新开启。"),
+                    action: t("确认关闭"),
+                    execute: async () => (await run(t("正在关闭旧版接口"), "set_legacy_api_enabled", { enabled: false }, t("旧版 /api 接口已关闭"))).ok,
+                  });
+                } else {
+                  void run(t("正在关闭旧版接口"), "set_legacy_api_enabled", { enabled: false }, t("旧版 /api 接口已关闭"));
+                }
+              }}
+            />
+          </Field>
+
+          {legacyApiEnabled ? (
+            <div className="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex min-w-0 flex-col gap-1">
+                <p className="text-sm font-medium text-foreground">{t("旧版文件令牌")}</p>
+                <p className="text-caption text-muted-foreground">
+                  {t("仅用于旧版 /api 接口，关闭上方开关后即刻失效")}
+                </p>
+              </div>
+              <div className="flex shrink-0 flex-wrap items-center gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={!!busy || !s.initialized}
+                  onClick={() => confirm({
+                    title: t("轮换旧版文件令牌？"),
+                    description: t("当前旧版文件令牌会立刻失效，轮换后请更新旧版客户端配置。"),
+                    action: t("轮换令牌"),
+                    execute: async () => (await run(t("正在轮换旧版文件令牌"), "rotate_file_token", undefined, t("旧版文件令牌已轮换"))).ok,
+                  })}
+                >
+                  {t("轮换令牌")}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={!!busy || !s.initialized}
+                  onClick={() => void run(t("正在定位令牌文件"), "open_legacy_token", undefined, undefined, false)}
+                >
+                  {t("打开目录")}
+                </Button>
+              </div>
+            </div>
+          ) : null}
         </CardContent>
       </Card>
 

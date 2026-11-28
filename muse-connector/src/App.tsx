@@ -157,6 +157,7 @@ function AppContent({ bridge }: { bridge: BridgeModel }) {
     if (!s || !address || s.profile !== "production" || !s.status.api_up || !s.status.funnel_up || busy) return;
     const agent = fromGuide || s.agent_ready;
     if (agent && !s.agent_ready) return;
+    if (!agent && !(s.legacy_api_enabled && s.initialized)) return;
     clearGuideTestError.current = fromGuide;
     confirm({
       title: t("测试此公网入口？"),

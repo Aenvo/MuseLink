@@ -66,6 +66,11 @@ async fn real_http_preserves_encoding_and_audits_wrong_methods() {
     let (shutdown, rx) = tokio::sync::watch::channel(false);
     let api = state.clone();
     let task = tokio::spawn(async move { api::serve_listener(api, listener, rx).await });
+    // 默认关闭旧版 /api：即使携带旧令牌也返回 404，不计入文件活动统计。
+    assert_eq!(request(port, "GET", "/api/health", true, "").await.0, 404);
+    assert_eq!(state.stats_snapshot()["file_activity"]["total"], 0);
+    // 显式开启旧版 /api 后，恢复完整 v0.3 HTTP 契约。
+    state.set_legacy_api_enabled(true);
     let write =
         json!({"root":"r","path":"中文 a.txt","content":"你好，Muse\nsecond line"}).to_string();
     assert_eq!(
@@ -84,7 +89,7 @@ async fn real_http_preserves_encoding_and_audits_wrong_methods() {
     assert_eq!(read["content"], "你好，Muse\nsecond line");
     assert_eq!(request(port, "POST", "/api/health", false, "").await.0, 401);
     assert_eq!(request(port, "POST", "/api/health", true, "").await.0, 404);
-    assert_eq!(state.audit().recent(None, 20).entries.len(), 4);
+    assert_eq!(state.audit().recent(None, 20).entries.len(), 5);
     shutdown.send(true).unwrap();
     task.await.unwrap().unwrap();
 }
