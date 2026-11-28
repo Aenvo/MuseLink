@@ -4,7 +4,7 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
-## [Unreleased]
+## [v0.3.2] - 2026-11-28
 
 ### Improvements & Added
 - **Automatic first-launch system language detection (English default)**: On first launch, MuseLink now detects the OS language automatically (Chinese locales use Simplified Chinese, Japanese uses Japanese, and all other locales default to English); manually changing the language in **Settings → General** locks your choice.
