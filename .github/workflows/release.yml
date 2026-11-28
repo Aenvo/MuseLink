@@ -17,6 +17,10 @@ permissions:
 jobs:
   build-windows:
     name: Build & sign Windows (x64)
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     runs-on: windows-latest
     timeout-minutes: 45
     env:
@@ -126,9 +130,17 @@ jobs:
           name: windows-assets
           path: ${{ steps.win_pack.outputs.out_dir }}/*
           if-no-files-found: error
+      - name: Attest Windows artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.win_pack.outputs.out_dir }}/*
 
   build-linux:
     name: Build & sign Linux (x64 AppImage & deb)
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     # 使用 ubuntu-22.04 保障 AppImage 的 glibc 跨发行版兼容性
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -234,9 +246,17 @@ jobs:
           name: linux-assets
           path: ${{ steps.linux_pack.outputs.out_dir }}/*
           if-no-files-found: error
+      - name: Attest Linux artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.linux_pack.outputs.out_dir }}/*
 
   build-macos:
     name: Build macOS (Universal dmg & app.zip)
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     runs-on: macos-latest
     timeout-minutes: 45
     env:
@@ -321,6 +341,10 @@ jobs:
           name: macos-assets
           path: ${{ steps.macos_pack.outputs.out_dir }}/*
           if-no-files-found: error
+      - name: Attest macOS artifacts
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.macos_pack.outputs.out_dir }}/*
 
   publish-draft:
     name: Assemble manifest & create draft Release
