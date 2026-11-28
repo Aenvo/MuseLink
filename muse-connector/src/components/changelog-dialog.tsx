@@ -1,7 +1,7 @@
 import { Fragment, useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, RefreshCw, X } from "lucide-react";
+import { ChevronDown, ChevronUp, ExternalLink, RefreshCw, X } from "lucide-react";
 import { useLanguage } from "@/lib/i18n";
 import { Button } from "@/components/ui/button";
 import {
@@ -41,7 +41,7 @@ interface ReleaseNode {
 const fallbackRemoteUrls = {
   "zh-CN": "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.md",
   en: "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.en.md",
-  ja: "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.en.md",
+  ja: "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.ja.md",
 } as const;
 
 function normalizeVersion(version: string) {
@@ -61,7 +61,13 @@ function formatIsoDate(value?: string | null) {
 
 function isUnreleasedHeading(version: string) {
   const normalized = version.trim().toLowerCase();
-  return normalized === "unreleased" || normalized === "未发布";
+  return (
+    normalized === "unreleased" ||
+    normalized === "未发布" ||
+    normalized === "未公開" ||
+    normalized === "未リリース" ||
+    normalized === "未發布"
+  );
 }
 
 function parseSectionsFromLines(lines: string[]): SectionNode[] {
@@ -188,7 +194,7 @@ function renderInline(text: string, onOpenLink: (url: string) => void): ReactNod
       nodes.push(<strong key={key++} className="font-medium text-foreground">{renderInline(match[2], onOpenLink)}</strong>);
     } else if (match[3] !== undefined) {
       nodes.push(
-        <code key={key++} className="rounded bg-muted px-1 py-0.5 font-mono text-[0.78rem] text-foreground">
+        <code key={key++} className="rounded bg-muted px-1 py-0.5 font-mono text-[0.78rem] text-foreground [overflow-wrap:anywhere]">
           {match[3]}
         </code>,
       );
@@ -251,6 +257,17 @@ export default function ChangelogDialog({
   const [remoteUrl, setRemoteUrl] = useState<string>(fallbackRemoteUrls[language]);
   const [syncing, setSyncing] = useState(false);
   const [offlineFallback, setOfflineFallback] = useState(false);
+  const [expandedVersions, setExpandedVersions] = useState<Record<string, boolean>>({});
+
+  useEffect(() => {
+    if (!open) {
+      setExpandedVersions({});
+    }
+  }, [open]);
+
+  const toggleReleaseDetails = useCallback((version: string) => {
+    setExpandedVersions(prev => ({ ...prev, [version]: !prev[version] }));
+  }, []);
 
   const syncRemote = useCallback(async (activeRef?: { cancelled: boolean }) => {
     if (!isTauri()) return;
@@ -361,59 +378,88 @@ export default function ChangelogDialog({
         </DialogHeader>
 
         <ScrollArea
-          className="-mr-[22px] flex min-h-0 flex-1 flex-col overflow-hidden [&>[data-slot=scroll-area-viewport]]:h-auto [&>[data-slot=scroll-area-viewport]]:max-h-[calc(82dvh-148px)] [&>[data-slot=scroll-area-viewport]]:min-h-0 [&>[data-slot=scroll-area-viewport]]:flex-1 [&_[data-slot=scroll-area-scrollbar]]:w-[10px] [&_[data-slot=scroll-area-scrollbar]]:px-[2px] [&_[data-slot=scroll-area-thumb]]:bg-[#999999]/75 hover:[&_[data-slot=scroll-area-thumb]]:bg-[#999999]"
+          className="-mr-[22px] flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden [&>[data-slot=scroll-area-viewport]]:h-auto [&>[data-slot=scroll-area-viewport]]:max-h-[calc(82dvh-148px)] [&>[data-slot=scroll-area-viewport]]:min-h-0 [&>[data-slot=scroll-area-viewport]]:flex-1 [&>[data-slot=scroll-area-viewport]>div]:!block [&>[data-slot=scroll-area-viewport]>div]:w-full [&>[data-slot=scroll-area-viewport]>div]:min-w-0 [&_[data-slot=scroll-area-scrollbar]]:w-[10px] [&_[data-slot=scroll-area-scrollbar]]:px-[2px] [&_[data-slot=scroll-area-thumb]]:bg-[#999999]/75 hover:[&_[data-slot=scroll-area-thumb]]:bg-[#999999]"
           type="always"
         >
-          <div className="flex flex-col gap-6 pb-1 pr-[22px]">
+          <div className="box-border flex w-full min-w-0 flex-col gap-6 pb-1 pr-[22px]">
             {visibleReleases.length === 0 ? (
               <p className="py-8 text-center text-muted-foreground">{t("暂无可展示的更新日志。")}</p>
             ) : (
-              visibleReleases.map(release => (
-                <section key={release.version} className="flex flex-col gap-3">
-                  <div className="flex flex-col gap-2">
-                    <div className="flex items-center justify-between gap-4">
-                      <h3 className="text-base leading-6 font-bold text-foreground">{release.version}</h3>
-                      {release.date ? (
-                        <span className="shrink-0 text-caption leading-[21px] text-muted-foreground">{release.date}</span>
-                      ) : null}
-                    </div>
-                    <div className="h-px w-full bg-border" />
-                  </div>
-                  {release.sections.length === 0 ? (
-                    <p className="text-caption leading-[21px] text-muted-foreground">
-                      {t("暂未获取到该版本的详细更新说明，可点击上方图标前往 GitHub 查看。")}
-                    </p>
-                  ) : (
-                    release.sections.map((section, sectionIndex) => (
-                      <div key={`${release.version}-${sectionIndex}`} className="flex flex-col gap-2">
-                        {section.title ? (
-                          <h4 className="text-caption leading-5 font-medium text-foreground">{section.title}</h4>
-                        ) : null}
-                        <div className="flex flex-col gap-1 pl-1 text-caption leading-[21px] text-muted-foreground">
-                          {section.items.map((item, itemIndex) => (
-                            <div key={itemIndex} className="flex flex-col gap-1">
-                              <div className="flex items-start gap-2">
-                                <span className="shrink-0 select-none text-muted-foreground" aria-hidden="true">•</span>
-                                <p className="min-w-0 flex-1">{renderInline(item.text, openExternal)}</p>
-                              </div>
-                              {item.children.length > 0 ? (
-                                <div className="flex flex-col gap-1 pl-[18px]">
-                                  {item.children.map((child, childIndex) => (
-                                    <div key={childIndex} className="flex items-start gap-2">
-                                      <span className="shrink-0 select-none text-muted-foreground" aria-hidden="true">•</span>
-                                      <p className="min-w-0 flex-1">{renderInline(child, openExternal)}</p>
-                                    </div>
-                                  ))}
-                                </div>
-                              ) : null}
-                            </div>
-                          ))}
+              visibleReleases.map(release => {
+                const hasDetails = release.sections.some(section =>
+                  section.items.some(item => item.children.length > 0),
+                );
+                const isExpanded = Boolean(expandedVersions[release.version]);
+                return (
+                  <section key={release.version} className="flex min-w-0 flex-col gap-3">
+                    <div className="flex min-w-0 flex-col gap-2">
+                      <div className="flex min-w-0 items-center justify-between gap-4">
+                        <h3 className="min-w-0 truncate text-base leading-6 font-bold text-foreground">{release.version}</h3>
+                        <div className="flex shrink-0 items-center gap-3">
+                          {hasDetails ? (
+                            <button
+                              type="button"
+                              aria-expanded={isExpanded}
+                              className="inline-flex cursor-pointer items-center gap-1 text-caption leading-[21px] text-muted-foreground transition-colors hover:text-foreground"
+                              onClick={() => toggleReleaseDetails(release.version)}
+                            >
+                              <span>{isExpanded ? t("收起详情") : t("展开详情")}</span>
+                              {isExpanded ? (
+                                <ChevronUp className="size-3.5" aria-hidden="true" />
+                              ) : (
+                                <ChevronDown className="size-3.5" aria-hidden="true" />
+                              )}
+                            </button>
+                          ) : null}
+                          {release.date ? (
+                            <span className="shrink-0 text-caption leading-[21px] text-muted-foreground">{release.date}</span>
+                          ) : null}
                         </div>
                       </div>
-                    ))
-                  )}
-                </section>
-              ))
+                      <div className="h-px w-full bg-border" />
+                    </div>
+                    {release.sections.length === 0 ? (
+                      <p className="text-caption leading-[21px] text-muted-foreground">
+                        {t("暂未获取到该版本的详细更新说明，可点击上方图标前往 GitHub 查看。")}
+                      </p>
+                    ) : (
+                      release.sections.map((section, sectionIndex) => (
+                        <div key={`${release.version}-${sectionIndex}`} className="flex min-w-0 flex-col gap-2">
+                          {section.title ? (
+                            <h4 className="text-caption leading-5 font-medium text-foreground">{section.title}</h4>
+                          ) : null}
+                          <div className="flex min-w-0 flex-col gap-1.5 pl-1 text-caption leading-[21px] text-muted-foreground">
+                            {section.items.map((item, itemIndex) => {
+                              const collapsedHeadline =
+                                item.children.length > 0 && !isExpanded
+                                  ? item.text.replace(/[：:]\s*$/, "")
+                                  : item.text;
+                              return (
+                                <div key={itemIndex} className="flex min-w-0 flex-col gap-1">
+                                  <div className="flex min-w-0 items-start gap-2">
+                                    <span className="shrink-0 select-none text-muted-foreground" aria-hidden="true">•</span>
+                                    <p className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{renderInline(collapsedHeadline, openExternal)}</p>
+                                  </div>
+                                  {isExpanded && item.children.length > 0 ? (
+                                    <div className="flex min-w-0 flex-col gap-1 pl-[18px]">
+                                      {item.children.map((child, childIndex) => (
+                                        <div key={childIndex} className="flex min-w-0 items-start gap-2">
+                                          <span className="shrink-0 select-none text-muted-foreground" aria-hidden="true">•</span>
+                                          <p className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{renderInline(child, openExternal)}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  ) : null}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </section>
+                );
+              })
             )}
           </div>
         </ScrollArea>

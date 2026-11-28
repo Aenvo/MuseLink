@@ -64,6 +64,10 @@ jobs:
         with:
           workspaces: muse-connector/src-tauri
 
+      - name: Validate multilingual changelogs
+        shell: pwsh
+        run: ./muse-connector/scripts/generate-release-notes.ps1 -ValidateSync
+
       - name: Check Rust formatting
         run: cargo fmt --manifest-path muse-connector/src-tauri/Cargo.toml --all -- --check
 

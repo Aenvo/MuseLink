@@ -29,11 +29,15 @@ const CHANGELOG_RAW_ZH_URL: &str =
     "https://raw.githubusercontent.com/Aenvo/MuseLink/main/CHANGELOG.md";
 const CHANGELOG_RAW_EN_URL: &str =
     "https://raw.githubusercontent.com/Aenvo/MuseLink/main/CHANGELOG.en.md";
+const CHANGELOG_RAW_JA_URL: &str =
+    "https://raw.githubusercontent.com/Aenvo/MuseLink/main/CHANGELOG.ja.md";
 const CHANGELOG_WEB_ZH_URL: &str = "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.md";
 const CHANGELOG_WEB_EN_URL: &str = "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.en.md";
+const CHANGELOG_WEB_JA_URL: &str = "https://github.com/Aenvo/MuseLink/blob/main/CHANGELOG.ja.md";
 
 const BUNDLED_CHANGELOG_ZH: &str = include_str!("../../../CHANGELOG.md");
 const BUNDLED_CHANGELOG_EN: &str = include_str!("../../../CHANGELOG.en.md");
+const BUNDLED_CHANGELOG_JA: &str = include_str!("../../../CHANGELOG.ja.md");
 
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
@@ -253,11 +257,17 @@ fn changelog_urls(language: Language) -> (&'static str, &'static str, &'static s
             CHANGELOG_RAW_ZH_URL,
             CHANGELOG_WEB_ZH_URL,
         ),
-        Language::English | Language::Japanese => (
+        Language::English => (
             "en",
             BUNDLED_CHANGELOG_EN,
             CHANGELOG_RAW_EN_URL,
             CHANGELOG_WEB_EN_URL,
+        ),
+        Language::Japanese => (
+            "ja",
+            BUNDLED_CHANGELOG_JA,
+            CHANGELOG_RAW_JA_URL,
+            CHANGELOG_WEB_JA_URL,
         ),
     }
 }
@@ -779,13 +789,14 @@ mod tests {
     fn bundled_changelogs_are_embedded_and_non_empty() {
         assert!(BUNDLED_CHANGELOG_ZH.contains("## [v0.2."));
         assert!(BUNDLED_CHANGELOG_EN.contains("## [v0.2."));
+        assert!(BUNDLED_CHANGELOG_JA.contains("## [v0.2."));
         assert_eq!(
             changelog_urls(Language::Japanese),
             (
-                "en",
-                BUNDLED_CHANGELOG_EN,
-                CHANGELOG_RAW_EN_URL,
-                CHANGELOG_WEB_EN_URL,
+                "ja",
+                BUNDLED_CHANGELOG_JA,
+                CHANGELOG_RAW_JA_URL,
+                CHANGELOG_WEB_JA_URL,
             )
         );
     }

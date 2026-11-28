@@ -1,93 +1,97 @@
 # Changelog
 
-[简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md) · [Back to README](README.en.md)
+[简体中文](CHANGELOG.md) · [English](CHANGELOG.en.md) · [日本語](CHANGELOG.ja.md) · [Back to README](README.en.md)
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
 ## [Unreleased]
 
+### Improvements & Added
+- **Layered in-app changelog reading & native Japanese changelog**: The in-app **About → Changelog / Release notes** dialog now shows concise highlights by default with a per-version toggle for technical details, and the Japanese UI displays native Japanese notes directly.
+  - Added `CHANGELOG.ja.md` so the Japanese in-app dialog and GitHub links no longer fall back to English.
+  - Upgraded the CI and release workflows to auto-discover all `CHANGELOG*.md` and `README*.md` locales, enforce cross-locale version sync, and assemble multilingual GitHub Release notes automatically when new languages are added.
+
 ### Security & Stability
-- **Expanded default read protection**: `.npmrc` and `.pypirc` are promoted from write-only protection to full protection (read / search / write). Added default protection for `.docker`, `.kube`, `.azure`, gcloud credential directories, and per-platform browser credential stores (Windows: Chrome / Edge `User Data` and Firefox `Profiles`; macOS: Chrome / Edge / Firefox under Application Support alongside existing `~/Library/Keychains` protection; Linux: `google-chrome` / `chromium` / `microsoft-edge` and `.mozilla/firefox`), so tokens and login data cannot be read even under disk-wide or home-folder grants.
+- **Expanded default credential protection**: Added default read, search, and write protection for common cloud/container credential folders and browser login stores—even under full-disk or home-folder grants.
+  - Promoted `.npmrc` and `.pypirc` from write-only protection to full protection, and added `.docker`, `.kube`, `.azure`, and gcloud credential directories.
+  - Added per-platform browser credential store protection: Windows (Chrome / Edge `User Data`, Firefox `Profiles`), macOS (Chrome / Edge / Firefox under Application Support alongside existing `~/Library/Keychains`), and Linux (`google-chrome` / `chromium` / `microsoft-edge`, `.mozilla/firefox`).
 
 ## [v0.3.1] - 2026-11-27
 
 ### Fixes & Cross-Platform Adaptation
-- **Fixed "Copy dedicated token" always failing on macOS / Linux and transiently failing on Windows**:
-  - **Native macOS secret pasteboard**: Implemented token copying via AppKit `NSPasteboard` with `org.nspasteboard.ConcealedType`, `org.nspasteboard.TransientType`, and `CurrentHostOnly` to keep credentials out of clipboard managers and Universal Clipboard sync.
-  - **Linux clipboard support**: Added stdin-based clipboard writing via `wl-copy`, `xclip`, or `xsel` (never passing tokens on the command line and detaching stdio so background clipboard daemons never hang).
-  - **Windows clipboard retry & privacy flags**: Added short backoff retries around `OpenClipboard` to handle brief contention from Clipboard History or third-party monitors right after copying setup instructions, and standardized 4-byte `DWORD(0)` markers for `ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory`, and `CanUploadClipboardData`.
-  - **Actionable failure diagnostics**: Surfaced localized failure reasons (ZH/EN/JA) in both the setup guide and connection card while keeping the **Locate token file** fallback.
-- **Fixed macOS / Linux "Manage local drives (full access)" returning HTTP 403 for Desktop and all requests**:
-  - **Unix local root discovery & validation**: Implemented `fixed_local_roots()` on macOS and Linux to expose the system root (`root` -> `/`), updated disk alias validation and the disk picker UI (`System root (/)`), and failed closed when no local roots exist—fixing empty `/agent/v1/roots` and HTTP 403 responses from `/agent/v1/locations/desktop` and file operations.
-  - **macOS / Linux sensitive-path protection & safe search exclusions**: Added read/search/write protection for macOS `~/Library/Keychains`, default write protection for macOS/Linux system directories, login/autostart paths (`~/Library/LaunchAgents`, `~/.config/autostart`), login shell profiles (`.zprofile`, `.zshenv`, `.bash_profile`), and `.app` bundles; excluded macOS `/System`, `/Library`, `/Applications`, `/usr`, `/bin`, `/sbin`, `/private`, `~/Library` (preventing delayed iCloud Drive / app-container TCC prompt storms), the Photos library, `/dev`, and non-local `/Volumes/*` mounts (and Linux `/proc`, `/sys`, `/dev`, `/run`) from background filename scanning without blocking explicit direct reads.
-  - **macOS privacy permission (TCC) UX & API error clarity**: Primed Desktop, Documents, and Downloads upfront before recursive indexing so permission prompts appear immediately rather than straggling; added a one-click **Open Full Disk Access settings** button in full-access mode on macOS; made Desktop/search wording platform-neutral in trilingual connector instructions; and mapped OS `PermissionDenied` errors to actionable HTTP 403 responses.
+- **Fixed "Copy dedicated token" failures across all platforms**: Implemented native secret clipboard support on macOS, system clipboard tools on Linux, contention retries on Windows, and actionable failure diagnostics.
+  - **Native macOS secret pasteboard**: Copies tokens via AppKit `NSPasteboard` with `org.nspasteboard.ConcealedType`, `org.nspasteboard.TransientType`, and `CurrentHostOnly` to keep credentials out of clipboard managers and Universal Clipboard sync.
+  - **Linux clipboard support**: Writes via stdin to `wl-copy`, `xclip`, or `xsel` without passing tokens on the command line and detaches stdio so background clipboard daemons never hang.
+  - **Windows clipboard retry & privacy flags**: Added short backoff retries around `OpenClipboard` to mitigate transient contention and standardized 4-byte `DWORD(0)` markers (`ExcludeClipboardContentFromMonitorProcessing`, `CanIncludeInClipboardHistory`, `CanUploadClipboardData`).
+  - **Actionable failure diagnostics**: Surfaced localized failure reasons (ZH/EN/JA) in the setup guide and connection card while keeping the **Locate token file** fallback.
+- **Fixed macOS / Linux "Manage local drives (full access)" returning HTTP 403 for Desktop and all requests**: Added system root (`/`) discovery, Unix sensitive-path protection, and macOS privacy guidance.
+  - **Unix local root discovery & validation**: Implemented `fixed_local_roots()` on macOS and Linux to expose `root` -> `/`, updated disk alias validation and the disk picker UI (`System root (/)`), and failed closed on empty root maps—fixing empty `/agent/v1/roots` and HTTP 403 on `/agent/v1/locations/desktop`.
+  - **macOS / Linux sensitive-path protection & safe search exclusions**: Added full protection for macOS `~/Library/Keychains` and default write protection for system directories, autostart paths (`~/Library/LaunchAgents`, `~/.config/autostart`), login shell profiles (`.zprofile`, `.zshenv`, `.bash_profile`), and `.app` bundles; excluded macOS `/System`, `/Library`, `/Applications`, `/usr`, `/bin`, `/sbin`, `/private`, `~/Library` (preventing delayed iCloud / app-container TCC prompt storms), Photos library, `/dev`, and non-local `/Volumes/*` mounts (and Linux `/proc`, `/sys`, `/dev`, `/run`) from background scanning without blocking direct reads.
+  - **macOS privacy permission (TCC) UX & API error clarity**: Primed Desktop, Documents, and Downloads upfront before recursive indexing; added a one-click **Open Full Disk Access settings** button on macOS; made trilingual Desktop wording platform-neutral; and mapped OS `PermissionDenied` errors to actionable HTTP 403 responses.
 
 ## [v0.3.0] - 2026-11-27
 
 ### Added
-- **In-app auto-updater & synced changelog dialog**:
-  - **Check & restart-to-update (Windows installer & Linux AppImage)**: Adds silent startup update checks and a manual **Check for updates** button on the **About** page backed by static GitHub Releases `latest.json` manifests and a compile-time pinned Minisign public key (avoiding anonymous REST API rate limits). New versions surface in a dismissible bottom-right card; downloads display a live green progress bar while keeping active connections uninterrupted; installing cleanly stops services (including managed `Everything.exe` on Windows) and restarts into the new build automatically. Portable Windows builds, Linux `.deb`, and macOS/source builds check the same static `latest.json` via SemVer so they still receive update alerts, release notes, and direct download links.
-  - **In-app synced changelog & release notes modals**: Updates **About** actions to ghost-style **Changelog**, **GitHub**, and **Check for updates**. Both **Changelog** and **Release notes** open in-app modals that follow the UI language (Japanese falls back to the English changelog), hide `[Unreleased]` and header chrome, render instantly from the bundled copy, silently sync from GitHub (with `latest.json` notes fallback), and include a header link icon to GitHub.
-  - **Cross-platform automated release workflow**: Adds `.github/workflows/release.yml` and `generate-updater-manifest.ps1` to run tests and build signed Windows (portable ZIP + NSIS), signed Linux (Ubuntu 22.04 AppImage + `.deb`), and macOS Universal (`.dmg` + `.app.zip`) packages in parallel on `v*` tags, assembling the updater `latest.json` and full `SHA256SUMS.txt` onto a draft GitHub Release.
-- **Linux support**: MuseLink now builds and runs on Linux, covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup. Sandboxed command execution remains Windows-only.
-- **macOS support**: MuseLink now builds and runs on macOS (Apple Silicon & Intel), covering the file API (list / read / write / mkdir) and Tailscale / Cloudflare tunnel setup (discovers the Tailscale app bundle and Homebrew installs), with prebuilt Universal `.dmg` and `.app.zip` packages. Sandboxed command execution remains Windows-only; macOS packages are ad-hoc signed and not notarized (allow under **System Settings → Privacy & Security** on first launch).
-- **Japanese localization**: Added a Japanese (`ja`) locale covering the full UI (including updater and changelog modals), system tray, and Muse setup instructions, selectable under **Settings → General**, along with a Japanese README and preview screenshots.
+- **In-app auto-updater & synced changelog dialog**: Supports silent startup checks, signed one-click updates (Windows installer & Linux AppImage), and in-app synced release notes.
+  - **Check & restart-to-update**: Uses static GitHub Releases `latest.json` manifests and a compile-time pinned Minisign public key (no rate-limited REST API); shows a dismissible bottom-right update card with a live green progress bar while keeping connections active, cleanly stops services (including Windows `Everything.exe`) before restarting; portable Windows, Linux `.deb`, and macOS/source builds receive alerts, notes, and direct download links via the same manifest.
+  - **In-app changelog modals**: Updates **About** actions to **Changelog**, **GitHub**, and **Check for updates**; renders instantly from bundled notes, silently syncs from GitHub, follows UI language, and links directly to GitHub.
+  - **Cross-platform automated release workflow**: Added `.github/workflows/release.yml` and `generate-updater-manifest.ps1` to build and verify all three platforms in parallel on `v*` tags and publish `latest.json` and `SHA256SUMS.txt`.
+- **Linux & macOS (Apple Silicon & Intel) support**: Full file API and Tailscale / Cloudflare tunnel configuration now run across all three desktop platforms with prebuilt packages.
+  - **Linux support**: Covers the file API (`search` / `list` / `read` / `write` / `mkdir`) and tunnel setup with signed AppImage and `.deb` packages; sandboxed command execution remains Windows-only.
+  - **macOS support**: Provides Universal `.dmg` and `.app.zip` packages and discovers `Tailscale.app` and Homebrew installs automatically; packages are ad-hoc signed and not notarized (allow in **System Settings → Privacy & Security** on first launch); command execution remains Windows-only.
+- **Japanese (`ja`) localization**: Added complete Japanese UI, system tray, Muse setup instructions, and Japanese README, selectable under **Settings → General**.
 
 ## [v0.2.2] - 2026-11-27
 
 ### Improvements & Added
-- **Higher `/agent/v1/read` limit, chunked reading, and raw binary download (fixes #4)**:
-  - **Raised whole-file JSON read limit to 10 MiB**: Increased from 2 MiB to 10 MiB (matching the write limit) so existing connectors can read high-resolution photos without prompt updates; oversized requests return HTTP `413` with structured `size`, `max_bytes`, `chunked_supported`, `recommended_limit`, `raw_supported`, and `recommended_raw_limit` fields. Legacy `/api/read` keeps the 2 MiB v0.3 limit.
-  - **Added `offset` / `limit` chunked reads (no hard total file size limit)**: Seeks and reads directly from the verified OS file handle; JSON chunks default to 2 MiB (max 4 MiB) and return `offset`, `bytes_read`, `total_size`, `next_offset`, `has_more`, and `etag`. Supports `if_match` query param or `If-Match` header (accepting both quoted and unquoted `ETag` values) and returns HTTP `409` if the file changes mid-read.
-  - **Added `raw=1` raw binary streaming**: Streams raw bytes with detected `Content-Type` and no 33% Base64 overhead (~40% faster over tunnels, up to 32 MiB per request, combinable with `offset`/`limit`), exposing `ETag` and `X-File-*` metadata headers.
-  - **Updated Muse connection instructions (Prompt)**: Updated bilingual setup instructions to guide Muse to prefer `raw=1` for binary/image files, use 4 MiB raw chunks (or 2 MiB JSON chunks) for large files, pass `if_match`, and retry individual chunks on transient connection drops.
+- **Higher file read limit, chunked reading, and raw binary streaming (fixes #4)**: Raised whole-file reads to 10 MiB and added chunked and zero-overhead binary downloads for large files and high-resolution images.
+  - **10 MiB whole-file JSON limit**: Matches the write limit so existing connectors can read large photos without prompt changes; oversized files return HTTP `413` with chunking and `raw` hints; legacy `/api/read` keeps 2 MiB compatibility.
+  - **Chunked reads via `offset` / `limit` (no hard total size cap)**: Seeks and reads directly from the verified OS handle (JSON default 2 MiB, max 4 MiB), returns `etag`, and validates `if_match` / `If-Match` (returning HTTP `409` on concurrent edits).
+  - **Raw binary streaming (`raw=1`)**: Streams raw bytes with detected `Content-Type` without 33% Base64 overhead (~40% faster over tunnels, up to 32 MiB per request, combinable with `offset`/`limit`), exposing `ETag` and `X-File-*` headers.
+  - **Updated Muse connection instructions**: Guides Muse to prefer `raw=1` for binary/image files and retry individual chunks on transient drops.
 
 ## [v0.2.1] - 2026-11-25
 
 ### Improvements & Added
-- **Full UI/UX redesign & information architecture refresh**:
-  - **Component polish**: Updated active `Switch` track color to `#48C52C` with white thumb; switched `Input`, `Select`, and the Overview endpoint URL box to transparent outline-only styling with brighter hover borders; added an inline search icon input on the Logs page; highlighted destructive actions (Revoke token, Revoke session grants) in semantic red; calibrated card and form spacing across all pages.
-  - **Connection page & setup guide overhaul**: Added a dedicated top **Setup guide** card, streamlined **Device** name to an inline row, moved **Muse connection instructions** (copy instructions / copy token) into the Connection page, unified primary/secondary button hierarchy, and placed **Copy instructions** and **Copy dedicated token** side by side inside step 3 of the setup guide.
-  - **Focused File Access page**: Moved **Save permissions** to the card header, relocated index and token maintenance into Settings, and kept focus strictly on authorized folders/drives and local command execution.
-  - **Streamlined Logs page**: Promoted the time-window filter to the primary single-row filter bar alongside result, scope, and icon search input, with a single **Pause sync / Resume sync** action button.
-  - **Settings reorganized into General & Data**: Consolidated local data folder, local file index (status, disk usage, clear/rebuild, open index folder), log data (disk usage, clear logs, filterable export, open folder), and local token (revoke, rotate, open folder) under **Data**.
-  - **Improved startup & tray behavior**: Autostart is off by default and launches silently to the tray via `--autostart` when enabled; manual launches always open the main window; replaced the startup-minimized toggle with **Minimize to tray on close** (enabled by default; disabling it lets closing the window exit cleanly).
-- **Removed Cloudflare quick tunnel**: Removed the `trycloudflare.com` quick tunnel option from both UI and Rust backend after confirming it is unreliable with Muse; MuseLink now focuses on Tailscale Funnel and Cloudflare named tunnels (with automatic fallback to Tailscale Funnel when loading legacy `cloudflare_quick` configs).
-- **Real-time long-polling for command approvals and execution status**: `GET /agent/v1/exec/{job_id}` now supports an optional `?wait_ms=` query parameter (defaults to `0` for full compatibility, capped at `25000` ms, recommended `20000` ms). Waiting runs asynchronously without holding request slots or access locks, waking immediately when you click **Allow** or **Deny**, when approval expires, or when the job finishes—no need to reply in chat after approving on Windows.
-- **Updated Muse connection instructions (Prompt)**: Updated both English and Chinese connector instructions so Muse keeps polling `GET /agent/v1/exec/<job_id>?wait_ms=20000` continuously until a terminal state instead of stopping for a manual reply, with clear handling for `expired` / `denied` and bounded polling caps (existing users can re-copy and send the updated instructions to Muse).
-- **Prevent stale clicks at approval expiry**: Disables approval dialog buttons once the countdown reaches 0 seconds.
-- **Filterable log export & log folder shortcut**: Added **Clear logs**, an **Export logs** dialog, and **Open folder** under **Settings → Data → Log data**. Filter by log scope (All / Files / Command execution / All access / Runtime), result, time range, and keyword, then export chronologically as `JSONL` or `CSV` (with UTF-8 BOM and redundant token redaction) through the native save dialog, or jump straight to the rotated 10 MiB log files on disk.
-- **MIT open-source license & notices**: Added repository-root [LICENSE](LICENSE) (MIT License), synced `package.json`, `Cargo.toml`, bilingual READMEs, third-party notices, and bundled `LICENSE` in release packages.
+- **Full UI/UX redesign & information architecture refresh**: Unified visual polish and streamlined the Connection, File Access, Logs, and Settings pages.
+  - **Component polish**: Active `Switch` track updated to `#48C52C` green with white thumb; `Input`, `Select`, and endpoint boxes unified as transparent outlines; inline search icon on Logs; semantic red for destructive actions.
+  - **Connection & setup guide overhaul**: Dedicated top **Setup guide** card, inline **Device** row, **Muse connection instructions** moved to the Connection page, and side-by-side copy actions in step 3 of onboarding.
+  - **Focused File Access & Logs**: Moved **Save permissions** into the card header; promoted time-window filtering into a single primary filter bar with a single **Pause sync / Resume sync** toggle.
+  - **Settings reorganized into General & Data**: Consolidated local data, file index, logs, and token maintenance under **Data**.
+  - **Improved startup & tray behavior**: Autostart defaults off and starts minimized to tray via `--autostart`; manual launches always open the main window; added configurable **Minimize to tray on close** (on by default).
+- **Real-time long-polling for command approvals and execution**: Approvals, denials, and completions wake immediately without requiring a manual reply in chat.
+  - Added `?wait_ms=` to `GET /agent/v1/exec/{job_id}` (default `0`, cap `25000` ms, recommended `20000` ms) running asynchronously without holding request slots or locks.
+  - Updated Muse instructions for continuous polling with `expired`/`denied` handling and polling caps; disabled approval buttons once the countdown hits zero.
+- **Filterable log export & log folder shortcut**: Export redacted logs as `JSONL` or `CSV` by scope, result, time range, and keyword, or open the rotated log directory directly.
+  - Available under **Settings → Data → Log data** with **Clear logs**, **Export logs** (UTF-8 BOM + redundant token redaction), and **Open folder** (10 MiB rotated logs).
+- **Removed Cloudflare quick tunnel & added MIT license**: Focused tunnel support on Tailscale Funnel and Cloudflare named tunnels.
+  - Legacy `cloudflare_quick` configs fall back automatically to Tailscale Funnel; added repository-root [LICENSE](LICENSE) (MIT) synced across manifests, READMEs, and release packages.
 
 ### Fixes
-- **Fixed jobs hanging in `running` when a detached grandchild holds stdio pipes**: Terminates and drops the per-job Windows `JobObject` right after the primary command exits and before joining the stdout/stderr reader threads, preventing inherited pipe write handles from blocking EOF indefinitely.
+- **Fixed jobs hanging in `running` when a detached grandchild holds stdio pipes**: Terminates the per-job Windows `JobObject` right after the primary command exits so inherited pipe handles cannot block EOF indefinitely.
 
 ## [v0.2.0] - 2026-11-25
 
 ### Added
-- **Controlled local command execution (off by default)**: Added a toggle with risk confirmation under **File Access → Muse file tools**. When enabled, Muse can run developer tools (`direct` mode) and controlled `powershell` / `cmd` commands inside authorized project subfolders via `/agent/v1/exec`, `/agent/v1/exec/{job_id}`, and `/agent/v1/exec/{job_id}/cancel` (bare drive roots are rejected).
-- **Per-workspace Windows write-restricted sandbox**: Uses `CreateRestrictedToken(WRITE_RESTRICTED)` with a unique SHA-256-derived SID per canonical workspace path so writes are restricted strictly to the targeted project subfolder and an isolated per-job temp directory (sibling and parent folders cannot write into each other). Enforces `JobObject` memory, process-count, and timeout limits and fails closed without falling back to unsandboxed execution.
-- **3-tier risk model & auto-elevated approval dialog**:
-  - Standard read-only and project build/test commands run automatically and return HTTP 200 directly when fast; pure read-only direct commands skip workspace write ACL updates completely.
-  - First-time shell usage, dependency mutations, or `git push` in a project wakes and temporarily elevates a local approval dialog (120-second timeout defaults to deny) with **Allow once** or 4-hour per-project **Allow project this session** (revocable anytime under **File Access → Revoke session grants**).
-  - Sensitive paths, parent-directory traversal (`..`), force push, recursive/forced deletion, system admin tools, obfuscated scripts, and `unsandboxed` requests always require a single confirmation.
-- **Device naming & rename receipts**: Configure distinct device names under **Connection** for multi-computer setups, with copyable rename instructions and Muse confirmation receipts.
-- **Execution log filter & in-app Changelog button**: Added **Command execution** filter to the Logs page and a **Changelog** button next to **Open GitHub** on the **About** page.
+- **Controlled local command execution (Windows, off by default)**: Allows Muse to run developer tools and controlled shells inside authorized project subfolders under a write-restricted sandbox and local approval dialog.
+  - Added toggle with risk confirmation under **File Access → Muse file tools** exposing `/agent/v1/exec`, status polling, and cancellation (bare drive roots rejected).
+  - **Per-workspace Windows write-restricted sandbox**: Combines `CreateRestrictedToken(WRITE_RESTRICTED)` with a SHA-256-derived SID per canonical workspace so writes stay within the project subfolder and isolated job temp dir, enforced alongside `JobObject` memory/process/timeout limits and fail-closed guarantees.
+  - **3-tier risk model & auto-elevated approval dialog**: Read-only and standard build/test commands run automatically; first-time shell usage, dependency changes, or `git push` elevate a 120-second approval dialog (**Allow once** or 4-hour per-project session grant); sensitive paths, `..`, force push, recursive deletion, admin tools, obfuscated scripts, and `unsandboxed` requests always require single confirmation.
+- **Device naming & rename receipts**: Configure distinct device names under **Connection** with copyable rename instructions and Muse confirmation receipts.
+- **Execution log filter & in-app Changelog button**: Added **Command execution** log filtering and a **Changelog** button on **About**.
 
 ### Security & Stability
-- **Handle-verified file operations**: Reads and atomic writes verify real object paths and attributes through open Windows handles, supporting Windows short-path aliases while defending against symlink/junction escapes and TOCTOU swaps.
-- **Layered sensitive-path protection**: Excludes credential directories (`~/.muse-bridge`, `~/.ssh`, `~/.aws`, `~/.gnupg`) by default and write-protects system directories, Startup folders, shell profiles, `.gitconfig`, and the app directory.
-- **Clean child process-tree teardown**: Attaches managed `Everything.exe`, `cloudflared`, and command child processes to Windows `JobObject`s so exiting or disabling execution terminates entire process trees with zero orphans.
-- **Log redaction & permission preservation**: Automatically redacts `mfa_` tokens in audit/runtime logs; includes `/agent/v1/*` endpoints in default **Files** logs; preserves existing grants when switching between folder and drive modes; enforces the 10 MiB limit on base64 writes; tightens CSP; bumps `url` to address `RUSTSEC-2026-0592`.
-- **Structured disabled error code**: Returns HTTP 403 with `{"error": "exec_disabled", "message": "command execution is disabled"}` when command execution is disabled.
+- **Handle-verified file operations & layered sensitive-path protection**: Reads and atomic writes verify real object paths via open OS handles against symlink/junction escapes and TOCTOU swaps, while protecting credentials and system paths by default.
+  - Excludes `~/.muse-bridge`, `~/.ssh`, `~/.aws`, and `~/.gnupg` by default and write-protects system folders, Startup, shell profiles, `.gitconfig`, and the app directory.
+  - Attaches managed `Everything.exe`, `cloudflared`, and command child processes to Windows `JobObject`s for clean process-tree teardown.
+  - Redacts `mfa_` tokens in logs, preserves grants across folder/drive mode switches, enforces 10 MiB base64 write caps, tightens CSP, bumps `url` for `RUSTSEC-2026-0592`, and returns HTTP 403 `exec_disabled` when execution is off.
 
 ### Engineering & CI
-- Added Windows GitHub Actions build and test workflow covering formatting, frontend build, Rust tests, symlink/junction escape coverage, and real Windows kernel sandbox tests.
+- **Added Windows GitHub Actions CI**: Covers formatting, frontend build, Rust unit tests, symlink/junction escape checks, and real Windows kernel sandbox tests.
 
 ## [v0.1.0] - 2026-11-24
 
 ### Initial Release
-- **Guided setup & file permissions**: Authorize specific folders or local fixed drives with background Everything filename indexing and on-demand index rebuild.
-- **Dedicated Muse token & file API**: Separate `/agent/v1` endpoints and dedicated `agent-token` (issue, copy, reveal, rotate, revoke) supporting search, list, read, write, and mkdir.
-- **Public tunnels & tray controls**: Tailscale Funnel by default plus Cloudflare quick and named tunnels, tray start/stop controls, access stats and logs, and English / Simplified Chinese UI.
-- **Windows distribution**: Portable ZIP archive, NSIS installer, and `SHA256SUMS.txt`.
+- **Guided setup & file permissions**: Authorize specific folders or local fixed drives with background Everything filename indexing and on-demand rebuild.
+- **Dedicated Muse token & file API**: Separate `/agent/v1` endpoints and `agent-token` lifecycle (issue, copy, locate, rotate, revoke) covering search, list, read, write, and mkdir.
+- **Public tunnels, tray controls & Windows packages**: Tailscale Funnel by default (plus Cloudflare tunnels), tray controls, access logs, English / Simplified Chinese UI, and portable ZIP / NSIS packages.

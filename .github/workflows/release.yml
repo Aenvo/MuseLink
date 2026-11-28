@@ -42,6 +42,10 @@ jobs:
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Validate multilingual changelogs for release tag
+        shell: pwsh
+        run: ./muse-connector/scripts/generate-release-notes.ps1 -ValidateSync -Tag "${{ steps.meta.outputs.tag }}"
+
       - name: Verify updater signing secret
         shell: pwsh
         env:
@@ -377,9 +381,34 @@ jobs:
           $tag = "${{ needs.build-windows.outputs.tag }}"
           $version = "${{ needs.build-windows.outputs.version }}"
           $assetsDir = Join-Path $env:RUNNER_TEMP "release-final-$version"
+          $ghNotesPath = Join-Path $env:RUNNER_TEMP "gh-generated-notes-$version.md"
+          $releaseNotesPath = Join-Path $env:RUNNER_TEMP "release-notes-$version.md"
+          $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+          $prevErrorAction = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          $generatedLines = & gh api --method POST "repos/${{ github.repository }}/releases/generate-notes" -f "tag_name=$tag" --jq .body 2>$null
+          $apiExit = $LASTEXITCODE
+          $ErrorActionPreference = $prevErrorAction
+          if ($apiExit -eq 0) {
+            $generatedBody = (($generatedLines | ForEach-Object { "$_" }) -join "`n").Trim()
+            if (-not [string]::IsNullOrWhiteSpace($generatedBody)) {
+              [IO.File]::WriteAllText($ghNotesPath, $generatedBody + "`n", $utf8NoBom)
+            }
+          } else {
+            Write-Warning "Failed to fetch GitHub generated release notes for $tag (exit $apiExit); continuing with CHANGELOG-based notes only."
+          }
+          $notesArgs = @{
+            Tag = $tag
+            OutputPath = $releaseNotesPath
+            Repository = "${{ github.repository }}"
+          }
+          if (Test-Path -LiteralPath $ghNotesPath -PathType Leaf) {
+            $notesArgs['GeneratedNotesPath'] = $ghNotesPath
+          }
+          & ./muse-connector/scripts/generate-release-notes.ps1 @notesArgs
           $assets = Get-ChildItem -LiteralPath $assetsDir -File | ForEach-Object { $_.FullName }
-          gh release create $tag --draft --title "MuseLink $tag" --generate-notes @assets
+          gh release create $tag --draft --title "MuseLink $tag" --notes-file $releaseNotesPath @assets
           if ($LASTEXITCODE -ne 0) {
             throw "gh release create failed with exit code $LASTEXITCODE."
           }
-          Write-Host "Draft release $tag created with Windows + Linux + macOS assets. Review and Publish when ready."
+          Write-Host "Draft release $tag created with multilingual release notes and Windows + Linux + macOS assets. Review and publish when ready."
