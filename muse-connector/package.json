@@ -2,7 +2,7 @@
   "name": "muse-connector",
   "private": true,
   "version": "0.3.2",
-  "description": "MuseLink desktop UI for connecting Muse to authorized local files on Windows, Linux, and macOS, plus optional Windows sandboxed commands.",
+  "description": "MuseLink desktop UI for remotely connecting Muse to authorized files across multiple Windows, Linux, and macOS devices, plus optional Windows sandboxed commands.",
   "license": "MIT",
   "homepage": "https://github.com/Aenvo/MuseLink",
   "repository": {
