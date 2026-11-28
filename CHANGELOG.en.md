@@ -4,7 +4,7 @@
 
 This changelog tracks feature updates, security hardening, and bug fixes for MuseLink, kept in sync with repository pushes and releases.
 
-## [Unreleased]
+## [v0.3.3] - 2026-11-28
 
 ### Improvements & Added
 - **Added Tailscale Serve (Tailnet-only) connection provider and configurable HTTPS ports**: When Muse and the target device share the same Tailnet, switch to Tailscale Serve under **Connection** for managed private HTTPS forwarding without degraded warnings, and choose an alternate HTTPS port when port 443 is occupied by other services.

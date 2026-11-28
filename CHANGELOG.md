@@ -4,7 +4,7 @@
 
 本文件记录 MuseLink / Muse连接器 的功能更新、安全加固与问题修复，随版本发布与推送同步维护。
 
-## [Unreleased]
+## [v0.3.3] - 2026-11-28
 
 ### 优化与新增
 - **新增 Tailscale Serve（仅 Tailnet 内网）连接方式与可配置 HTTPS 端口**：当 Muse 与目标设备位于同一 Tailnet 时，可在「连接」页切换为 Tailscale Serve 自动托管纯内网 HTTPS 转发、消除手动配置 `tailscale serve` 的黄色报警，并支持自定义对外 HTTPS 端口以避开 443 端口冲突。

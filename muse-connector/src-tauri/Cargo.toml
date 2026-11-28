@@ -1,6 +1,6 @@
 [package]
 name = "muse-connector"
-version = "0.3.2"
+version = "0.3.3"
 description = "MuseLink remotely connects Muse to authorized files across multiple Windows, Linux, and macOS devices, plus optional Windows sandboxed commands."
 license = "MIT"
 repository = "https://github.com/Aenvo/MuseLink"
