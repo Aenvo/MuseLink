@@ -7,6 +7,7 @@
 ## [Unreleased]
 
 ### 安全与稳定性加固
+- **exec 子进程不再继承凭证类环境变量**：构建沙箱子进程环境块时，按变量名剔除疑似凭证的环境变量（精确清单如 `GITHUB_TOKEN`、`AWS_SECRET_ACCESS_KEY`、`OPENAI_API_KEY` 等，以及名称包含 `TOKEN` / `SECRET` / `PASSWORD` / `API_KEY` / `PRIVATE_KEY` / `ACCESS_KEY` / `CREDENTIAL` 等子串的变量，大小写不敏感），避免宿主进程环境中的第三方令牌与密钥被代理执行的命令读取；仅按名称判定，不读取或记录变量值，`PATH`、`SYSTEMROOT`、`TEMP` 等运行必需变量不受影响。
 - **扩大默认读取保护范围**：`.npmrc`、`.pypirc` 由仅写保护升级为读 / 搜索 / 写全面保护；新增对 `.docker`、`.kube`、`.azure`、gcloud 凭证目录以及各平台浏览器凭证库的默认保护（Windows：Chrome / Edge 的 `User Data` 与 Firefox 的 `Profiles`；macOS：Application Support 下的 Chrome / Edge / Firefox，配合既有 `~/Library/Keychains` 保护；Linux：`google-chrome` / `chromium` / `microsoft-edge` 与 `.mozilla/firefox`），避免磁盘授权或主目录授权时令牌与登录数据被读取。
 
 ## [v0.3.1] - 2026-11-27

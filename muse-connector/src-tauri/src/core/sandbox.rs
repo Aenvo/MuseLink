@@ -890,6 +890,7 @@ fn build_clean_env(temp_dir: &Path) -> Vec<u16> {
         if upper.starts_with("MUSE_CONNECTOR_")
             || upper.starts_with("MUSE_LINK_")
             || upper.contains("AGENT_TOKEN")
+            || super::env_scrub::is_sensitive_env_name(&upper)
         {
             continue;
         }

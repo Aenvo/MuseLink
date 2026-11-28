@@ -3,6 +3,7 @@ pub(crate) mod access_runtime;
 pub mod api;
 pub mod audit;
 pub mod config;
+pub(crate) mod env_scrub;
 #[cfg(windows)]
 mod everything;
 pub(crate) mod exec_policy;

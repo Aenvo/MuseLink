@@ -7,6 +7,7 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ## [Unreleased]
 
 ### Security & Stability
+- **Exec child processes no longer inherit credential-like environment variables**: When building the sandbox child-process environment block, variables whose names look like credentials are now stripped — an exact list (such as `GITHUB_TOKEN`, `AWS_SECRET_ACCESS_KEY`, `OPENAI_API_KEY`) plus any name containing `TOKEN` / `SECRET` / `PASSWORD` / `API_KEY` / `PRIVATE_KEY` / `ACCESS_KEY` / `CREDENTIAL`, matched case-insensitively — so third-party tokens and keys present in the host process environment cannot be read by agent-executed commands. Matching is name-based only; values are never inspected or logged, and essentials such as `PATH`, `SYSTEMROOT`, and `TEMP` are unaffected.
 - **Expanded default read protection**: `.npmrc` and `.pypirc` are promoted from write-only protection to full protection (read / search / write). Added default protection for `.docker`, `.kube`, `.azure`, gcloud credential directories, and per-platform browser credential stores (Windows: Chrome / Edge `User Data` and Firefox `Profiles`; macOS: Chrome / Edge / Firefox under Application Support alongside existing `~/Library/Keychains` protection; Linux: `google-chrome` / `chromium` / `microsoft-edge` and `.mozilla/firefox`), so tokens and login data cannot be read even under disk-wide or home-folder grants.
 
 ## [v0.3.1] - 2026-11-27
