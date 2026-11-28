@@ -7,6 +7,7 @@
 ## [Unreleased]
 
 ### 安全与稳定性加固
+- **加固命令审批的混淆与下载摇篮检测**：PowerShell `-EncodedCommand` 的任意无歧义前缀缩写（如 `-e`、`-en`、`-enco`，含已知缩写 `-ec`）均按混淆命令处理并强制单次确认；新增下载摇篮（download cradle）检测，`Net.WebClient` 的 `DownloadString` / `DownloadData` / `DownloadFile` 以及 `Invoke-WebRequest` / `curl` / `wget` 下载内容经管道或 `iex` 直接执行的命令同样强制单次确认，单纯下载到文件不受影响。
 - **扩大默认读取保护范围**：`.npmrc`、`.pypirc` 由仅写保护升级为读 / 搜索 / 写全面保护；新增对 `.docker`、`.kube`、`.azure`、gcloud 凭证目录以及各平台浏览器凭证库的默认保护（Windows：Chrome / Edge 的 `User Data` 与 Firefox 的 `Profiles`；macOS：Application Support 下的 Chrome / Edge / Firefox，配合既有 `~/Library/Keychains` 保护；Linux：`google-chrome` / `chromium` / `microsoft-edge` 与 `.mozilla/firefox`），避免磁盘授权或主目录授权时令牌与登录数据被读取。
 
 ## [v0.3.1] - 2026-11-27

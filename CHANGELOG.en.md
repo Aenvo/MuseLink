@@ -7,6 +7,7 @@ This changelog tracks feature updates, security hardening, and bug fixes for Mus
 ## [Unreleased]
 
 ### Security & Stability
+- **Hardened obfuscation and download-cradle detection in command approval**: Any unambiguous prefix abbreviation of PowerShell `-EncodedCommand` (such as `-e`, `-en`, `-enco`, plus the known abbreviation `-ec`) is now treated as an obfuscated command and always requires single confirmation; added download-cradle detection so `Net.WebClient` `DownloadString` / `DownloadData` / `DownloadFile` cradles and content downloaded via `Invoke-WebRequest` / `curl` / `wget` that is piped to an interpreter or executed via `iex` also always require single confirmation, while plain downloads to a file are unaffected.
 - **Expanded default read protection**: `.npmrc` and `.pypirc` are promoted from write-only protection to full protection (read / search / write). Added default protection for `.docker`, `.kube`, `.azure`, gcloud credential directories, and per-platform browser credential stores (Windows: Chrome / Edge `User Data` and Firefox `Profiles`; macOS: Chrome / Edge / Firefox under Application Support alongside existing `~/Library/Keychains` protection; Linux: `google-chrome` / `chromium` / `microsoft-edge` and `.mozilla/firefox`), so tokens and login data cannot be read even under disk-wide or home-folder grants.
 
 ## [v0.3.1] - 2026-11-27
